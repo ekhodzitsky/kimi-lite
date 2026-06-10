@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
@@ -23,15 +24,27 @@ type SQLite struct {
 	db *sql.DB
 }
 
-// NewSQLite opens (or creates) a SQLite database at dbPath and runs migrations.
-func NewSQLite(dbPath string) (*SQLite, error) {
+// sqliteDSN builds a properly escaped SQLite connection string.
+func sqliteDSN(dbPath string) string {
 	q := url.Values{}
 	q.Set("_fk", "1")
 	if dbPath == ":memory:" {
 		q.Set("cache", "shared")
+		return dbPath + "?" + q.Encode()
 	}
-	u := url.URL{Scheme: "file", Opaque: dbPath, RawQuery: q.Encode()}
-	db, err := sql.Open("sqlite", u.String())
+	u := url.URL{Scheme: "file", Path: dbPath, RawQuery: q.Encode()}
+	dsn := u.String()
+	// url.URL adds "//" for relative paths, which SQLite interprets as an
+	// authority component. Strip it to produce the valid file:path form.
+	if !filepath.IsAbs(dbPath) {
+		dsn = "file:" + u.EscapedPath() + "?" + u.RawQuery
+	}
+	return dsn
+}
+
+// NewSQLite opens (or creates) a SQLite database at dbPath and runs migrations.
+func NewSQLite(dbPath string) (*SQLite, error) {
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
