@@ -505,6 +505,12 @@ func TestIsBlockedHost(t *testing.T) {
 		{"172.16.0.1", true},
 		{"192.168.1.1", true},
 		{"169.254.1.1", true},
+		{"169.254.169.254", true},
+		{"100.64.0.1", true},
+		{"fd12:3456::1", true},
+		{"fc00::1", true},
+		{"fe80::1", true},
+		{"::ffff:10.0.0.1", true},
 		{"example.com", false},
 		{"8.8.8.8", false},
 	}

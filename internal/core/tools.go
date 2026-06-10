@@ -459,31 +459,14 @@ func isBlockedHost(hostname string) bool {
 	if ip == nil {
 		return false
 	}
-	ipv4 := ip.To4()
-	if ipv4 != nil {
-		// 127.x.x.x
-		if ipv4[0] == 127 {
-			return true
-		}
-		// 10.x.x.x
-		if ipv4[0] == 10 {
-			return true
-		}
-		// 172.16-31.x.x
-		if ipv4[0] == 172 && ipv4[1] >= 16 && ipv4[1] <= 31 {
-			return true
-		}
-		// 192.168.x.x
-		if ipv4[0] == 192 && ipv4[1] == 168 {
-			return true
-		}
-		// 169.254.x.x
-		if ipv4[0] == 169 && ipv4[1] == 254 {
-			return true
-		}
-	}
-	if ip.IsLoopback() || ip.IsUnspecified() {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return true
+	}
+	// CGNAT 100.64.0.0/10 is not covered by IsPrivate.
+	if ipv4 := ip.To4(); ipv4 != nil {
+		if ipv4[0] == 100 && ipv4[1] >= 64 && ipv4[1] <= 127 {
+			return true
+		}
 	}
 	return false
 }
