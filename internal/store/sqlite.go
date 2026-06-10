@@ -55,6 +55,13 @@ func NewSQLite(dbPath string) (*SQLite, error) {
 		return nil, fmt.Errorf("run initial schema: %w", err)
 	}
 
+	// Migrate: add tool_call_id column if missing (schema v1 -> v2).
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN tool_call_id TEXT`); err != nil {
+		// SQLite returns an error if the column already exists; ignore it.
+		// We cannot use IF NOT EXISTS with ADD COLUMN, so we rely on the error.
+		_ = err
+	}
+
 	// Mark any orphaned TurnStreaming records as TurnError from previous crashes.
 	if _, err := db.Exec(`UPDATE turns SET state = ?, error = 'process crashed during streaming' WHERE state = ?`, api.TurnError.String(), api.TurnStreaming.String()); err != nil {
 		_ = db.Close()
@@ -186,8 +193,8 @@ func (s *SQLite) AppendMessage(ctx context.Context, sessionID string, msg api.Me
 	}
 
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages (id, session_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		msg.ID, sessionID, string(msg.Role), msg.Content, string(toolCallsJSON), msg.CreatedAt.UTC(),
+		`INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, sessionID, string(msg.Role), msg.Content, msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
 	); err != nil {
 		return fmt.Errorf("insert message: %w", err)
 	}
@@ -203,7 +210,7 @@ func (s *SQLite) GetMessages(ctx context.Context, sessionID string, limit int) (
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, role, content, tool_calls, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit,
+		`SELECT id, role, content, tool_call_id, tool_calls, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get messages: %w", err)
@@ -215,7 +222,7 @@ func (s *SQLite) GetMessages(ctx context.Context, sessionID string, limit int) (
 		var msg api.Message
 		var roleStr string
 		var toolCallsJSON string
-		if err := rows.Scan(&msg.ID, &roleStr, &msg.Content, &toolCallsJSON, &msg.CreatedAt); err != nil {
+		if err := rows.Scan(&msg.ID, &roleStr, &msg.Content, &msg.ToolCallID, &toolCallsJSON, &msg.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		msg.Role = api.Role(roleStr)
@@ -264,8 +271,8 @@ func (s *SQLite) ReplaceMessages(ctx context.Context, sessionID string, msgs []a
 			return fmt.Errorf("marshal tool calls: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO messages (id, session_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			msg.ID, sessionID, string(msg.Role), msg.Content, string(toolCallsJSON), msg.CreatedAt.UTC(),
+			`INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			msg.ID, sessionID, string(msg.Role), msg.Content, msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
 		); err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}

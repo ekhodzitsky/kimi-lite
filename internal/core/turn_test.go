@@ -483,3 +483,86 @@ func TestTurnManager_RunTurn_NoConfig(t *testing.T) {
 		t.Fatalf("expected 1 chunk, got %d", len(contents))
 	}
 }
+
+func TestTurnManager_ToolCallID_PreservedAcrossRounds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	var secondRoundMessages []api.Message
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 2 {
+				secondRoundMessages = append([]api.Message(nil), messages...)
+			}
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Content: "Let me check"},
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "call-abc", Name: "read_file", Arguments: `{"path":"/tmp/test.txt"}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Content: "Done"},
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "file content"}, nil
+		},
+		defs:          []api.ToolDefinition{{Name: "read_file", Description: "read"}},
+		readOnlyTools: map[string]bool{"read_file": true},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range outCh {
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	// Find the tool message.
+	var toolMsg *api.Message
+	for i := range msgs {
+		if msgs[i].Role == api.RoleTool {
+			toolMsg = &msgs[i]
+			break
+		}
+	}
+	if toolMsg == nil {
+		t.Fatal("expected a tool message in store")
+	}
+	if toolMsg.ToolCallID != "call-abc" {
+		t.Errorf("tool message ToolCallID = %q, want call-abc", toolMsg.ToolCallID)
+	}
+
+	// The second ChatStream must receive the tool message with the matching tool_call_id.
+	if len(secondRoundMessages) == 0 {
+		t.Fatal("expected second round messages to be captured")
+	}
+	var found bool
+	for _, m := range secondRoundMessages {
+		if m.Role == api.RoleTool && m.ToolCallID == "call-abc" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("second round ChatStream did not receive tool message with ToolCallID=call-abc")
+	}
+}

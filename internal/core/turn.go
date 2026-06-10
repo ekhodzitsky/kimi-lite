@@ -256,10 +256,11 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 				toolContent = fmt.Sprintf("Error: %s", result.Error)
 			}
 			toolMsg := api.Message{
-				ID:        idgen.GenerateID(),
-				Role:      api.RoleTool,
-				Content:   toolContent,
-				CreatedAt: time.Now().UTC(),
+				ID:         idgen.GenerateID(),
+				Role:       api.RoleTool,
+				Content:    toolContent,
+				ToolCallID: result.CallID,
+				CreatedAt:  time.Now().UTC(),
 			}
 			_ = tm.store.AppendMessage(ctx, sessionID, toolMsg)
 		}

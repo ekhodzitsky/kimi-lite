@@ -593,7 +593,7 @@ func TestClientBuildChatRequest(t *testing.T) {
 		{Role: api.RoleAssistant, Content: "Hi!", ToolCalls: []api.ToolCall{
 			{ID: "call_1", Name: "foo", Arguments: `{}`},
 		}},
-		{Role: api.RoleTool, Content: "result", ID: "call_1"},
+		{Role: api.RoleTool, Content: "result", ID: "msg-4", ToolCallID: "call_1"},
 	}
 
 	tools := []api.ToolDefinition{
@@ -833,5 +833,38 @@ func TestLookupModel(t *testing.T) {
 				t.Errorf("Provider = %q, want %q", info.Provider, tt.wantProvider)
 			}
 		})
+	}
+}
+
+func TestBuildChatRequest_ToolCallID(t *testing.T) {
+	t.Parallel()
+
+	c := NewClient(api.LLMConfig{BaseURL: "https://example.com", APIKey: "key", Model: "m"}, nil)
+
+	messages := []api.Message{
+		{ID: "msg-1", Role: api.RoleAssistant, Content: "let me check", ToolCalls: []api.ToolCall{{ID: "call-abc", Name: "read_file", Arguments: `{}`}}},
+		{ID: "msg-2", Role: api.RoleTool, Content: "hello", ToolCallID: "call-abc"},
+		{ID: "msg-3", Role: api.RoleTool, Content: "world", ToolCallID: ""},
+	}
+
+	req := c.buildChatRequest(messages, nil, false)
+
+	if len(req.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(req.Messages))
+	}
+
+	// Assistant message should NOT have tool_call_id.
+	if req.Messages[0].ToolCallID != "" {
+		t.Errorf("assistant message tool_call_id = %q, want empty", req.Messages[0].ToolCallID)
+	}
+
+	// Tool message with matching call ID must forward it.
+	if req.Messages[1].ToolCallID != "call-abc" {
+		t.Errorf("tool message tool_call_id = %q, want call-abc", req.Messages[1].ToolCallID)
+	}
+
+	// Tool message with empty call ID should remain empty.
+	if req.Messages[2].ToolCallID != "" {
+		t.Errorf("tool message tool_call_id = %q, want empty", req.Messages[2].ToolCallID)
 	}
 }

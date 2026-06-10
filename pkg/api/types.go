@@ -25,11 +25,12 @@ const (
 
 // Message represents a single message in a conversation.
 type Message struct {
-	ID        string     `json:"id"`
-	Role      Role       `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID         string     `json:"id"`
+	Role       Role       `json:"role"`
+	Content    string     `json:"content"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 // ToolCall represents a single tool invocation requested by the LLM.

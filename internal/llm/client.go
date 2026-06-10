@@ -330,7 +330,7 @@ func (c *Client) buildChatRequest(messages []api.Message, tools []api.ToolDefini
 			Content: msg.Content,
 		}
 		if msg.Role == api.RoleTool {
-			cm.ToolCallID = msg.ID
+			cm.ToolCallID = msg.ToolCallID
 		}
 		if len(msg.ToolCalls) > 0 {
 			cm.ToolCalls = make([]toolCall, 0, len(msg.ToolCalls))
