@@ -266,7 +266,7 @@ type Config struct {
 // LLMConfig holds LLM provider configuration.
 type LLMConfig struct {
 	Provider string
-	APIKey   string
+	APIKey   string `json:"-"`
 	Model    string
 	BaseURL  string
 	Timeout  time.Duration
