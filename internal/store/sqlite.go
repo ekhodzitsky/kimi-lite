@@ -42,6 +42,62 @@ func sqliteDSN(dbPath string) string {
 	return dsn
 }
 
+// migrateTurnsStateColumn recreates the turns table with state as TEXT if it
+// currently has INTEGER type. SQLite is dynamically typed, so existing string
+// data is preserved during the copy.
+func migrateTurnsStateColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(turns)`)
+	if err != nil {
+		return fmt.Errorf("inspect turns table: %w", err)
+	}
+	defer rows.Close()
+
+	needsMigrate := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "state" && typ == "INTEGER" {
+			needsMigrate = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table_info: %w", err)
+	}
+	if !needsMigrate {
+		return nil
+	}
+
+	_, err = db.Exec(`
+		ALTER TABLE turns RENAME TO turns_old;
+		CREATE TABLE turns (
+			id         TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			state      TEXT NOT NULL,
+			input      TEXT NOT NULL DEFAULT '',
+			response   TEXT NOT NULL DEFAULT '',
+			tool_calls TEXT,
+			results    TEXT,
+			error      TEXT,
+			started_at DATETIME NOT NULL,
+			ended_at   DATETIME,
+			PRIMARY KEY (id, session_id),
+			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+		);
+		INSERT INTO turns SELECT * FROM turns_old;
+		DROP TABLE turns_old;
+		CREATE INDEX idx_turns_session_started ON turns(session_id, started_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("recreate turns table: %w", err)
+	}
+	return nil
+}
+
 // NewSQLite opens (or creates) a SQLite database at dbPath and runs migrations.
 func NewSQLite(dbPath string) (*SQLite, error) {
 	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
@@ -73,6 +129,12 @@ func NewSQLite(dbPath string) (*SQLite, error) {
 		// SQLite returns an error if the column already exists; ignore it.
 		// We cannot use IF NOT EXISTS with ADD COLUMN, so we rely on the error.
 		_ = err
+	}
+
+	// Migrate: change turns.state from INTEGER to TEXT if needed (schema v2 -> v3).
+	if err := migrateTurnsStateColumn(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate turns.state column: %w", err)
 	}
 
 	// Mark any orphaned TurnStreaming records as TurnError from previous crashes.

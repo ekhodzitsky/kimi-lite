@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id, 
 CREATE TABLE IF NOT EXISTS turns (
     id         TEXT NOT NULL,
     session_id TEXT NOT NULL,
-    state      INTEGER NOT NULL,
+    state      TEXT NOT NULL,
     input      TEXT NOT NULL DEFAULT '',
     response   TEXT NOT NULL DEFAULT '',
     tool_calls TEXT,
