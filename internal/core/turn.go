@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
@@ -28,6 +29,7 @@ type TurnManager struct {
 	pendingCalls []api.ToolCall
 	approvalCh   chan map[string]api.ApprovalDecision
 	wg           sync.WaitGroup
+	running      atomic.Bool
 }
 
 // NewTurnManager creates a new TurnManager.
@@ -91,7 +93,20 @@ func (tm *TurnManager) Wait() {
 
 // RunTurn executes a complete turn for the given session and user input.
 // It returns a channel that streams response content chunks.
+// Returns an error if a turn is already in progress.
 func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan string, error) {
+	if !tm.running.CompareAndSwap(false, true) {
+		return nil, fmt.Errorf("turn already in progress")
+	}
+	outCh, err := tm.startTurn(ctx, sessionID, input)
+	if err != nil {
+		tm.running.Store(false)
+		return nil, err
+	}
+	return outCh, nil
+}
+
+func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input string) (<-chan string, error) {
 	if tm.cfg != nil && tm.cfg.Get() != nil {
 		maxTurns := tm.cfg.Get().Behavior.MaxTurns
 		if maxTurns > 0 {
@@ -172,6 +187,7 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 }
 
 func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn, messages []api.Message, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, outCh chan string, msgLimit int) {
+	defer tm.running.Store(false)
 	defer tm.wg.Done()
 	defer close(outCh)
 

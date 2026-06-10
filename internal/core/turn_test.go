@@ -566,3 +566,43 @@ func TestTurnManager_ToolCallID_PreservedAcrossRounds(t *testing.T) {
 		t.Errorf("second round ChatStream did not receive tool message with ToolCallID=call-abc")
 	}
 }
+
+func TestTurnManager_RunTurn_Overlapping(t *testing.T) {
+	t.Parallel()
+
+	store := newMockStore()
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "hello"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+
+	ctx := context.Background()
+	ch1, err := tm.RunTurn(ctx, "sess-1", "first")
+	if err != nil {
+		t.Fatalf("first RunTurn: %v", err)
+	}
+
+	// Second RunTurn while first is still active should fail.
+	_, err = tm.RunTurn(ctx, "sess-1", "second")
+	if err == nil {
+		t.Fatal("expected error for overlapping RunTurn, got nil")
+	}
+	if !strings.Contains(err.Error(), "already in progress") {
+		t.Errorf("error = %q, want containing 'already in progress'", err.Error())
+	}
+
+	// Consume first stream to completion.
+	for range ch1 {
+	}
+
+	// After completion, a new RunTurn should succeed.
+	ch2, err := tm.RunTurn(ctx, "sess-1", "third")
+	if err != nil {
+		t.Fatalf("RunTurn after completion: %v", err)
+	}
+	for range ch2 {
+	}
+}
