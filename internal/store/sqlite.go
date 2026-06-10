@@ -28,6 +28,10 @@ type SQLite struct {
 func sqliteDSN(dbPath string) string {
 	q := url.Values{}
 	q.Set("_fk", "1")
+	// Connection-scoped PRAGMAs via the driver _pragma DSN key.
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "synchronous(NORMAL)")
 	if dbPath == ":memory:" {
 		q.Set("cache", "shared")
 		return dbPath + "?" + q.Encode()
