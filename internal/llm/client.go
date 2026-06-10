@@ -70,7 +70,7 @@ func (c *Client) Chat(ctx context.Context, messages []api.Message, tools []api.T
 	}
 
 	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("empty response from API")
+		return nil, &api.APIError{StatusCode: http.StatusOK, Message: "empty response from API"}
 	}
 
 	choice := resp.Choices[0].Message
@@ -235,7 +235,7 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			slog.Debug("LLM server error", "status", resp.StatusCode, "body", string(respBody))
-			lastErr = fmt.Errorf("server error %d", resp.StatusCode)
+			lastErr = &api.APIError{StatusCode: resp.StatusCode, Message: "server error", Body: string(respBody)}
 			continue
 		}
 
@@ -243,7 +243,7 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			slog.Debug("LLM client error", "status", resp.StatusCode, "body", string(respBody))
-			return nil, fmt.Errorf("client error %d", resp.StatusCode)
+			return nil, &api.APIError{StatusCode: resp.StatusCode, Message: "client error", Body: string(respBody)}
 		}
 
 		return resp, nil

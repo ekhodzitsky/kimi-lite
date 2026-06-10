@@ -85,15 +85,16 @@ func TestClientChat(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		response       interface{}
-		statusCode     int
-		messages       []api.Message
-		tools          []api.ToolDefinition
-		wantContent    string
-		wantToolCalls  []api.ToolCall
-		wantErr        bool
-		wantErrContain string
+		name             string
+		response         interface{}
+		statusCode       int
+		messages         []api.Message
+		tools            []api.ToolDefinition
+		wantContent      string
+		wantToolCalls    []api.ToolCall
+		wantErr          bool
+		wantErrContain   string
+		wantAPIErrStatus int
 	}{
 		{
 			name: "simple response",
@@ -164,20 +165,20 @@ func TestClientChat(t *testing.T) {
 			},
 		},
 		{
-			name:           "client error",
-			response:       map[string]string{"error": "invalid request"},
-			statusCode:     http.StatusBadRequest,
-			messages:       []api.Message{{Role: api.RoleUser, Content: "Hi"}},
-			wantErr:        true,
-			wantErrContain: "client error 400",
+			name:             "client error",
+			response:         map[string]string{"error": "invalid request"},
+			statusCode:       http.StatusBadRequest,
+			messages:         []api.Message{{Role: api.RoleUser, Content: "Hi"}},
+			wantErr:          true,
+			wantAPIErrStatus: http.StatusBadRequest,
 		},
 		{
-			name:           "server error then success",
-			response:       map[string]string{"error": "overloaded"},
-			statusCode:     http.StatusServiceUnavailable,
-			messages:       []api.Message{{Role: api.RoleUser, Content: "Hi"}},
-			wantErr:        true,
-			wantErrContain: "max retries exceeded",
+			name:             "server error then success",
+			response:         map[string]string{"error": "overloaded"},
+			statusCode:       http.StatusServiceUnavailable,
+			messages:         []api.Message{{Role: api.RoleUser, Content: "Hi"}},
+			wantErr:          true,
+			wantAPIErrStatus: http.StatusServiceUnavailable,
 		},
 		{
 			name: "empty choices",
@@ -189,10 +190,10 @@ func TestClientChat(t *testing.T) {
 				} `json:"message"`
 				FinishReason string `json:"finish_reason"`
 			}{}},
-			statusCode:     http.StatusOK,
-			messages:       []api.Message{{Role: api.RoleUser, Content: "Hi"}},
-			wantErr:        true,
-			wantErrContain: "empty response",
+			statusCode:       http.StatusOK,
+			messages:         []api.Message{{Role: api.RoleUser, Content: "Hi"}},
+			wantErr:          true,
+			wantAPIErrStatus: http.StatusOK,
 		},
 	}
 
@@ -233,6 +234,14 @@ func TestClientChat(t *testing.T) {
 				}
 				if tt.wantErrContain != "" && !strings.Contains(err.Error(), tt.wantErrContain) {
 					t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErrContain)
+				}
+				if tt.wantAPIErrStatus != 0 {
+					var apiErr *api.APIError
+					if !errors.As(err, &apiErr) {
+						t.Errorf("expected *api.APIError in error chain, got %T", err)
+					} else if apiErr.StatusCode != tt.wantAPIErrStatus {
+						t.Errorf("apiErr.StatusCode = %d, want %d", apiErr.StatusCode, tt.wantAPIErrStatus)
+					}
 				}
 				return
 			}
@@ -350,12 +359,13 @@ func TestClientChatStream(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		streamData     string
-		wantContents   []string
-		wantDone       bool
-		wantErr        bool
-		wantErrContain string
+		name             string
+		streamData       string
+		wantContents     []string
+		wantDone         bool
+		wantErr          bool
+		wantErrContain   string
+		wantAPIErrStatus int
 	}{
 		{
 			name: "simple stream",
@@ -394,10 +404,10 @@ data: [DONE]
 			wantDone:     true,
 		},
 		{
-			name:           "stream server error",
-			streamData:     ``,
-			wantErr:        true,
-			wantErrContain: "client error 401",
+			name:             "stream server error",
+			streamData:       ``,
+			wantErr:          true,
+			wantAPIErrStatus: http.StatusUnauthorized,
 		},
 	}
 
@@ -432,6 +442,14 @@ data: [DONE]
 				}
 				if tt.wantErrContain != "" && !strings.Contains(err.Error(), tt.wantErrContain) {
 					t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErrContain)
+				}
+				if tt.wantAPIErrStatus != 0 {
+					var apiErr *api.APIError
+					if !errors.As(err, &apiErr) {
+						t.Errorf("expected *api.APIError in error chain, got %T", err)
+					} else if apiErr.StatusCode != tt.wantAPIErrStatus {
+						t.Errorf("apiErr.StatusCode = %d, want %d", apiErr.StatusCode, tt.wantAPIErrStatus)
+					}
 				}
 				return
 			}
