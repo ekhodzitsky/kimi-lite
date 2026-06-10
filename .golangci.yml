@@ -19,10 +19,6 @@ linters:
     - errchkjson
     - bodyclose
     - noctx
-  settings:
-    misspell:
-      locale: US
-
 formatters:
   enable:
     - gofmt
