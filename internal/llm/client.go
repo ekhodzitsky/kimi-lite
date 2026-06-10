@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -94,6 +95,29 @@ func (c *Client) Chat(ctx context.Context, messages []api.Message, tools []api.T
 	return msg, nil
 }
 
+// sortedToolCalls extracts tool calls from the accumulator in index order.
+func sortedToolCalls(accumulator map[int]*rawToolCall) []api.ToolCall {
+	if len(accumulator) == 0 {
+		return nil
+	}
+	indices := make([]int, 0, len(accumulator))
+	for i := range accumulator {
+		indices = append(indices, i)
+	}
+	sort.Ints(indices)
+
+	calls := make([]api.ToolCall, 0, len(indices))
+	for _, i := range indices {
+		tc := accumulator[i]
+		calls = append(calls, api.ToolCall{
+			ID:        tc.ID,
+			Name:      tc.Name,
+			Arguments: tc.Arguments,
+		})
+	}
+	return calls
+}
+
 // ChatStream sends messages to the LLM and streams the response via a channel.
 // The returned channel is closed when the stream ends or an error occurs.
 // Callers should check chunk.Error for stream errors.
@@ -119,18 +143,8 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 		for {
 			raw, err := reader.readRawChunk(ctx)
 			if err == io.EOF {
-				var finalToolCalls []api.ToolCall
-				for i := 0; i < len(accumulator); i++ {
-					if tc, ok := accumulator[i]; ok {
-						finalToolCalls = append(finalToolCalls, api.ToolCall{
-							ID:        tc.ID,
-							Name:      tc.Name,
-							Arguments: tc.Arguments,
-						})
-					}
-				}
 				select {
-				case ch <- api.StreamChunk{Done: true, ToolCalls: finalToolCalls}:
+				case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator)}:
 				case <-ctx.Done():
 				}
 				break
@@ -157,18 +171,8 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 			}
 
 			if raw.Done {
-				var finalToolCalls []api.ToolCall
-				for i := 0; i < len(accumulator); i++ {
-					if tc, ok := accumulator[i]; ok {
-						finalToolCalls = append(finalToolCalls, api.ToolCall{
-							ID:        tc.ID,
-							Name:      tc.Name,
-							Arguments: tc.Arguments,
-						})
-					}
-				}
 				select {
-				case ch <- api.StreamChunk{Done: true, ToolCalls: finalToolCalls}:
+				case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator)}:
 				case <-ctx.Done():
 				}
 				break

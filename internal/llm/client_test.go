@@ -933,3 +933,69 @@ func TestStreamReader_CancelMidRead_NoRace(t *testing.T) {
 		t.Logf("got error: %v (acceptable)", err)
 	}
 }
+
+func TestSortedToolCalls(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		accumulator map[int]*rawToolCall
+		want        []api.ToolCall
+	}{
+		{
+			name:        "empty",
+			accumulator: map[int]*rawToolCall{},
+			want:        nil,
+		},
+		{
+			name: "contiguous indices",
+			accumulator: map[int]*rawToolCall{
+				0: {Index: 0, ID: "call_1", Name: "read_file"},
+				1: {Index: 1, ID: "call_2", Name: "write_file"},
+			},
+			want: []api.ToolCall{
+				{ID: "call_1", Name: "read_file"},
+				{ID: "call_2", Name: "write_file"},
+			},
+		},
+		{
+			name: "non-contiguous indices",
+			accumulator: map[int]*rawToolCall{
+				0: {Index: 0, ID: "call_1", Name: "read_file"},
+				2: {Index: 2, ID: "call_3", Name: "edit_file"},
+			},
+			want: []api.ToolCall{
+				{ID: "call_1", Name: "read_file"},
+				{ID: "call_3", Name: "edit_file"},
+			},
+		},
+		{
+			name: "reverse order insertion",
+			accumulator: map[int]*rawToolCall{
+				2: {Index: 2, ID: "call_3", Name: "edit_file"},
+				0: {Index: 0, ID: "call_1", Name: "read_file"},
+				1: {Index: 1, ID: "call_2", Name: "write_file"},
+			},
+			want: []api.ToolCall{
+				{ID: "call_1", Name: "read_file"},
+				{ID: "call_2", Name: "write_file"},
+				{ID: "call_3", Name: "edit_file"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sortedToolCalls(tt.accumulator)
+			if len(got) != len(tt.want) {
+				t.Fatalf("len = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("[%d] = %+v, want %+v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
