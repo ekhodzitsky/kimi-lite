@@ -1,0 +1,39 @@
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - prealloc
+    - gosec
+    - rowserrcheck
+    - revive
+    - wrapcheck
+    - errchkjson
+    - bodyclose
+    - noctx
+  settings:
+    misspell:
+      locale: US
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes: github.com/ekhodzitsky/kimi-lite
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - prealloc

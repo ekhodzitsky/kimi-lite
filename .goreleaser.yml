@@ -1,0 +1,82 @@
+version: 2
+
+project_name: kimi-lite
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod verify
+
+builds:
+  - id: kimi-lite
+    binary: kimi-lite
+    main: ./cmd/kimi-lite
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    flags:
+      - -trimpath
+
+archives:
+  - id: kimi-lite
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    format_overrides:
+      - goos: linux
+        formats:
+          - tar.gz
+      - goos: darwin
+        formats:
+          - zip
+    files:
+      - LICENSE*
+      - README*
+      - CHANGELOG*
+
+checksum:
+  name_template: '{{ .ProjectName }}_{{ .Version }}_checksums.txt'
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: ekhodzitsky
+    name: kimi-lite
+  draft: false
+  prerelease: auto
+
+brews:
+  - name: kimi-lite
+    repository:
+      owner: ekhodzitsky
+      name: homebrew-tap
+    directory: Formula
+    homepage: https://github.com/ekhodzitsky/kimi-lite
+    description: Lightweight AI coding CLI
+    license: MIT
+    test: |
+      system "#{bin}/kimi-lite", "--version"
+    commit_msg_template: "Brew formula update for {{ .ProjectName }} version {{ .Tag }}"

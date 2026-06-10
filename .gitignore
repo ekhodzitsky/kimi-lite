@@ -1,0 +1,17 @@
+# Binaries
+bin/
+*.exe
+*.test
+*.out
+
+# Dependencies
+vendor/
+
+# IDE
+.idea/
+.vscode/
+
+# Distribution
+dist/
+coverage.out
+.DS_Store
