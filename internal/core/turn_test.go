@@ -450,6 +450,41 @@ func TestTurnManager_CurrentTurn_Nil(t *testing.T) {
 	}
 }
 
+func TestTurnManager_CurrentTurn_DeepCopy(t *testing.T) {
+	t.Parallel()
+	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm.turn = &api.Turn{
+		ID:    "turn-1",
+		State: api.TurnThinking,
+		ToolCalls: []api.ToolCall{
+			{ID: "tc1", Name: "read_file", Arguments: `{}`},
+		},
+		Results: []api.ToolResult{
+			{CallID: "tc1", Name: "read_file", Output: "hello"},
+		},
+	}
+
+	copy1 := tm.CurrentTurn()
+	copy2 := tm.CurrentTurn()
+
+	// Modifying copy1 should not affect copy2 or the original.
+	copy1.ToolCalls[0].Name = "modified"
+	copy1.Results[0].Output = "modified"
+
+	if copy2.ToolCalls[0].Name != "read_file" {
+		t.Errorf("copy2.ToolCalls[0].Name = %q, want read_file", copy2.ToolCalls[0].Name)
+	}
+	if copy2.Results[0].Output != "hello" {
+		t.Errorf("copy2.Results[0].Output = %q, want hello", copy2.Results[0].Output)
+	}
+	if tm.turn.ToolCalls[0].Name != "read_file" {
+		t.Errorf("original.ToolCalls[0].Name = %q, want read_file", tm.turn.ToolCalls[0].Name)
+	}
+	if tm.turn.Results[0].Output != "hello" {
+		t.Errorf("original.Results[0].Output = %q, want hello", tm.turn.Results[0].Output)
+	}
+}
+
 func TestTurnManager_RunTurn_NoConfig(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

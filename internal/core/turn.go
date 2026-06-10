@@ -44,7 +44,7 @@ func NewTurnManager(llm api.LLMClient, tools api.ToolExecutor, approval api.Appr
 	}
 }
 
-// CurrentTurn returns a copy of the current turn.
+// CurrentTurn returns a deep copy of the current turn.
 func (tm *TurnManager) CurrentTurn() *api.Turn {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
@@ -52,6 +52,14 @@ func (tm *TurnManager) CurrentTurn() *api.Turn {
 		return nil
 	}
 	t := *tm.turn
+	if len(tm.turn.ToolCalls) > 0 {
+		t.ToolCalls = make([]api.ToolCall, len(tm.turn.ToolCalls))
+		copy(t.ToolCalls, tm.turn.ToolCalls)
+	}
+	if len(tm.turn.Results) > 0 {
+		t.Results = make([]api.ToolResult, len(tm.turn.Results))
+		copy(t.Results, tm.turn.Results)
+	}
 	return &t
 }
 
