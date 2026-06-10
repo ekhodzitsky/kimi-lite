@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -40,7 +40,7 @@ func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, http
 		shellTimeout = 30 * time.Second
 	}
 	if httpClient == nil {
-		httpClient = newSecureHTTPClient()
+		httpClient = netutil.SecureHTTPClient()
 	}
 	if sandboxRoot != "" {
 		if resolved, err := filepath.EvalSymlinks(sandboxRoot); err == nil {
@@ -56,66 +56,6 @@ func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, http
 			"glob":      true,
 			"grep":      true,
 			"fetch_url": true,
-		},
-	}
-}
-
-func newSecureHTTPClient() *http.Client {
-	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-
-			ips, err := net.DefaultResolver.LookupHost(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("no IPs resolved for host %s", host)
-			}
-
-			for _, ip := range ips {
-				if isBlockedHost(ip) {
-					return nil, fmt.Errorf("blocked host: resolved IP %s for %s is blocked", ip, host)
-				}
-			}
-
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0], port))
-		},
-	}
-
-	return &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
-				return fmt.Errorf("too many redirects")
-			}
-			if isBlockedHost(req.URL.Hostname()) {
-				return fmt.Errorf("redirect to blocked host")
-			}
-
-			ips, err := net.DefaultResolver.LookupHost(req.Context(), req.URL.Hostname())
-			if err != nil {
-				return fmt.Errorf("redirect host lookup failed: %w", err)
-			}
-			if len(ips) == 0 {
-				return fmt.Errorf("redirect host resolved no IPs")
-			}
-			for _, ip := range ips {
-				if isBlockedHost(ip) {
-					return fmt.Errorf("redirect to blocked host: resolved IP %s is blocked", ip)
-				}
-			}
-
-			return nil
 		},
 	}
 }
@@ -498,26 +438,6 @@ func curatedEnv() []string {
 	return filtered
 }
 
-func isBlockedHost(hostname string) bool {
-	if strings.EqualFold(hostname, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(hostname)
-	if ip == nil {
-		return false
-	}
-	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return true
-	}
-	// CGNAT 100.64.0.0/10 is not covered by IsPrivate.
-	if ipv4 := ip.To4(); ipv4 != nil {
-		if ipv4[0] == 100 && ipv4[1] >= 64 && ipv4[1] <= 127 {
-			return true
-		}
-	}
-	return false
-}
-
 func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args map[string]interface{}) (string, string) {
 	urlStr, _ := args["url"].(string)
 	if urlStr == "" {
@@ -530,7 +450,7 @@ func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args map[string]
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", "only http and https URLs are allowed"
 	}
-	if isBlockedHost(u.Hostname()) {
+	if netutil.IsBlockedHost(u.Hostname()) {
 		return "", "URL host is blocked"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)

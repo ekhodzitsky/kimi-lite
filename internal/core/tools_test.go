@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -566,8 +567,8 @@ func TestIsBlockedHost(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
 			t.Parallel()
-			if got := isBlockedHost(tt.host); got != tt.blocked {
-				t.Errorf("isBlockedHost(%q) = %v, want %v", tt.host, got, tt.blocked)
+			if got := netutil.IsBlockedHost(tt.host); got != tt.blocked {
+				t.Errorf("IsBlockedHost(%q) = %v, want %v", tt.host, got, tt.blocked)
 			}
 		})
 	}
@@ -645,7 +646,7 @@ func TestNewSecureHTTPClient_BlocksRedirectToBlockedHost(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newSecureHTTPClient()
+	client := netutil.SecureHTTPClient()
 	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	resp, err := client.Do(req)
 	if err == nil {

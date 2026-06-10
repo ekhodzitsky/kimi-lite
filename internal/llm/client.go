@@ -15,6 +15,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -38,7 +39,9 @@ type Client struct {
 // If httpClient is nil, a default http.Client is used.
 func NewClient(cfg api.LLMConfig, httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = &http.Client{
+			Transport: netutil.SecureTransport(),
+		}
 	}
 	timeout := cfg.Timeout
 	if timeout == 0 {
