@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -866,5 +867,51 @@ func TestBuildChatRequest_ToolCallID(t *testing.T) {
 	// Tool message with empty call ID should remain empty.
 	if req.Messages[2].ToolCallID != "" {
 		t.Errorf("tool message tool_call_id = %q, want empty", req.Messages[2].ToolCallID)
+	}
+}
+
+func TestStreamReader_CancelledContext_ReturnsPromptly(t *testing.T) {
+	t.Parallel()
+
+	pr, _ := io.Pipe()
+	reader := NewStreamReader(pr)
+	defer reader.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := reader.ReadChunk(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestStreamReader_CancelMidRead_NoRace(t *testing.T) {
+	t.Parallel()
+
+	pr, pw := io.Pipe()
+	reader := NewStreamReader(pr)
+	defer reader.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Write a partial SSE event so Scan blocks mid-event.
+	go func() {
+		_, _ = pw.Write([]byte("data: "))
+		// Cancel after the reader is blocked.
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+		// Closing the pipe unblocks the scanner.
+		_ = pw.Close()
+	}()
+
+	_, err := reader.ReadChunk(ctx)
+	if err == nil {
+		t.Fatal("expected an error after cancellation")
+	}
+	// The error may be context.Canceled (checked before readRawChunk)
+	// or an io error from the closed pipe; both are acceptable.
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Logf("got error: %v (acceptable)", err)
 	}
 }
