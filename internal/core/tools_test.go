@@ -655,3 +655,42 @@ func TestBuiltInToolExecutor_Execute_FetchURL_BlocksRedirectToLocalhost(t *testi
 		t.Errorf("expected blocked/redirect error, got: %s", result.Error)
 	}
 }
+
+func TestCuratedEnv(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("HOME", "/home/user")
+	t.Setenv("OPENAI_API_KEY", "sk-secret")
+	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("MY_PASSWORD", "hunter2")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/ssh")
+	t.Setenv("SAFE_VAR", "visible")
+
+	env := curatedEnv()
+	m := make(map[string]string, len(env))
+	for _, e := range env {
+		k, v, _ := strings.Cut(e, "=")
+		m[k] = v
+	}
+
+	if m["PATH"] != "/usr/bin" {
+		t.Errorf("PATH = %q, want /usr/bin", m["PATH"])
+	}
+	if m["HOME"] != "/home/user" {
+		t.Errorf("HOME = %q, want /home/user", m["HOME"])
+	}
+	if m["SAFE_VAR"] != "visible" {
+		t.Errorf("SAFE_VAR = %q, want visible", m["SAFE_VAR"])
+	}
+	if _, ok := m["OPENAI_API_KEY"]; ok {
+		t.Error("OPENAI_API_KEY should be scrubbed")
+	}
+	if _, ok := m["GITHUB_TOKEN"]; ok {
+		t.Error("GITHUB_TOKEN should be scrubbed")
+	}
+	if _, ok := m["MY_PASSWORD"]; ok {
+		t.Error("MY_PASSWORD should be scrubbed")
+	}
+	if _, ok := m["SSH_AUTH_SOCK"]; ok {
+		t.Error("SSH_AUTH_SOCK should be scrubbed")
+	}
+}

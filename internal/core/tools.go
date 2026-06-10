@@ -437,7 +437,7 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args map[string]int
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	cmd.Env = []string{}
+	cmd.Env = curatedEnv()
 	if e.sandboxRoot != "" {
 		cmd.Dir = e.sandboxRoot
 	}
@@ -454,6 +454,40 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args map[string]int
 		return outStr, fmt.Sprintf("shell: %v", err)
 	}
 	return outStr, ""
+}
+
+// secretEnvPatterns lists substrings that indicate an environment variable
+// likely contains sensitive material.
+var secretEnvPatterns = []string{
+	"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL",
+	"API_KEY", "APIKEY", "ACCESS_KEY", "PRIVATE_KEY",
+	"AUTH", "BEARER", "JWT",
+}
+
+// curatedEnv returns a copy of the current process environment with
+// likely-secret variables removed. It preserves PATH, HOME, and other
+// safe variables so that common shell commands work.
+func curatedEnv() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		key, _, _ := strings.Cut(e, "=")
+		upper := strings.ToUpper(key)
+		if strings.Contains(upper, "SSH") {
+			continue
+		}
+		safe := true
+		for _, p := range secretEnvPatterns {
+			if strings.Contains(upper, p) {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 func isBlockedHost(hostname string) bool {
