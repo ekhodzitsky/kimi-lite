@@ -209,10 +209,11 @@ type ToolExecutor interface {
 type ApprovalDecision int
 
 const (
+	// ApprovalNo rejects the tool call. It is the zero value so that
+	// uninitialized ApprovalDecision defaults to the safest choice.
+	ApprovalNo ApprovalDecision = iota
 	// ApprovalYes approves the tool call.
-	ApprovalYes ApprovalDecision = iota
-	// ApprovalNo rejects the tool call.
-	ApprovalNo
+	ApprovalYes
 	// ApprovalAlways always approves this tool.
 	ApprovalAlways
 	// ApprovalDiff requests a diff preview (unimplemented; treated as ApprovalNo).
