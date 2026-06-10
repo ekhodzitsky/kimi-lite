@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -446,6 +447,10 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args map[string]int
 		outStr = outStr[:maxShellOutputSize] + fmt.Sprintf("\n... truncated (%d bytes total)", len(output))
 	}
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
+			return outStr, fmt.Sprintf("shell: exit code %d", exitErr.ExitCode())
+		}
 		return outStr, fmt.Sprintf("shell: %v", err)
 	}
 	return outStr, ""

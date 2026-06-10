@@ -385,6 +385,29 @@ func TestBuiltInToolExecutor_Execute_Shell_MissingCommand(t *testing.T) {
 	}
 }
 
+func TestBuiltInToolExecutor_Execute_Shell_NonZeroExit(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: `{"command":"echo 'build failed'; exit 1"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for non-zero exit")
+	}
+	if !strings.Contains(result.Error, "exit code 1") {
+		t.Errorf("error = %q, want containing 'exit code 1'", result.Error)
+	}
+	if !strings.Contains(result.Output, "build failed") {
+		t.Errorf("output = %q, want containing 'build failed'", result.Output)
+	}
+}
+
 func TestBuiltInToolExecutor_Execute_FetchURL_BlocksLocalhost(t *testing.T) {
 	t.Parallel()
 	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
