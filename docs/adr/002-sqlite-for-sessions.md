@@ -15,7 +15,7 @@ Use SQLite for session persistence.
 ## Rationale
 
 ### Why SQLite?
-- **Zero external dependencies** — embedded in the binary via `mattn/go-sqlite3`
+- **Zero external dependencies** — pure-Go driver (`modernc.org/sqlite`), no CGO required
 - **Single file** — easy to backup, move, inspect
 - **ACID** — reliable transactions for message history
 - **Schema migrations** — simple evolution via embedded SQL files
@@ -26,6 +26,7 @@ Use SQLite for session persistence.
 - **JSON files**: Simple but no ACID, concurrency issues, no querying
 - **BoltDB/bbolt**: Good for key-value but schema evolution is harder
 - **PostgreSQL**: Overkill for a local CLI tool, requires server
+- **mattn/go-sqlite3**: Rejected because it requires CGO, which complicates static cross-compilation and breaks `CGO_ENABLED=0` builds
 
 ## Schema
 
@@ -70,6 +71,6 @@ CREATE TABLE turns (
 - Foreign keys with cascade deletes
 
 ### Negative
-- CGO dependency via `mattn/go-sqlite3` (complicates static cross-compilation slightly)
+- `modernc.org/sqlite` is a larger/slightly slower dependency than the C driver, but pure Go so `CGO_ENABLED=0` static cross-compilation works out of the box
 - Database file can grow large with long conversations
 - No built-in encryption for session data
