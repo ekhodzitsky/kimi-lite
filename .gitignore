@@ -10,8 +10,29 @@ vendor/
 # IDE
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
 
-# Distribution
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution / build artifacts
 dist/
 coverage.out
-.DS_Store
+coverage.html
+*.prof
+*.trace
+
+# Logs
+*.log
+
+# Local environment
+.env
+.env.local
+
+# Development artifacts / internal docs that shouldn't be public
+SECURITY_AUDIT*.md
+docs/audits/
+docs/superpowers/
