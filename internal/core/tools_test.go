@@ -152,6 +152,31 @@ func TestBuiltInToolExecutor_Execute_ReadFile_MissingPath(t *testing.T) {
 	}
 }
 
+func TestBuiltInToolExecutor_Execute_ReadFile_TooLarge(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	largeFile := filepath.Join(tmp, "large.txt")
+	if err := os.WriteFile(largeFile, make([]byte, maxFileReadSize+1), 0644); err != nil {
+		t.Fatalf("create large file: %v", err)
+	}
+
+	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_file",
+		Arguments: fmt.Sprintf(`{"path":"%s"}`, largeFile),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for oversized file")
+	}
+	if !strings.Contains(result.Error, "max read size") {
+		t.Errorf("error = %q, want containing 'max read size'", result.Error)
+	}
+}
+
 func TestBuiltInToolExecutor_Execute_WriteFile(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

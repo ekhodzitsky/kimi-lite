@@ -21,6 +21,7 @@ import (
 
 const (
 	maxFileWriteSize   = 10 * 1024 * 1024 // 10 MB
+	maxFileReadSize    = 10 * 1024 * 1024 // 10 MB
 	maxShellOutputSize = 1024 * 1024      // 1 MB
 )
 
@@ -333,6 +334,13 @@ func (e *BuiltInToolExecutor) execReadFile(args map[string]interface{}) (string,
 	validPath, err := e.validatePath(path)
 	if err != nil {
 		return "", err.Error()
+	}
+	info, err := os.Stat(validPath)
+	if err != nil {
+		return "", fmt.Sprintf("read file: %v", err)
+	}
+	if info.Size() > maxFileReadSize {
+		return "", fmt.Sprintf("file exceeds max read size of %d bytes", maxFileReadSize)
 	}
 	data, err := os.ReadFile(validPath)
 	if err != nil {
