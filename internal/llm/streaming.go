@@ -19,8 +19,15 @@ type StreamReader struct {
 
 // NewStreamReader creates a new StreamReader from an io.ReadCloser.
 func NewStreamReader(rc io.ReadCloser) *StreamReader {
+	scanner := bufio.NewScanner(rc)
+	// Raise the per-token limit from the default 64 KB to 1 MB so that
+	// large SSE JSON payloads (e.g. tool-call definitions) do not cause
+	// bufio.ErrTooLong.
+	const maxTokenSize = 1024 * 1024
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, maxTokenSize)
 	return &StreamReader{
-		scanner: bufio.NewScanner(rc),
+		scanner: scanner,
 		reader:  rc,
 	}
 }

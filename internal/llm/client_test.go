@@ -999,3 +999,31 @@ func TestSortedToolCalls(t *testing.T) {
 		})
 	}
 }
+
+func TestStreamReader_LargePayload(t *testing.T) {
+	t.Parallel()
+
+	// Build a payload larger than the default 64 KB scanner limit.
+	largeContent := strings.Repeat("x", 128*1024)
+	payload := fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, largeContent)
+	input := "data: " + payload + "\n\ndata: [DONE]\n\n"
+
+	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
+	defer reader.Close()
+
+	chunk, err := reader.ReadChunk(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chunk.Content != largeContent {
+		t.Errorf("content length = %d, want %d", len(chunk.Content), len(largeContent))
+	}
+
+	chunk, err = reader.ReadChunk(context.Background())
+	if err != io.EOF {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+	if !chunk.Done {
+		t.Error("expected Done = true")
+	}
+}
