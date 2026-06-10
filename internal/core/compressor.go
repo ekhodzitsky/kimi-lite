@@ -74,5 +74,3 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 
 	return len(toSummarize), nil
 }
-
-

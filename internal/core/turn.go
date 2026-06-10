@@ -320,20 +320,29 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 
 	for chunk := range streamCh {
 		if ctx.Err() != nil {
-			select { case outCh <- fmt.Sprintf("Error: %v", ctx.Err()): default: }
+			select {
+			case outCh <- fmt.Sprintf("Error: %v", ctx.Err()):
+			default:
+			}
 			tm.setError(ctx, sessionID, turn, ctx.Err())
 			return "", nil, ctx.Err()
 		}
 
 		if chunk.Error != nil {
-			select { case outCh <- fmt.Sprintf("Error: %v", chunk.Error): default: }
+			select {
+			case outCh <- fmt.Sprintf("Error: %v", chunk.Error):
+			default:
+			}
 			tm.setError(ctx, sessionID, turn, chunk.Error)
 			return "", nil, chunk.Error
 		}
 
 		if chunk.Content != "" {
 			if content.Len()+len(chunk.Content) > maxStreamResponseSize {
-				select { case outCh <- fmt.Sprintf("Error: response exceeded max size of %d bytes", maxStreamResponseSize): default: }
+				select {
+				case outCh <- fmt.Sprintf("Error: response exceeded max size of %d bytes", maxStreamResponseSize):
+				default:
+				}
 				tm.setError(ctx, sessionID, turn, fmt.Errorf("response exceeded max size of %d bytes", maxStreamResponseSize))
 				return "", nil, fmt.Errorf("response exceeded max size of %d bytes", maxStreamResponseSize)
 			}
@@ -341,7 +350,10 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 			select {
 			case outCh <- chunk.Content:
 			case <-ctx.Done():
-				select { case outCh <- fmt.Sprintf("Error: %v", ctx.Err()): default: }
+				select {
+				case outCh <- fmt.Sprintf("Error: %v", ctx.Err()):
+				default:
+				}
 				tm.setError(ctx, sessionID, turn, ctx.Err())
 				return "", nil, ctx.Err()
 			}
@@ -354,7 +366,10 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 	}
 
 	if ctx.Err() != nil {
-		select { case outCh <- fmt.Sprintf("Error: %v", ctx.Err()): default: }
+		select {
+		case outCh <- fmt.Sprintf("Error: %v", ctx.Err()):
+		default:
+		}
 		tm.setError(ctx, sessionID, turn, ctx.Err())
 		return "", nil, ctx.Err()
 	}

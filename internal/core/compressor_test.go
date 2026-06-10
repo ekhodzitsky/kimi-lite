@@ -113,5 +113,3 @@ func TestContextCompressor_Compact_LLMError(t *testing.T) {
 		t.Errorf("error = %q, want llm overloaded", err.Error())
 	}
 }
-
-
