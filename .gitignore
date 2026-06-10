@@ -36,3 +36,5 @@ coverage.html
 SECURITY_AUDIT*.md
 docs/audits/
 docs/superpowers/
+.omc/
+.venv*/
