@@ -154,6 +154,26 @@ type StreamChunk struct {
 	Error     error      `json:"-"`
 }
 
+// TurnEventType identifies the kind of event emitted during a turn.
+type TurnEventType int
+
+const (
+	// TurnEventContent carries a text fragment from the LLM stream.
+	TurnEventContent TurnEventType = iota
+	// TurnEventDone signals that the turn has completed.
+	TurnEventDone
+	// TurnEventError signals that the turn failed.
+	TurnEventError
+)
+
+// TurnEvent is emitted by TurnManager.RunTurn to report streaming progress.
+type TurnEvent struct {
+	Type      TurnEventType
+	Content   string
+	Error     error
+	ToolCalls []ToolCall
+}
+
 // ModelInfo describes a configured LLM model.
 type ModelInfo struct {
 	Name          string `json:"name"`

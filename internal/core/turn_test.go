@@ -61,8 +61,10 @@ func TestTurnManager_RunTurn_Simple(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
 	}
 
 	if len(contents) != 2 {
@@ -146,8 +148,10 @@ func TestTurnManager_RunTurn_WithToolCalls(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
 	}
 
 	if len(contents) != 2 {
@@ -230,8 +234,10 @@ func TestTurnManager_RunTurn_ManualApproval(t *testing.T) {
 	var contents []string
 	done := make(chan struct{})
 	go func() {
-		for c := range outCh {
-			contents = append(contents, c)
+		for e := range outCh {
+			if e.Type == api.TurnEventContent {
+				contents = append(contents, e.Content)
+			}
 		}
 		close(done)
 	}()
@@ -330,18 +336,24 @@ func TestTurnManager_RunTurn_StreamError(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	var streamErr error
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
+		if e.Type == api.TurnEventError {
+			streamErr = e.Error
+		}
 	}
 
-	if len(contents) != 2 {
-		t.Fatalf("expected 2 chunks, got %d", len(contents))
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 content chunk, got %d", len(contents))
 	}
 	if contents[0] != "Partial" {
 		t.Errorf("contents[0] = %q, want Partial", contents[0])
 	}
-	if !strings.Contains(contents[1], "stream broken") {
-		t.Errorf("contents[1] = %q, want error with stream broken", contents[1])
+	if streamErr == nil || !strings.Contains(streamErr.Error(), "stream broken") {
+		t.Errorf("streamErr = %v, want error with stream broken", streamErr)
 	}
 
 	turn := tm.CurrentTurn()
@@ -395,8 +407,10 @@ func TestTurnManager_RunTurn_ContextCancellation(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
 		if len(contents) == 1 {
 			cancel() // Cancel after first chunk
 		}
@@ -510,8 +524,10 @@ func TestTurnManager_RunTurn_NoConfig(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
 	}
 
 	if len(contents) != 1 {

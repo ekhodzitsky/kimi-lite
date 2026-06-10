@@ -109,7 +109,7 @@ func (m *Model) inputHeight() int {
 
 // turnManager is the interface needed from core.TurnManager.
 type turnManager interface {
-	RunTurn(ctx context.Context, sessionID string, input string) (<-chan string, error)
+	RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
 	ResumeWithApproval(ctx context.Context, sessionID string, approvals map[string]api.ApprovalDecision) error
 }
 
@@ -157,7 +157,7 @@ type Model struct {
 	store          api.Store
 
 	// Streaming state
-	streamCh     <-chan string
+	streamCh     <-chan api.TurnEvent
 	streamCancel context.CancelFunc
 
 	// Focus management
@@ -603,18 +603,27 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 	return cmds
 }
 
-// readStreamChunk returns a command that reads the next chunk from the stream.
+// readStreamChunk returns a command that reads the next event from the stream.
 func (m *Model) readStreamChunk() tea.Cmd {
 	ch := m.streamCh // capture at command creation time
 	return func() tea.Msg {
 		if ch == nil {
 			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true}}
 		}
-		content, ok := <-ch
+		event, ok := <-ch
 		if !ok {
 			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true}}
 		}
-		return StreamChunkMsg{Chunk: api.StreamChunk{Content: content}}
+		switch event.Type {
+		case api.TurnEventContent:
+			return StreamChunkMsg{Chunk: api.StreamChunk{Content: event.Content}}
+		case api.TurnEventDone:
+			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true, ToolCalls: event.ToolCalls}}
+		case api.TurnEventError:
+			return ErrorMsg{Err: event.Error}
+		default:
+			return nil
+		}
 	}
 }
 

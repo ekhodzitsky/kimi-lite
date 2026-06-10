@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -100,9 +101,9 @@ func (tm *TurnManager) Wait() {
 }
 
 // RunTurn executes a complete turn for the given session and user input.
-// It returns a channel that streams response content chunks.
+// It returns a channel that streams turn events (content, done, error).
 // Returns an error if a turn is already in progress.
-func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan string, error) {
+func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	if !tm.running.CompareAndSwap(false, true) {
 		return nil, fmt.Errorf("turn already in progress")
 	}
@@ -114,7 +115,7 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 	return outCh, nil
 }
 
-func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input string) (<-chan string, error) {
+func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	if tm.cfg != nil && tm.cfg.Get() != nil {
 		maxTurns := tm.cfg.Get().Behavior.MaxTurns
 		if maxTurns > 0 {
@@ -187,19 +188,19 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 		return nil, fmt.Errorf("chat stream: %w", err)
 	}
 
-	outCh := make(chan string, 16)
+	eventCh := make(chan api.TurnEvent, 16)
 	tm.wg.Add(1)
-	go tm.run(ctx, sessionID, turn, messages, tools, streamCh, outCh, msgLimit)
+	go tm.run(ctx, sessionID, turn, messages, tools, streamCh, eventCh, msgLimit)
 
-	return outCh, nil
+	return eventCh, nil
 }
 
-func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn, messages []api.Message, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, outCh chan string, msgLimit int) {
+func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn, messages []api.Message, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int) {
 	defer tm.running.Store(false)
 	defer tm.wg.Done()
-	defer close(outCh)
+	defer close(eventCh)
 
-	content, toolCalls, err := tm.consumeStream(ctx, sessionID, turn, firstStream, outCh)
+	content, toolCalls, err := tm.consumeStream(ctx, sessionID, turn, firstStream, eventCh)
 	if err != nil {
 		return
 	}
@@ -301,7 +302,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 			return
 		}
 
-		content, toolCalls, err = tm.consumeStream(ctx, sessionID, turn, streamCh, outCh)
+		content, toolCalls, err = tm.consumeStream(ctx, sessionID, turn, streamCh, eventCh)
 		if err != nil {
 			return
 		}
@@ -313,6 +314,11 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 			turn.State = api.TurnToolCalls
 		}
 		tm.mu.Unlock()
+	}
+
+	select {
+	case eventCh <- api.TurnEvent{Type: api.TurnEventDone, ToolCalls: toolCalls}:
+	default:
 	}
 
 	assistantMsg := api.Message{
@@ -336,17 +342,17 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 	tm.mu.Unlock()
 }
 
-// consumeStream reads chunks from a stream channel, forwards content to outCh,
+// consumeStream reads chunks from a stream channel, forwards content as TurnEvents,
 // and returns the accumulated text plus any tool calls from the final chunk.
 // It checks for context cancellation both during streaming and after the channel closes.
-func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn *api.Turn, streamCh <-chan api.StreamChunk, outCh chan string) (string, []api.ToolCall, error) {
+func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn *api.Turn, streamCh <-chan api.StreamChunk, eventCh chan api.TurnEvent) (string, []api.ToolCall, error) {
 	var content strings.Builder
 	var toolCalls []api.ToolCall
 
 	for chunk := range streamCh {
 		if ctx.Err() != nil {
 			select {
-			case outCh <- fmt.Sprintf("Error: %v", ctx.Err()):
+			case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
 			default:
 			}
 			tm.setError(ctx, sessionID, turn, ctx.Err())
@@ -355,7 +361,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 
 		if chunk.Error != nil {
 			select {
-			case outCh <- fmt.Sprintf("Error: %v", chunk.Error):
+			case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: chunk.Error}:
 			default:
 			}
 			tm.setError(ctx, sessionID, turn, chunk.Error)
@@ -364,19 +370,20 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 
 		if chunk.Content != "" {
 			if content.Len()+len(chunk.Content) > maxStreamResponseSize {
+				msg := fmt.Sprintf("response exceeded max size of %d bytes", maxStreamResponseSize)
 				select {
-				case outCh <- fmt.Sprintf("Error: response exceeded max size of %d bytes", maxStreamResponseSize):
+				case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: errors.New(msg)}:
 				default:
 				}
-				tm.setError(ctx, sessionID, turn, fmt.Errorf("response exceeded max size of %d bytes", maxStreamResponseSize))
-				return "", nil, fmt.Errorf("response exceeded max size of %d bytes", maxStreamResponseSize)
+				tm.setError(ctx, sessionID, turn, errors.New(msg))
+				return "", nil, errors.New(msg)
 			}
 			content.WriteString(chunk.Content)
 			select {
-			case outCh <- chunk.Content:
+			case eventCh <- api.TurnEvent{Type: api.TurnEventContent, Content: chunk.Content}:
 			case <-ctx.Done():
 				select {
-				case outCh <- fmt.Sprintf("Error: %v", ctx.Err()):
+				case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
 				default:
 				}
 				tm.setError(ctx, sessionID, turn, ctx.Err())
@@ -392,7 +399,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 
 	if ctx.Err() != nil {
 		select {
-		case outCh <- fmt.Sprintf("Error: %v", ctx.Err()):
+		case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
 		default:
 		}
 		tm.setError(ctx, sessionID, turn, ctx.Err())
