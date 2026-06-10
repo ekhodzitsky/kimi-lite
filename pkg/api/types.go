@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -104,22 +105,24 @@ func (s TurnState) String() string {
 }
 
 // ParseTurnState parses a turn state from its string representation.
-func ParseTurnState(s string) TurnState {
+// Returns an error for unrecognized state strings instead of silently
+// defaulting to TurnIdle.
+func ParseTurnState(s string) (TurnState, error) {
 	switch s {
 	case "idle":
-		return TurnIdle
+		return TurnIdle, nil
 	case "thinking":
-		return TurnThinking
+		return TurnThinking, nil
 	case "streaming":
-		return TurnStreaming
+		return TurnStreaming, nil
 	case "tool_calls":
-		return TurnToolCalls
+		return TurnToolCalls, nil
 	case "waiting_approval":
-		return TurnWaitingApproval
+		return TurnWaitingApproval, nil
 	case "error":
-		return TurnError
+		return TurnError, nil
 	default:
-		return TurnIdle
+		return TurnIdle, fmt.Errorf("unknown turn state: %q", s)
 	}
 }
 

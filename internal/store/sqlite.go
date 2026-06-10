@@ -429,7 +429,7 @@ func (s *SQLite) GetTurns(ctx context.Context, sessionID string, limit int) ([]a
 		if err := rows.Scan(&turn.ID, &stateStr, &turn.Input, &turn.Response, &toolCallsJSON, &resultsJSON, &turn.Error, &turn.StartedAt, &endedAt); err != nil {
 			return nil, fmt.Errorf("scan turn: %w", err)
 		}
-		turn.State = api.ParseTurnState(stateStr)
+		turn.State, _ = api.ParseTurnState(stateStr)
 		if toolCallsJSON != "" && toolCallsJSON != "null" {
 			if err := json.Unmarshal([]byte(toolCallsJSON), &turn.ToolCalls); err != nil {
 				return nil, fmt.Errorf("unmarshal tool calls: %w", err)
