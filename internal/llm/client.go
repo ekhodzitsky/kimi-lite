@@ -122,68 +122,110 @@ func sortedToolCalls(accumulator map[int]*rawToolCall) []api.ToolCall {
 // The returned channel is closed when the stream ends or an error occurs.
 // Callers should check chunk.Error for stream errors.
 func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
-	ctx, cancel := c.withTimeout(ctx)
-
 	reqBody := c.buildChatRequest(messages, tools, true)
 	body, err := c.doRequestStream(ctx, reqBody)
 	if err != nil {
-		cancel()
 		return nil, fmt.Errorf("chat stream request failed: %w", err)
 	}
 
 	ch := make(chan api.StreamChunk, 64)
 	go func() {
 		defer close(ch)
-		defer cancel()
 		defer body.Close()
 
 		reader := NewStreamReader(body)
 		accumulator := make(map[int]*rawToolCall)
 
-		for {
-			raw, err := reader.readRawChunk(ctx)
-			if err == io.EOF {
-				select {
-				case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator)}:
-				case <-ctx.Done():
-				}
-				break
-			}
-			if err != nil {
-				select {
-				case ch <- api.StreamChunk{Error: err}:
-				case <-ctx.Done():
-				}
-				break
-			}
+		idleTimeout := c.timeout
+		type result struct {
+			raw rawChunk
+			err error
+		}
+		readCh := make(chan result, 1)
 
-			for _, tc := range raw.ToolCalls {
-				if _, ok := accumulator[tc.Index]; !ok {
-					accumulator[tc.Index] = &rawToolCall{}
-				}
-				if tc.ID != "" {
-					accumulator[tc.Index].ID = tc.ID
-				}
-				if tc.Name != "" {
-					accumulator[tc.Index].Name = tc.Name
-				}
-				accumulator[tc.Index].Arguments += tc.Arguments
-			}
-
-			if raw.Done {
+		// One read goroutine per stream (not per chunk).
+		go func() {
+			defer close(readCh)
+			for {
+				raw, err := reader.readRawChunk(ctx)
 				select {
-				case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator)}:
-				case <-ctx.Done():
-				}
-				break
-			}
-
-			if raw.Content != "" {
-				select {
-				case ch <- api.StreamChunk{Content: raw.Content}:
+				case readCh <- result{raw, err}:
 				case <-ctx.Done():
 					return
 				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+
+		timer := time.NewTimer(idleTimeout)
+		defer timer.Stop()
+
+		for {
+			select {
+			case <-timer.C:
+				select {
+				case ch <- api.StreamChunk{Error: fmt.Errorf("stream idle timeout after %v", idleTimeout)}:
+				case <-ctx.Done():
+				}
+				return
+			case res, ok := <-readCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				if !ok {
+					return
+				}
+				raw, err := res.raw, res.err
+				if err == io.EOF {
+					select {
+					case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator)}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				if err != nil {
+					select {
+					case ch <- api.StreamChunk{Error: err}:
+					case <-ctx.Done():
+					}
+					return
+				}
+
+				for _, tc := range raw.ToolCalls {
+					if _, ok := accumulator[tc.Index]; !ok {
+						accumulator[tc.Index] = &rawToolCall{}
+					}
+					if tc.ID != "" {
+						accumulator[tc.Index].ID = tc.ID
+					}
+					if tc.Name != "" {
+						accumulator[tc.Index].Name = tc.Name
+					}
+					accumulator[tc.Index].Arguments += tc.Arguments
+				}
+
+				if raw.Done {
+					select {
+					case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator)}:
+					case <-ctx.Done():
+					}
+					return
+				}
+
+				if raw.Content != "" {
+					select {
+					case ch <- api.StreamChunk{Content: raw.Content}:
+					case <-ctx.Done():
+						return
+					}
+				}
+
+				timer.Reset(idleTimeout)
 			}
 		}
 	}()
