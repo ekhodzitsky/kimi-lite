@@ -266,6 +266,15 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 				}
 			} else {
 				for _, call := range pending {
+
+					if err := ctx.Err(); err != nil {
+						results = append(results, api.ToolResult{
+							CallID: call.ID,
+							Name:   call.Name,
+							Error:  fmt.Sprintf("context cancelled: %v", err),
+						})
+						continue
+					}
 					decision, ok := payload.decisions[call.ID]
 					if !ok {
 						decision = api.ApprovalNo
@@ -450,6 +459,15 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 	pending := make([]api.ToolCall, 0)
 
 	for _, call := range calls {
+		if err := ctx.Err(); err != nil {
+			results = append(results, api.ToolResult{
+				CallID: call.ID,
+				Name:   call.Name,
+				Error:  fmt.Sprintf("context cancelled: %v", err),
+			})
+			continue
+		}
+
 		decision, autoApproved := tm.approval.ShouldAutoApprove(call)
 
 		if !autoApproved {

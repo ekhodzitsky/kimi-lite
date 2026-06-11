@@ -778,3 +778,60 @@ func TestTurnManager_RunTurn_StaleRequestIDIgnored(t *testing.T) {
 		t.Errorf("unexpected result 1 error: %s", turn.Results[1].Error)
 	}
 }
+
+func TestTurnManager_executeToolCalls_ContextCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	executeCount := 0
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			executeCount++
+			if call.ID == "tc1" {
+				cancel() // Cancel context after first call
+			}
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
+		},
+		defs: []api.ToolDefinition{
+			{Name: "read_file", Description: "read"},
+		},
+		readOnlyTools: map[string]bool{"read_file": true},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+
+	tm := NewTurnManager(&mockLLMClient{}, tools, approval, store, nil)
+	turn := &api.Turn{ID: "turn-1", State: api.TurnToolCalls}
+
+	calls := []api.ToolCall{
+		{ID: "tc1", Name: "read_file", Arguments: `{}`},
+		{ID: "tc2", Name: "read_file", Arguments: `{}`},
+		{ID: "tc3", Name: "read_file", Arguments: `{}`},
+	}
+
+	results, pending := tm.executeToolCalls(ctx, sess.ID, turn, calls)
+
+	if len(pending) != 0 {
+		t.Fatalf("expected no pending calls, got %d", len(pending))
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	if executeCount != 1 {
+		t.Fatalf("expected 1 Execute call before cancellation, got %d", executeCount)
+	}
+	if results[0].Error != "" {
+		t.Errorf("result[0] error = %q, want empty", results[0].Error)
+	}
+	if results[1].Error == "" || !strings.Contains(results[1].Error, "context cancelled") {
+		t.Errorf("result[1] error = %q, want context cancelled", results[1].Error)
+	}
+	if results[2].Error == "" || !strings.Contains(results[2].Error, "context cancelled") {
+		t.Errorf("result[2] error = %q, want context cancelled", results[2].Error)
+	}
+}
