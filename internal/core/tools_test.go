@@ -357,6 +357,36 @@ func TestBuiltInToolExecutor_Execute_Grep_NoMatches(t *testing.T) {
 	}
 }
 
+func TestBuiltInToolExecutor_Execute_Grep_SkipsSymlinks(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+
+	// Create a secret file outside the sandbox.
+	secretDir := t.TempDir()
+	secretPath := filepath.Join(secretDir, "secret.txt")
+	_ = os.WriteFile(secretPath, []byte("SECRET_PASSWORD=12345"), 0644)
+
+	// Create a symlink inside the sandbox pointing to the secret.
+	symlinkPath := filepath.Join(tmp, "link.txt")
+	_ = os.Symlink(secretPath, symlinkPath)
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "grep",
+		Arguments: fmt.Sprintf(`{"pattern":"SECRET_PASSWORD","path":"%s"}`, tmp),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if strings.Contains(result.Output, "SECRET_PASSWORD") {
+		t.Fatalf("grep should not follow symlinks; got output: %q", result.Output)
+	}
+}
+
 func TestBuiltInToolExecutor_Execute_Shell(t *testing.T) {
 	t.Parallel()
 	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)

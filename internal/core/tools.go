@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -488,17 +490,81 @@ func (e *BuiltInToolExecutor) execGrep(ctx context.Context, args map[string]inte
 	if err != nil {
 		return "", err.Error()
 	}
-	// NOTE: GNU grep -r follows symlinks. There is no simple portable flag to disable this.
-	// This is a known limitation of the current implementation.
-	cmd := exec.CommandContext(ctx, "grep", "-r", "-n", "--exclude-dir=.git", pattern, validPath)
-	output, err := cmd.CombinedOutput()
+
+	re, err := regexp.Compile(pattern)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			return "", "" // no matches
-		}
-		return "", fmt.Sprintf("grep: %v", err)
+		return "", fmt.Sprintf("invalid pattern: %v", err)
 	}
-	return string(output), ""
+
+	var results []string
+	var totalBytes int
+
+	walkFn := func(filePath string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip inaccessible entries
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Skip symlinks.
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+
+		// Validate the file path (catches escapes via symlinks or traversal).
+		if _, vErr := e.validatePath(filePath); vErr != nil {
+			return nil
+		}
+
+		info, sErr := d.Info()
+		if sErr != nil {
+			return nil
+		}
+		if info.Size() > maxFileReadSize {
+			return nil // skip files exceeding read cap
+		}
+
+		f, openErr := os.Open(filePath)
+		if openErr != nil {
+			return nil
+		}
+		defer f.Close()
+
+		scanner := bufio.NewScanner(f)
+		lineNum := 1
+		for scanner.Scan() {
+			line := scanner.Text()
+			if re.MatchString(line) {
+				relPath, relErr := filepath.Rel(validPath, filePath)
+				if relErr != nil {
+					relPath = filePath
+				}
+				result := fmt.Sprintf("%s:%d:%s", relPath, lineNum, line)
+				results = append(results, result)
+				totalBytes += len(result) + 1
+				if totalBytes > maxShellOutputSize {
+					return fmt.Errorf("output limit reached")
+				}
+			}
+			lineNum++
+		}
+		return nil
+	}
+
+	// WalkDir handles both files and directories.
+	walkErr := filepath.WalkDir(validPath, walkFn)
+	if walkErr != nil && walkErr.Error() == "output limit reached" {
+		// Truncate and add notice.
+		results = append(results, fmt.Sprintf("... truncated (%d bytes total)", totalBytes))
+	}
+
+	if len(results) == 0 {
+		return "", ""
+	}
+	return strings.Join(results, "\n"), ""
 }
 
 func (e *BuiltInToolExecutor) execShell(ctx context.Context, args map[string]interface{}) (string, string) {
