@@ -1027,3 +1027,101 @@ func TestStreamReader_LargePayload(t *testing.T) {
 		t.Error("expected Done = true")
 	}
 }
+
+func TestClientChatRetryAfterHeader(t *testing.T) {
+	t.Parallel()
+
+	callCount := atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := callCount.Add(1)
+		if count == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "assistant", Content: "OK"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "test-key", Model: "test"}, server.Client())
+
+	start := time.Now()
+	msg, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if msg.Content != "OK" {
+		t.Errorf("content = %q, want OK", msg.Content)
+	}
+	if callCount.Load() != 2 {
+		t.Errorf("callCount = %d, want 2", callCount.Load())
+	}
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("elapsed = %v, want >= 900ms", elapsed)
+	}
+}
+
+func TestClientChatRetryAfterHTTPDate(t *testing.T) {
+	t.Parallel()
+
+	callCount := atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := callCount.Add(1)
+		if count == 1 {
+			w.Header().Set("Retry-After", time.Now().UTC().Add(500*time.Millisecond).Format(http.TimeFormat))
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"overloaded"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "assistant", Content: "OK"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "test-key", Model: "test"}, server.Client())
+
+	msg, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if msg.Content != "OK" {
+		t.Errorf("content = %q, want OK", msg.Content)
+	}
+	if callCount.Load() != 2 {
+		t.Errorf("callCount = %d, want 2", callCount.Load())
+	}
+}

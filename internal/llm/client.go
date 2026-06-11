@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
@@ -262,13 +263,22 @@ func (c *Client) withTimeout(ctx context.Context) (context.Context, context.Canc
 // doRequestWithRetry performs the HTTP request with retries and returns the raw response.
 func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream bool) (*http.Response, error) {
 	var lastErr error
+	var retryAfterDelay time.Duration
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
+			delay := c.backoff(attempt)
+			if retryAfterDelay > delay {
+				delay = retryAfterDelay
+			}
+			if delay > maxBackoffDelay {
+				delay = maxBackoffDelay
+			}
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(c.backoff(attempt)):
+			case <-time.After(delay):
 			}
+			retryAfterDelay = 0
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
@@ -292,8 +302,9 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 
 		if resp.StatusCode >= http.StatusInternalServerError || resp.StatusCode == http.StatusTooManyRequests {
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			retryAfterDelay = parseRetryAfter(resp.Header.Get("Retry-After"))
 			resp.Body.Close()
-			slog.Debug("LLM server error", "status", resp.StatusCode, "body", string(respBody))
+			slog.Debug("LLM server error", "status", resp.StatusCode, "body", string(respBody), "retry_after", retryAfterDelay)
 			lastErr = &api.APIError{StatusCode: resp.StatusCode, Message: "server error", Body: string(respBody)}
 			continue
 		}
@@ -346,6 +357,23 @@ func (c *Client) doRequestStream(ctx context.Context, reqBody chatCompletionRequ
 	}
 
 	return resp.Body, nil
+}
+
+// parseRetryAfter parses the Retry-After header value, supporting both
+// integer-seconds and HTTP-date forms. It returns 0 for invalid values.
+func parseRetryAfter(value string) time.Duration {
+	if value == "" {
+		return 0
+	}
+	// Try integer seconds first.
+	if seconds, err := strconv.Atoi(value); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	// Fall back to HTTP-date parsing.
+	if t, err := http.ParseTime(value); err == nil {
+		return time.Until(t)
+	}
+	return 0
 }
 
 // backoff returns the delay before a retry attempt.
