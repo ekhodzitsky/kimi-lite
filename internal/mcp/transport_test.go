@@ -188,6 +188,113 @@ func TestStdioTransport_CloseBeforeConnect(t *testing.T) {
 	}
 }
 
+func TestStdioTransport_MinimalEnv(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+env | sort
+`
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "env.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write helper script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	ctx := context.Background()
+
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer tr.Close()
+
+	// The script prints env and exits; readLoop will get EOF.
+	// Give it a moment to finish.
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify PATH is present in the minimal env.
+	env := minimalEnv()
+	hasPath := false
+	for _, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			hasPath = true
+			break
+		}
+	}
+	if !hasPath {
+		t.Fatal("minimalEnv missing PATH")
+	}
+
+	// Verify a secret-like variable is excluded.
+	for _, e := range env {
+		if strings.Contains(strings.ToUpper(e), "API_KEY") {
+			t.Fatalf("minimalEnv should exclude secret keys, got: %s", e)
+		}
+	}
+}
+
+func TestStdioTransport_StderrCaptured(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+echo "diagnostic message" >&2
+exit 1
+`
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fail.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write helper script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	ctx := context.Background()
+
+	err := tr.Connect(ctx)
+	if err == nil {
+		t.Fatal("expected error for failing child")
+	}
+	if !strings.Contains(err.Error(), "diagnostic message") {
+		t.Fatalf("expected stderr in error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_OversizedFrame(t *testing.T) {
+	t.Parallel()
+
+	// Script that prints a frame larger than maxFrameSize (8 MB).
+	script := `#!/bin/sh
+read line
+# Print a JSON object with a huge string value.
+printf '{"jsonrpc":"2.0","id":1,"result":{"x":"'
+python3 -c "print('A' * 9000000, end='')"
+printf '"}}\n'
+`
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "huge.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write helper script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	ctx := context.Background()
+
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer tr.Close()
+
+	_, err := tr.Send(ctx, "initialize", nil)
+	if err == nil {
+		t.Fatal("expected error for oversized frame")
+	}
+	if !strings.Contains(err.Error(), "frame") && !strings.Contains(err.Error(), "size") {
+		t.Fatalf("expected frame size error, got: %v", err)
+	}
+}
+
 func TestStdioTransport_SendAfterClose(t *testing.T) {
 	t.Parallel()
 
