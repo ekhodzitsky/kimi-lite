@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
@@ -400,6 +401,8 @@ func (c *Client) backoff(attempt int) time.Duration {
 }
 
 // isRetryableError reports whether an error warrants a retry.
+// Transient errors (timeouts, connection resets, unexpected EOF) are retried.
+// Permanent errors (connection refused, DNS not found, context cancellation) are not.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
@@ -410,9 +413,15 @@ func isRetryableError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) {
-		return true
+		return netErr.Timeout()
 	}
 	return false
 }

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -812,7 +813,11 @@ func TestIsRetryableError(t *testing.T) {
 		{"nil", nil, false},
 		{"context canceled", context.Canceled, false},
 		{"context deadline exceeded", context.DeadlineExceeded, true},
-		{"network error", &net.DNSError{IsTimeout: true}, true},
+		{"network timeout", &net.DNSError{IsTimeout: true}, true},
+		{"dns not found", &net.DNSError{IsNotFound: true}, false},
+		{"connection refused", &net.OpError{Err: syscall.ECONNREFUSED}, false},
+		{"connection reset", &net.OpError{Err: syscall.ECONNRESET}, true},
+		{"unexpected EOF", io.ErrUnexpectedEOF, true},
 		{"random error", fmt.Errorf("random"), false},
 	}
 
