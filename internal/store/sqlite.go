@@ -11,9 +11,10 @@ import (
 	"path/filepath"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
-	_ "modernc.org/sqlite"
 )
 
 //go:embed migrations/001_initial.sql

@@ -886,8 +886,8 @@ func (m *Model) renderApprovalDialog(background string) string {
 	call := m.pendingApprovals[m.approvalIndex]
 	var b strings.Builder
 	b.WriteString("Tool call requires approval\n\n")
-	b.WriteString(fmt.Sprintf("Tool: %s\n", call.Name))
-	b.WriteString(fmt.Sprintf("Arguments: %s\n", call.Arguments))
+	fmt.Fprintf(&b, "Tool: %s\n", call.Name)
+	fmt.Fprintf(&b, "Arguments: %s\n", call.Arguments)
 	b.WriteString("\n[y] yes  [n] no  [a] always")
 
 	dialog := m.styles.ApprovalDialog.Render(b.String())

@@ -318,7 +318,7 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 		if resp.StatusCode >= http.StatusInternalServerError || resp.StatusCode == http.StatusTooManyRequests {
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			retryAfterDelay = parseRetryAfter(resp.Header.Get("Retry-After"))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			slog.Debug("LLM server error", "status", resp.StatusCode, "body", string(respBody), "retry_after", retryAfterDelay)
 			lastErr = &api.APIError{StatusCode: resp.StatusCode, Message: "server error", Body: string(respBody)}
 			continue
@@ -326,7 +326,7 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 
 		if resp.StatusCode >= http.StatusBadRequest {
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			slog.Debug("LLM client error", "status", resp.StatusCode, "body", string(respBody))
 			return nil, &api.APIError{StatusCode: resp.StatusCode, Message: "client error", Body: string(respBody)}
 		}

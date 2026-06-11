@@ -84,7 +84,7 @@ func (tm *TurnManager) PendingApprovals() ([]api.ToolCall, int64) {
 
 // ResumeWithApproval resumes a turn that is waiting for manual approval.
 // The requestID must match the current pending round; a mismatch is rejected.
-func (tm *TurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+func (tm *TurnManager) ResumeWithApproval(ctx context.Context, _ string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	tm.pendingMu.Lock()
 	if len(tm.pendingCalls) == 0 {
 		tm.pendingMu.Unlock()
@@ -206,12 +206,12 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 
 	eventCh := make(chan api.TurnEvent, 16)
 	tm.wg.Add(1)
-	go tm.run(ctx, sessionID, turn, messages, tools, streamCh, eventCh, msgLimit)
+	go tm.run(ctx, sessionID, turn, tools, streamCh, eventCh, msgLimit)
 
 	return eventCh, nil
 }
 
-func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn, messages []api.Message, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int) {
+func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int) {
 	defer tm.running.Store(false)
 	defer tm.wg.Done()
 	defer close(eventCh)
@@ -332,7 +332,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 			_ = tm.store.AppendMessage(ctx, sessionID, toolMsg)
 		}
 
-		messages, err = tm.store.GetMessages(ctx, sessionID, msgLimit)
+		messages, err := tm.store.GetMessages(ctx, sessionID, msgLimit)
 		if err != nil {
 			tm.setError(ctx, sessionID, turn, fmt.Errorf("get messages: %w", err))
 			return

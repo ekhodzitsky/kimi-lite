@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/git"

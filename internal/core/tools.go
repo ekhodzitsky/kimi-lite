@@ -488,7 +488,7 @@ func (e *BuiltInToolExecutor) execGlob(args map[string]interface{}) (string, str
 	return strings.Join(matches, "\n"), ""
 }
 
-func (e *BuiltInToolExecutor) execGrep(ctx context.Context, args map[string]interface{}) (string, string) {
+func (e *BuiltInToolExecutor) execGrep(_ context.Context, args map[string]interface{}) (string, string) {
 	pattern, _ := args["pattern"].(string)
 	path, _ := args["path"].(string)
 	if pattern == "" {
@@ -539,7 +539,7 @@ func (e *BuiltInToolExecutor) execGrep(ctx context.Context, args map[string]inte
 		if openErr != nil {
 			return nil
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		scanner := bufio.NewScanner(f)
 		lineNum := 1
@@ -670,7 +670,7 @@ func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args map[string]
 	if err != nil {
 		return "", fmt.Sprintf("fetch url: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {

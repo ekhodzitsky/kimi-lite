@@ -462,9 +462,7 @@ func (t *StdioTransport) Close() error {
 	}
 
 	if t.stdin != nil {
-		if err := t.stdin.Close(); err != nil {
-			// ignore close errors on cleanup
-		}
+		_ = t.stdin.Close() // ignore close errors on cleanup
 		t.stdin = nil
 	}
 
@@ -485,10 +483,8 @@ func (t *StdioTransport) Close() error {
 		case <-t.cmdWaitCh:
 			// ignore process exit status on close
 		case <-time.After(5 * time.Second):
-			if err := cmd.Process.Kill(); err != nil {
-				// ignore kill errors on cleanup
-			}
-			<-t.cmdWaitCh // drain
+			_ = cmd.Process.Kill() // ignore kill errors on cleanup
+			<-t.cmdWaitCh          // drain
 		}
 	}
 

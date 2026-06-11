@@ -47,7 +47,7 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 
 	var conversation strings.Builder
 	for _, msg := range toSummarize {
-		conversation.WriteString(fmt.Sprintf("%s: %s\n", msg.Role, msg.Content))
+		fmt.Fprintf(&conversation, "%s: %s\n", msg.Role, msg.Content)
 	}
 
 	summaryPrompt := api.Message{

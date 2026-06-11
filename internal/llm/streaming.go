@@ -75,7 +75,7 @@ func (r *StreamReader) ReadChunk(ctx context.Context) (api.StreamChunk, error) {
 // client.go can access the index field for incremental tool-call accumulation.
 // The caller is responsible for ensuring the context can unblock the underlying
 // reader (e.g. by closing the body on cancellation).
-func (r *StreamReader) readRawChunk(ctx context.Context) (rawChunk, error) {
+func (r *StreamReader) readRawChunk(_ context.Context) (rawChunk, error) {
 	var data string
 
 	for r.scanner.Scan() {
