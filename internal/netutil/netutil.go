@@ -70,6 +70,9 @@ func SecureTransport() *http.Transport {
 
 // SecureHTTPClient returns an *http.Client using SecureTransport with a 30s
 // timeout and redirect guard that re-checks IsBlockedHost on every hop.
+// DNS resolution and IP validation happen exactly once per connection in
+// DialContext; CheckRedirect only does the cheap hostname blocklist check
+// to avoid a DNS-rebinding TOCTOU window.
 func SecureHTTPClient() *http.Client {
 	return &http.Client{
 		Timeout:   30 * time.Second,
@@ -81,19 +84,8 @@ func SecureHTTPClient() *http.Client {
 			if IsBlockedHost(req.URL.Hostname()) {
 				return fmt.Errorf("redirect to blocked host")
 			}
-
-			ips, err := net.DefaultResolver.LookupHost(req.Context(), req.URL.Hostname())
-			if err != nil {
-				return fmt.Errorf("redirect host lookup failed: %w", err)
-			}
-			if len(ips) == 0 {
-				return fmt.Errorf("redirect host resolved no IPs")
-			}
-			for _, ip := range ips {
-				if IsBlockedHost(ip) {
-					return fmt.Errorf("redirect to blocked IP: %s", ip)
-				}
-			}
+			// DialContext will perform the single DNS resolution and IP
+			// validation when the redirect connection is actually opened.
 			return nil
 		},
 	}
