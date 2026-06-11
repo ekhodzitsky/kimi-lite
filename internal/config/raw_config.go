@@ -32,6 +32,7 @@ type RawBehaviorConfig struct {
 	AutoApprove  []string      `mapstructure:"auto_approve"`
 	ShellTimeout time.Duration `mapstructure:"shell_timeout"`
 	MaxTurns     int           `mapstructure:"max_turns"`
+	AllowShell   bool          `mapstructure:"allow_shell"`
 }
 
 // RawSessionConfig holds raw session persistence settings.
@@ -95,6 +96,7 @@ func mapRawBehavior(raw RawBehaviorConfig) api.BehaviorConfig {
 		AutoApprove:  raw.AutoApprove,
 		ShellTimeout: raw.ShellTimeout,
 		MaxTurns:     raw.MaxTurns,
+		AllowShell:   raw.AllowShell,
 	}
 }
 

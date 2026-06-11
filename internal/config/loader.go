@@ -7,8 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 	"github.com/spf13/viper"
+
+	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
 // Loader handles configuration loading from multiple sources.
@@ -185,5 +186,8 @@ quit = "ctrl+c"
 plan_mode = "shift+tab"
 yolo = "ctrl+y"
 `
-	return os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write default config: %w", err)
+	}
+	return nil
 }

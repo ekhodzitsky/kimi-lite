@@ -220,5 +220,3 @@ func (s *Styles) init() {
 		Foreground(t.Muted).
 		Italic(true)
 }
-
-

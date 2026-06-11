@@ -47,6 +47,14 @@ func (g *ApprovalGate) SetMode(mode ApprovalMode) {
 	g.mode = mode
 }
 
+// neverAutoApprove lists tools that must never be auto-approved,
+// regardless of configuration.
+var neverAutoApprove = map[string]struct{}{
+	"shell":            {},
+	"write_file":       {},
+	"str_replace_file": {},
+}
+
 // ShouldAutoApprove returns the auto-approval decision for a tool call.
 // If the tool requires manual approval, it returns (ApprovalNo, false).
 func (g *ApprovalGate) ShouldAutoApprove(call api.ToolCall) (api.ApprovalDecision, bool) {
@@ -58,6 +66,10 @@ func (g *ApprovalGate) ShouldAutoApprove(call api.ToolCall) (api.ApprovalDecisio
 	}
 
 	if g.mode == ModeManual {
+		return api.ApprovalNo, false
+	}
+
+	if _, ok := neverAutoApprove[call.Name]; ok {
 		return api.ApprovalNo, false
 	}
 

@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -25,11 +26,13 @@ const (
 
 // Message represents a single message in a conversation.
 type Message struct {
-	ID        string     `json:"id"`
-	Role      Role       `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID           string     `json:"id"`
+	Role         Role       `json:"role"`
+	Content      string     `json:"content"`
+	ToolCallID   string     `json:"tool_call_id,omitempty"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	FinishReason string     `json:"finish_reason,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 // ToolCall represents a single tool invocation requested by the LLM.
@@ -103,22 +106,24 @@ func (s TurnState) String() string {
 }
 
 // ParseTurnState parses a turn state from its string representation.
-func ParseTurnState(s string) TurnState {
+// Returns an error for unrecognized state strings instead of silently
+// defaulting to TurnIdle.
+func ParseTurnState(s string) (TurnState, error) {
 	switch s {
 	case "idle":
-		return TurnIdle
+		return TurnIdle, nil
 	case "thinking":
-		return TurnThinking
+		return TurnThinking, nil
 	case "streaming":
-		return TurnStreaming
+		return TurnStreaming, nil
 	case "tool_calls":
-		return TurnToolCalls
+		return TurnToolCalls, nil
 	case "waiting_approval":
-		return TurnWaitingApproval
+		return TurnWaitingApproval, nil
 	case "error":
-		return TurnError
+		return TurnError, nil
 	default:
-		return TurnIdle
+		return TurnIdle, fmt.Errorf("unknown turn state: %q", s)
 	}
 }
 
@@ -147,10 +152,31 @@ type LLMClient interface {
 
 // StreamChunk represents a single chunk from a streaming LLM response.
 type StreamChunk struct {
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	Done      bool       `json:"done"`
-	Error     error      `json:"-"`
+	Content      string     `json:"content"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	Done         bool       `json:"done"`
+	FinishReason string     `json:"finish_reason,omitempty"`
+	Error        error      `json:"-"`
+}
+
+// TurnEventType identifies the kind of event emitted during a turn.
+type TurnEventType int
+
+const (
+	// TurnEventContent carries a text fragment from the LLM stream.
+	TurnEventContent TurnEventType = iota
+	// TurnEventDone signals that the turn has completed.
+	TurnEventDone
+	// TurnEventError signals that the turn failed.
+	TurnEventError
+)
+
+// TurnEvent is emitted by TurnManager.RunTurn to report streaming progress.
+type TurnEvent struct {
+	Type      TurnEventType
+	Content   string
+	Error     error
+	ToolCalls []ToolCall
 }
 
 // ModelInfo describes a configured LLM model.
@@ -208,10 +234,11 @@ type ToolExecutor interface {
 type ApprovalDecision int
 
 const (
+	// ApprovalNo rejects the tool call. It is the zero value so that
+	// uninitialized ApprovalDecision defaults to the safest choice.
+	ApprovalNo ApprovalDecision = iota
 	// ApprovalYes approves the tool call.
-	ApprovalYes ApprovalDecision = iota
-	// ApprovalNo rejects the tool call.
-	ApprovalNo
+	ApprovalYes
 	// ApprovalAlways always approves this tool.
 	ApprovalAlways
 	// ApprovalDiff requests a diff preview (unimplemented; treated as ApprovalNo).
@@ -265,7 +292,7 @@ type Config struct {
 // LLMConfig holds LLM provider configuration.
 type LLMConfig struct {
 	Provider string
-	APIKey   string
+	APIKey   string `json:"-"`
 	Model    string
 	BaseURL  string
 	Timeout  time.Duration
@@ -277,6 +304,7 @@ type BehaviorConfig struct {
 	AutoApprove  []string
 	ShellTimeout time.Duration
 	MaxTurns     int
+	AllowShell   bool
 }
 
 // SessionConfig holds session persistence settings.

@@ -440,6 +440,52 @@ func TestSQLite_Close(t *testing.T) {
 	}
 }
 
+func TestSQLiteDSN(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		dbPath string
+		want   string
+	}{
+		{
+			name:   "memory",
+			dbPath: ":memory:",
+			want:   ":memory:?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29&cache=shared",
+		},
+		{
+			name:   "absolute path",
+			dbPath: "/tmp/test.db",
+			want:   "file:///tmp/test.db?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
+		},
+		{
+			name:   "relative path",
+			dbPath: "relative.db",
+			want:   "file:relative.db?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
+		},
+		{
+			name:   "path with spaces",
+			dbPath: "/tmp/path with spaces.db",
+			want:   "file:///tmp/path%20with%20spaces.db?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
+		},
+		{
+			name:   "path with question mark",
+			dbPath: "/tmp/path?query.db",
+			want:   "file:///tmp/path%3Fquery.db?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sqliteDSN(tt.dbPath)
+			if got != tt.want {
+				t.Errorf("sqliteDSN(%q) = %q, want %q", tt.dbPath, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSQLite_Concurrency(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

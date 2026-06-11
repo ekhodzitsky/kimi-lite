@@ -1,54 +1,86 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
 const (
 	maxFileWriteSize   = 10 * 1024 * 1024 // 10 MB
+	maxFileReadSize    = 10 * 1024 * 1024 // 10 MB
 	maxShellOutputSize = 1024 * 1024      // 1 MB
+	maxShellCommandLen = 4096             // 4 KB
 )
 
 // BuiltInToolExecutor executes the built-in tool set.
 type BuiltInToolExecutor struct {
-	shellTimeout time.Duration
-	readOnly     map[string]bool
-	sandboxRoot  string
-	httpClient   *http.Client
+	shellTimeout   time.Duration
+	readOnly       map[string]bool
+	sandboxRoot    string
+	httpClient     *http.Client
+	protectedPaths []string
+	allowShell     bool
 }
 
 // NewBuiltInToolExecutor creates a new BuiltInToolExecutor.
 // shellTimeout is applied to every shell command.
-func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, httpClient *http.Client) *BuiltInToolExecutor {
+// protectedPaths are resolved and checked in validatePath; any path equal to
+// or under a protected path is refused regardless of sandboxRoot.
+func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, httpClient *http.Client, protectedPaths ...string) *BuiltInToolExecutor {
 	if shellTimeout <= 0 {
 		shellTimeout = 30 * time.Second
 	}
 	if httpClient == nil {
-		httpClient = newSecureHTTPClient()
+		httpClient = netutil.SecureHTTPClient()
 	}
 	if sandboxRoot != "" {
 		if resolved, err := filepath.EvalSymlinks(sandboxRoot); err == nil {
 			sandboxRoot = resolved
 		}
 	}
+
+	// Resolve and expand protected paths (files and their parent dirs).
+	resolvedProtected := make([]string, 0, len(protectedPaths)*2)
+	for _, p := range protectedPaths {
+		p = expandTilde(p)
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err == nil {
+			abs = resolved
+		}
+		resolvedProtected = append(resolvedProtected, abs)
+		// Also protect the parent directory.
+		parent := filepath.Dir(abs)
+		if parent != abs {
+			resolvedProtected = append(resolvedProtected, parent)
+		}
+	}
+
 	return &BuiltInToolExecutor{
-		shellTimeout: shellTimeout,
-		sandboxRoot:  sandboxRoot,
-		httpClient:   httpClient,
+		shellTimeout:   shellTimeout,
+		sandboxRoot:    sandboxRoot,
+		httpClient:     httpClient,
+		protectedPaths: resolvedProtected,
+		allowShell:     true,
 		readOnly: map[string]bool{
 			"read_file": true,
 			"glob":      true,
@@ -58,75 +90,75 @@ func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, http
 	}
 }
 
-func newSecureHTTPClient() *http.Client {
-	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
+// SetAllowShell controls whether the shell tool is enabled.
+func (e *BuiltInToolExecutor) SetAllowShell(v bool) {
+	e.allowShell = v
+}
+
+// expandTilde replaces a leading "~/" with the user's home directory.
+func expandTilde(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
 	}
+	return path
+}
 
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-
-			ips, err := net.DefaultResolver.LookupHost(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("no IPs resolved for host %s", host)
-			}
-
-			for _, ip := range ips {
-				if isBlockedHost(ip) {
-					return nil, fmt.Errorf("blocked host: resolved IP %s for %s is blocked", ip, host)
-				}
-			}
-
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0], port))
-		},
+// isUnder reports whether target is equal to or under base.
+// Both paths must be clean and absolute.
+func isUnder(target, base string) bool {
+	if target == base {
+		return true
 	}
-
-	return &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
-				return fmt.Errorf("too many redirects")
-			}
-			if isBlockedHost(req.URL.Hostname()) {
-				return fmt.Errorf("redirect to blocked host")
-			}
-
-			ips, err := net.DefaultResolver.LookupHost(req.Context(), req.URL.Hostname())
-			if err != nil {
-				return fmt.Errorf("redirect host lookup failed: %w", err)
-			}
-			if len(ips) == 0 {
-				return fmt.Errorf("redirect host resolved no IPs")
-			}
-			for _, ip := range ips {
-				if isBlockedHost(ip) {
-					return fmt.Errorf("redirect to blocked host: resolved IP %s is blocked", ip)
-				}
-			}
-
-			return nil
-		},
+	sep := string(filepath.Separator)
+	if !strings.HasSuffix(base, sep) {
+		base += sep
 	}
+	return strings.HasPrefix(target, base)
 }
 
 func (e *BuiltInToolExecutor) validatePath(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	path = expandTilde(path)
 	cleaned := filepath.Clean(path)
 	absPath, err := filepath.Abs(cleaned)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
+
+	// Check sensitive paths on the unresolved absolute path first.
+	// This catches symlinks like /etc → /private/etc on macOS.
+	sensitive := []string{"/etc", "/proc", "/sys", "/dev"}
+	for _, s := range sensitive {
+		if isUnder(absPath, s) {
+			return "", fmt.Errorf("sandbox: access to %s is blocked", absPath)
+		}
+	}
+
+	// Block user secret trees when no sandbox root is set (fallback case).
+	if e.sandboxRoot == "" {
+		secretTrees := []string{
+			expandTilde("~/.ssh"),
+			expandTilde("~/.aws"),
+			expandTilde("~/.gnupg"),
+		}
+		for _, s := range secretTrees {
+			if isUnder(absPath, s) {
+				return "", fmt.Errorf("sandbox: access to %s is blocked", absPath)
+			}
+		}
+	}
+
+	// Block protected app paths on the unresolved path too.
+	for _, protected := range e.protectedPaths {
+		if isUnder(absPath, protected) {
+			return "", fmt.Errorf("sandbox: access to %s is blocked", absPath)
+		}
+	}
+
 	resolvedPath, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -150,13 +182,14 @@ func (e *BuiltInToolExecutor) validatePath(path string) (string, error) {
 		}
 	}
 	absPath = resolvedPath
-	// Always block sensitive system paths
-	sensitivePrefixes := []string{"/etc/", "/proc/", "/sys/", "/dev/"}
-	for _, prefix := range sensitivePrefixes {
-		if strings.HasPrefix(absPath, prefix) {
+
+	// Re-check protected paths on the resolved path as well.
+	for _, protected := range e.protectedPaths {
+		if isUnder(absPath, protected) {
 			return "", fmt.Errorf("sandbox: access to %s is blocked", absPath)
 		}
 	}
+
 	if e.sandboxRoot != "" {
 		root := e.sandboxRoot
 		if !strings.HasSuffix(root, string(filepath.Separator)) {
@@ -252,7 +285,7 @@ func (e *BuiltInToolExecutor) Definitions() []api.ToolDefinition {
 		},
 		"required": []string{"pattern", "path"},
 	})
-	addDef("shell", "Execute a shell command with a configurable timeout.", map[string]interface{}{
+	addDef("shell", "Execute a shell command with a configurable timeout. Note: the shell is NOT path-sandboxed; only the approval gate constrains it.", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
@@ -333,11 +366,65 @@ func (e *BuiltInToolExecutor) execReadFile(args map[string]interface{}) (string,
 	if err != nil {
 		return "", err.Error()
 	}
+	info, err := os.Stat(validPath)
+	if err != nil {
+		return "", fmt.Sprintf("read file: %v", err)
+	}
+	if info.Size() > maxFileReadSize {
+		return "", fmt.Sprintf("file exceeds max read size of %d bytes", maxFileReadSize)
+	}
 	data, err := os.ReadFile(validPath)
 	if err != nil {
 		return "", fmt.Sprintf("read file: %v", err)
 	}
 	return string(data), ""
+}
+
+// atomicWriteFile writes data to a temporary file in the same directory as
+// target, fsyncs it, then renames it over target. New files are created with
+// mode 0600; existing files preserve their original mode.
+func atomicWriteFile(target string, data []byte) error {
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+
+	mode := os.FileMode(0600)
+	if info, err := os.Stat(target); err == nil {
+		mode = info.Mode().Perm()
+	}
+
+	f, err := os.CreateTemp(dir, ".kimi-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := f.Name()
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("fsync temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, target); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
 }
 
 func (e *BuiltInToolExecutor) execWriteFile(args map[string]interface{}) (string, string) {
@@ -350,10 +437,7 @@ func (e *BuiltInToolExecutor) execWriteFile(args map[string]interface{}) (string
 	if err != nil {
 		return "", err.Error()
 	}
-	if err := os.MkdirAll(filepath.Dir(validPath), 0755); err != nil {
-		return "", fmt.Sprintf("create directory: %v", err)
-	}
-	if err := os.WriteFile(validPath, []byte(content), 0644); err != nil {
+	if err := atomicWriteFile(validPath, []byte(content)); err != nil {
 		return "", fmt.Sprintf("write file: %v", err)
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), ""
@@ -382,7 +466,7 @@ func (e *BuiltInToolExecutor) execStrReplaceFile(args map[string]interface{}) (s
 	if len(content) > maxFileWriteSize {
 		return "", fmt.Sprintf("result exceeds max size of %d bytes", maxFileWriteSize)
 	}
-	if err := os.WriteFile(validPath, []byte(content), 0644); err != nil {
+	if err := atomicWriteFile(validPath, []byte(content)); err != nil {
 		return "", fmt.Sprintf("write file: %v", err)
 	}
 	return fmt.Sprintf("replaced in %s", path), ""
@@ -404,7 +488,7 @@ func (e *BuiltInToolExecutor) execGlob(args map[string]interface{}) (string, str
 	return strings.Join(matches, "\n"), ""
 }
 
-func (e *BuiltInToolExecutor) execGrep(ctx context.Context, args map[string]interface{}) (string, string) {
+func (e *BuiltInToolExecutor) execGrep(_ context.Context, args map[string]interface{}) (string, string) {
 	pattern, _ := args["pattern"].(string)
 	path, _ := args["path"].(string)
 	if pattern == "" {
@@ -414,17 +498,81 @@ func (e *BuiltInToolExecutor) execGrep(ctx context.Context, args map[string]inte
 	if err != nil {
 		return "", err.Error()
 	}
-	// NOTE: GNU grep -r follows symlinks. There is no simple portable flag to disable this.
-	// This is a known limitation of the current implementation.
-	cmd := exec.CommandContext(ctx, "grep", "-r", "-n", "--exclude-dir=.git", pattern, validPath)
-	output, err := cmd.CombinedOutput()
+
+	re, err := regexp.Compile(pattern)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			return "", "" // no matches
-		}
-		return "", fmt.Sprintf("grep: %v", err)
+		return "", fmt.Sprintf("invalid pattern: %v", err)
 	}
-	return string(output), ""
+
+	var results []string
+	var totalBytes int
+
+	walkFn := func(filePath string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip inaccessible entries
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Skip symlinks.
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+
+		// Validate the file path (catches escapes via symlinks or traversal).
+		if _, vErr := e.validatePath(filePath); vErr != nil {
+			return nil
+		}
+
+		info, sErr := d.Info()
+		if sErr != nil {
+			return nil
+		}
+		if info.Size() > maxFileReadSize {
+			return nil // skip files exceeding read cap
+		}
+
+		f, openErr := os.Open(filePath)
+		if openErr != nil {
+			return nil
+		}
+		defer func() { _ = f.Close() }()
+
+		scanner := bufio.NewScanner(f)
+		lineNum := 1
+		for scanner.Scan() {
+			line := scanner.Text()
+			if re.MatchString(line) {
+				relPath, relErr := filepath.Rel(validPath, filePath)
+				if relErr != nil {
+					relPath = filePath
+				}
+				result := fmt.Sprintf("%s:%d:%s", relPath, lineNum, line)
+				results = append(results, result)
+				totalBytes += len(result) + 1
+				if totalBytes > maxShellOutputSize {
+					return fmt.Errorf("output limit reached")
+				}
+			}
+			lineNum++
+		}
+		return nil
+	}
+
+	// WalkDir handles both files and directories.
+	walkErr := filepath.WalkDir(validPath, walkFn)
+	if walkErr != nil && walkErr.Error() == "output limit reached" {
+		// Truncate and add notice.
+		results = append(results, fmt.Sprintf("... truncated (%d bytes total)", totalBytes))
+	}
+
+	if len(results) == 0 {
+		return "", ""
+	}
+	return strings.Join(results, "\n"), ""
 }
 
 func (e *BuiltInToolExecutor) execShell(ctx context.Context, args map[string]interface{}) (string, string) {
@@ -432,11 +580,21 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args map[string]int
 	if command == "" {
 		return "", "command is required"
 	}
+	if len(command) > maxShellCommandLen {
+		return "", fmt.Sprintf("command exceeds max length of %d bytes", maxShellCommandLen)
+	}
+	if !e.allowShell {
+		return "", "shell tool is disabled"
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, e.shellTimeout)
 	defer cancel()
 
+	// NOTE: shell is NOT path-sandboxed; cmd.Dir is a working directory, not a
+	// chroot. The only guard is the approval gate, which never auto-approves
+	// the shell tool regardless of configuration.
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	cmd.Env = []string{}
+	cmd.Env = curatedEnv()
 	if e.sandboxRoot != "" {
 		cmd.Dir = e.sandboxRoot
 	}
@@ -446,46 +604,47 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args map[string]int
 		outStr = outStr[:maxShellOutputSize] + fmt.Sprintf("\n... truncated (%d bytes total)", len(output))
 	}
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
+			return outStr, fmt.Sprintf("shell: exit code %d", exitErr.ExitCode())
+		}
 		return outStr, fmt.Sprintf("shell: %v", err)
 	}
 	return outStr, ""
 }
 
-func isBlockedHost(hostname string) bool {
-	if strings.EqualFold(hostname, "localhost") {
-		return true
+// secretEnvPatterns lists substrings that indicate an environment variable
+// likely contains sensitive material.
+var secretEnvPatterns = []string{
+	"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL",
+	"API_KEY", "APIKEY", "ACCESS_KEY", "PRIVATE_KEY",
+	"AUTH", "BEARER", "JWT",
+}
+
+// curatedEnv returns a copy of the current process environment with
+// likely-secret variables removed. It preserves PATH, HOME, and other
+// safe variables so that common shell commands work.
+func curatedEnv() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		key, _, _ := strings.Cut(e, "=")
+		upper := strings.ToUpper(key)
+		if strings.Contains(upper, "SSH") {
+			continue
+		}
+		safe := true
+		for _, p := range secretEnvPatterns {
+			if strings.Contains(upper, p) {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			filtered = append(filtered, e)
+		}
 	}
-	ip := net.ParseIP(hostname)
-	if ip == nil {
-		return false
-	}
-	ipv4 := ip.To4()
-	if ipv4 != nil {
-		// 127.x.x.x
-		if ipv4[0] == 127 {
-			return true
-		}
-		// 10.x.x.x
-		if ipv4[0] == 10 {
-			return true
-		}
-		// 172.16-31.x.x
-		if ipv4[0] == 172 && ipv4[1] >= 16 && ipv4[1] <= 31 {
-			return true
-		}
-		// 192.168.x.x
-		if ipv4[0] == 192 && ipv4[1] == 168 {
-			return true
-		}
-		// 169.254.x.x
-		if ipv4[0] == 169 && ipv4[1] == 254 {
-			return true
-		}
-	}
-	if ip.IsLoopback() || ip.IsUnspecified() {
-		return true
-	}
-	return false
+	return filtered
 }
 
 func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args map[string]interface{}) (string, string) {
@@ -500,7 +659,7 @@ func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args map[string]
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", "only http and https URLs are allowed"
 	}
-	if isBlockedHost(u.Hostname()) {
+	if netutil.IsBlockedHost(u.Hostname()) {
 		return "", "URL host is blocked"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
@@ -511,7 +670,7 @@ func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args map[string]
 	if err != nil {
 		return "", fmt.Sprintf("fetch url: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {

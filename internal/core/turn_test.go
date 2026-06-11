@@ -61,8 +61,10 @@ func TestTurnManager_RunTurn_Simple(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
 	}
 
 	if len(contents) != 2 {
@@ -146,8 +148,10 @@ func TestTurnManager_RunTurn_WithToolCalls(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
 	}
 
 	if len(contents) != 2 {
@@ -230,8 +234,10 @@ func TestTurnManager_RunTurn_ManualApproval(t *testing.T) {
 	var contents []string
 	done := make(chan struct{})
 	go func() {
-		for c := range outCh {
-			contents = append(contents, c)
+		for e := range outCh {
+			if e.Type == api.TurnEventContent {
+				contents = append(contents, e.Content)
+			}
 		}
 		close(done)
 	}()
@@ -253,7 +259,8 @@ func TestTurnManager_RunTurn_ManualApproval(t *testing.T) {
 	}
 
 	// Approve and resume
-	if err := tm.ResumeWithApproval(ctx, sess.ID, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err != nil {
+	_, reqID := tm.PendingApprovals()
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err != nil {
 		t.Fatalf("resume with approval: %v", err)
 	}
 
@@ -330,18 +337,24 @@ func TestTurnManager_RunTurn_StreamError(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	var streamErr error
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
+		if e.Type == api.TurnEventError {
+			streamErr = e.Error
+		}
 	}
 
-	if len(contents) != 2 {
-		t.Fatalf("expected 2 chunks, got %d", len(contents))
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 content chunk, got %d", len(contents))
 	}
 	if contents[0] != "Partial" {
 		t.Errorf("contents[0] = %q, want Partial", contents[0])
 	}
-	if !strings.Contains(contents[1], "stream broken") {
-		t.Errorf("contents[1] = %q, want error with stream broken", contents[1])
+	if streamErr == nil || !strings.Contains(streamErr.Error(), "stream broken") {
+		t.Errorf("streamErr = %v, want error with stream broken", streamErr)
 	}
 
 	turn := tm.CurrentTurn()
@@ -395,8 +408,10 @@ func TestTurnManager_RunTurn_ContextCancellation(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
 		if len(contents) == 1 {
 			cancel() // Cancel after first chunk
 		}
@@ -450,6 +465,41 @@ func TestTurnManager_CurrentTurn_Nil(t *testing.T) {
 	}
 }
 
+func TestTurnManager_CurrentTurn_DeepCopy(t *testing.T) {
+	t.Parallel()
+	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm.turn = &api.Turn{
+		ID:    "turn-1",
+		State: api.TurnThinking,
+		ToolCalls: []api.ToolCall{
+			{ID: "tc1", Name: "read_file", Arguments: `{}`},
+		},
+		Results: []api.ToolResult{
+			{CallID: "tc1", Name: "read_file", Output: "hello"},
+		},
+	}
+
+	copy1 := tm.CurrentTurn()
+	copy2 := tm.CurrentTurn()
+
+	// Modifying copy1 should not affect copy2 or the original.
+	copy1.ToolCalls[0].Name = "modified"
+	copy1.Results[0].Output = "modified"
+
+	if copy2.ToolCalls[0].Name != "read_file" {
+		t.Errorf("copy2.ToolCalls[0].Name = %q, want read_file", copy2.ToolCalls[0].Name)
+	}
+	if copy2.Results[0].Output != "hello" {
+		t.Errorf("copy2.Results[0].Output = %q, want hello", copy2.Results[0].Output)
+	}
+	if tm.turn.ToolCalls[0].Name != "read_file" {
+		t.Errorf("original.ToolCalls[0].Name = %q, want read_file", tm.turn.ToolCalls[0].Name)
+	}
+	if tm.turn.Results[0].Output != "hello" {
+		t.Errorf("original.Results[0].Output = %q, want hello", tm.turn.Results[0].Output)
+	}
+}
+
 func TestTurnManager_RunTurn_NoConfig(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -475,11 +525,362 @@ func TestTurnManager_RunTurn_NoConfig(t *testing.T) {
 	}
 
 	var contents []string
-	for c := range outCh {
-		contents = append(contents, c)
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
 	}
 
 	if len(contents) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(contents))
+	}
+}
+
+func TestTurnManager_ToolCallID_PreservedAcrossRounds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	var secondRoundMessages []api.Message
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 2 {
+				secondRoundMessages = append([]api.Message(nil), messages...)
+			}
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Content: "Let me check"},
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "call-abc", Name: "read_file", Arguments: `{"path":"/tmp/test.txt"}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Content: "Done"},
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "file content"}, nil
+		},
+		defs:          []api.ToolDefinition{{Name: "read_file", Description: "read"}},
+		readOnlyTools: map[string]bool{"read_file": true},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range outCh {
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	// Find the tool message.
+	var toolMsg *api.Message
+	for i := range msgs {
+		if msgs[i].Role == api.RoleTool {
+			toolMsg = &msgs[i]
+			break
+		}
+	}
+	if toolMsg == nil {
+		t.Fatal("expected a tool message in store")
+	}
+	if toolMsg.ToolCallID != "call-abc" {
+		t.Errorf("tool message ToolCallID = %q, want call-abc", toolMsg.ToolCallID)
+	}
+
+	// The second ChatStream must receive the tool message with the matching tool_call_id.
+	if len(secondRoundMessages) == 0 {
+		t.Fatal("expected second round messages to be captured")
+	}
+	var found bool
+	for _, m := range secondRoundMessages {
+		if m.Role == api.RoleTool && m.ToolCallID == "call-abc" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("second round ChatStream did not receive tool message with ToolCallID=call-abc")
+	}
+}
+
+func TestTurnManager_RunTurn_Overlapping(t *testing.T) {
+	t.Parallel()
+
+	store := newMockStore()
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "hello"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+
+	ctx := context.Background()
+	ch1, err := tm.RunTurn(ctx, "sess-1", "first")
+	if err != nil {
+		t.Fatalf("first RunTurn: %v", err)
+	}
+
+	// Second RunTurn while first is still active should fail.
+	_, err = tm.RunTurn(ctx, "sess-1", "second")
+	if err == nil {
+		t.Fatal("expected error for overlapping RunTurn, got nil")
+	}
+	if !strings.Contains(err.Error(), "already in progress") {
+		t.Errorf("error = %q, want containing 'already in progress'", err.Error())
+	}
+
+	// Consume first stream to completion.
+	for range ch1 {
+	}
+
+	// After completion, a new RunTurn should succeed.
+	ch2, err := tm.RunTurn(ctx, "sess-1", "third")
+	if err != nil {
+		t.Fatalf("RunTurn after completion: %v", err)
+	}
+	for range ch2 {
+	}
+}
+
+func TestTurnManager_RunTurn_StaleRequestIDIgnored(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "tc1", Name: "shell", Arguments: `{}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			if callCount == 2 {
+				return streamChunks(
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "tc2", Name: "shell", Arguments: `{}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
+		},
+		defs:          []api.ToolDefinition{{Name: "shell", Description: "shell"}},
+		readOnlyTools: map[string]bool{},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalNo, false // manual approval required
+		},
+	}
+
+	tm := NewTurnManager(llm, tools, approval, store, nil)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "test input")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	var contents []string
+	done := make(chan struct{})
+	go func() {
+		for e := range outCh {
+			if e.Type == api.TurnEventContent {
+				contents = append(contents, e.Content)
+			}
+		}
+		close(done)
+	}()
+
+	// Wait for pending approval state.
+	for i := 0; i < 100; i++ {
+		turn := tm.CurrentTurn()
+		if turn != nil && turn.State == api.TurnWaitingApproval {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Get the current requestID.
+	_, reqID := tm.PendingApprovals()
+
+	// Send a stale approval (wrong requestID) — should be rejected.
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID-1, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err == nil {
+		t.Fatal("expected error for stale requestID")
+	}
+
+	// Send a matching approval.
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err != nil {
+		t.Fatalf("resume with approval: %v", err)
+	}
+
+	// Second round also needs approval.
+	var reqID2 int64
+	for i := 0; i < 100; i++ {
+		calls, id := tm.PendingApprovals()
+		if len(calls) > 0 && id > reqID {
+			reqID2 = id
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if reqID2 == 0 {
+		t.Fatal("expected second round pending approvals")
+	}
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID2, map[string]api.ApprovalDecision{"tc2": api.ApprovalYes}); err != nil {
+		t.Fatalf("resume with approval round 2: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn to complete")
+	}
+
+	turn := tm.CurrentTurn()
+	if turn.State != api.TurnIdle {
+		t.Errorf("state = %d, want TurnIdle", turn.State)
+	}
+	if len(turn.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(turn.Results))
+	}
+	if turn.Results[0].Error != "" {
+		t.Errorf("unexpected result 0 error: %s", turn.Results[0].Error)
+	}
+	if turn.Results[1].Error != "" {
+		t.Errorf("unexpected result 1 error: %s", turn.Results[1].Error)
+	}
+}
+
+func TestTurnManager_executeToolCalls_ContextCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	executeCount := 0
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			executeCount++
+			if call.ID == "tc1" {
+				cancel() // Cancel context after first call
+			}
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
+		},
+		defs: []api.ToolDefinition{
+			{Name: "read_file", Description: "read"},
+		},
+		readOnlyTools: map[string]bool{"read_file": true},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+
+	tm := NewTurnManager(&mockLLMClient{}, tools, approval, store, nil)
+	turn := &api.Turn{ID: "turn-1", State: api.TurnToolCalls}
+
+	calls := []api.ToolCall{
+		{ID: "tc1", Name: "read_file", Arguments: `{}`},
+		{ID: "tc2", Name: "read_file", Arguments: `{}`},
+		{ID: "tc3", Name: "read_file", Arguments: `{}`},
+	}
+
+	results, pending := tm.executeToolCalls(ctx, sess.ID, turn, calls)
+
+	if len(pending) != 0 {
+		t.Fatalf("expected no pending calls, got %d", len(pending))
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	if executeCount != 1 {
+		t.Fatalf("expected 1 Execute call before cancellation, got %d", executeCount)
+	}
+	if results[0].Error != "" {
+		t.Errorf("result[0] error = %q, want empty", results[0].Error)
+	}
+	if results[1].Error == "" || !strings.Contains(results[1].Error, "context cancelled") {
+		t.Errorf("result[1] error = %q, want context cancelled", results[1].Error)
+	}
+	if results[2].Error == "" || !strings.Contains(results[2].Error, "context cancelled") {
+		t.Errorf("result[2] error = %q, want context cancelled", results[2].Error)
+	}
+}
+
+func TestTurnManager_RunTurn_StreamErrorTypedEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	streamErr := fmt.Errorf("llm stream exploded")
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "partial"},
+			api.StreamChunk{Error: streamErr},
+		),
+	}
+	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "test")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	var gotContent bool
+	var gotError *api.TurnEvent
+	for ev := range outCh {
+		switch ev.Type {
+		case api.TurnEventContent:
+			gotContent = true
+		case api.TurnEventError:
+			gotError = &ev
+		case api.TurnEventDone:
+			t.Fatal("expected no Done event after error")
+		}
+	}
+
+	if !gotContent {
+		t.Error("expected content event before error")
+	}
+	if gotError == nil {
+		t.Fatal("expected typed error event")
+	}
+	if gotError.Error != streamErr {
+		t.Errorf("error = %v, want %v", gotError.Error, streamErr)
+	}
+	// Verify the turn state reflects the error.
+	turn := tm.CurrentTurn()
+	if turn == nil || turn.State != api.TurnError {
+		t.Fatalf("expected turn state TurnError, got %v", turn)
 	}
 }

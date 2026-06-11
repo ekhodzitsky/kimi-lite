@@ -47,7 +47,7 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 
 	var conversation strings.Builder
 	for _, msg := range toSummarize {
-		conversation.WriteString(fmt.Sprintf("%s: %s\n", msg.Role, msg.Content))
+		fmt.Fprintf(&conversation, "%s: %s\n", msg.Role, msg.Content)
 	}
 
 	summaryPrompt := api.Message{
@@ -61,11 +61,17 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 		return 0, fmt.Errorf("summarize conversation: %w", err)
 	}
 
+	// Set summary timestamp strictly before the oldest recent message so
+	// that GetMessages' ORDER BY created_at ASC preserves chronological order.
+	summaryCreatedAt := time.Now().UTC().Add(-time.Second)
+	if len(recent) > 0 && recent[0].CreatedAt.Before(summaryCreatedAt) {
+		summaryCreatedAt = recent[0].CreatedAt.Add(-time.Millisecond)
+	}
 	summaryMsg := api.Message{
 		ID:        idgen.GenerateID(),
 		Role:      api.RoleSystem,
 		Content:   fmt.Sprintf("Previous conversation summary: %s", resp.Content),
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: summaryCreatedAt,
 	}
 	newMessages := append([]api.Message{summaryMsg}, recent...)
 	if err := store.ReplaceMessages(ctx, sessionID, newMessages); err != nil {
@@ -74,5 +80,3 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 
 	return len(toSummarize), nil
 }
-
-

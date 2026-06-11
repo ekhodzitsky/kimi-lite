@@ -736,3 +736,37 @@ func TestSidebarSelectFile(t *testing.T) {
 		t.Errorf("message should contain file path, got %q", model.messages[0].Content)
 	}
 }
+
+func TestErrorMsg_DoesNotOverrideTurnErrorOnDone(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	// Simulate real flow: ErrorMsg from readStreamChunk sets TurnError.
+	updated, _ := m.Update(ErrorMsg{Err: errors.New("stream broke")})
+	model := updated.(*Model)
+
+	if model.state != api.TurnError {
+		t.Fatalf("state = %d, want TurnError", model.state)
+	}
+	if len(model.messages) != 1 {
+		t.Fatalf("messages length = %d, want 1", len(model.messages))
+	}
+	if !strings.Contains(model.messages[0].Content, "stream broke") {
+		t.Errorf("error message = %q, want to contain 'stream broke'", model.messages[0].Content)
+	}
+
+	// A subsequent StreamChunkMsg{Done: true} (e.g. from channel close after error)
+	// must NOT flip the state back to TurnIdle.
+	updated2, _ := model.Update(StreamChunkMsg{Chunk: api.StreamChunk{Done: true}})
+	model2 := updated2.(*Model)
+
+	if model2.state != api.TurnError {
+		t.Errorf("state after Done = %d, want TurnError", model2.state)
+	}
+}

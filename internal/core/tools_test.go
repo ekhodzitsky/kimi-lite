@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -149,6 +150,31 @@ func TestBuiltInToolExecutor_Execute_ReadFile_MissingPath(t *testing.T) {
 	}
 	if result.Error == "" {
 		t.Fatal("expected error for missing path")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ReadFile_TooLarge(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	largeFile := filepath.Join(tmp, "large.txt")
+	if err := os.WriteFile(largeFile, make([]byte, maxFileReadSize+1), 0644); err != nil {
+		t.Fatalf("create large file: %v", err)
+	}
+
+	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_file",
+		Arguments: fmt.Sprintf(`{"path":"%s"}`, largeFile),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for oversized file")
+	}
+	if !strings.Contains(result.Error, "max read size") {
+		t.Errorf("error = %q, want containing 'max read size'", result.Error)
 	}
 }
 
@@ -331,6 +357,36 @@ func TestBuiltInToolExecutor_Execute_Grep_NoMatches(t *testing.T) {
 	}
 }
 
+func TestBuiltInToolExecutor_Execute_Grep_SkipsSymlinks(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+
+	// Create a secret file outside the sandbox.
+	secretDir := t.TempDir()
+	secretPath := filepath.Join(secretDir, "secret.txt")
+	_ = os.WriteFile(secretPath, []byte("SECRET_PASSWORD=12345"), 0644)
+
+	// Create a symlink inside the sandbox pointing to the secret.
+	symlinkPath := filepath.Join(tmp, "link.txt")
+	_ = os.Symlink(secretPath, symlinkPath)
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "grep",
+		Arguments: fmt.Sprintf(`{"pattern":"SECRET_PASSWORD","path":"%s"}`, tmp),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if strings.Contains(result.Output, "SECRET_PASSWORD") {
+		t.Fatalf("grep should not follow symlinks; got output: %q", result.Output)
+	}
+}
+
 func TestBuiltInToolExecutor_Execute_Shell(t *testing.T) {
 	t.Parallel()
 	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
@@ -382,6 +438,108 @@ func TestBuiltInToolExecutor_Execute_Shell_MissingCommand(t *testing.T) {
 	}
 	if result.Error == "" {
 		t.Fatal("expected error for missing command")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_NonZeroExit(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: `{"command":"echo 'build failed'; exit 1"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for non-zero exit")
+	}
+	if !strings.Contains(result.Error, "exit code 1") {
+		t.Errorf("error = %q, want containing 'exit code 1'", result.Error)
+	}
+	if !strings.Contains(result.Output, "build failed") {
+		t.Errorf("output = %q, want containing 'build failed'", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_Disabled(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec.SetAllowShell(false)
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: `{"command":"echo hello"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error when shell is disabled")
+	}
+	if !strings.Contains(result.Error, "disabled") {
+		t.Fatalf("expected disabled error, got: %q", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_CommandTooLong(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+
+	longCmd := strings.Repeat("a", maxShellCommandLen+1)
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: fmt.Sprintf(`{"command":"%s"}`, longCmd),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for command exceeding max length")
+	}
+	if !strings.Contains(result.Error, "exceeds max length") {
+		t.Fatalf("expected length error, got: %q", result.Error)
+	}
+}
+
+func TestApprovalGate_NeverAutoApprove_Shell(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeAuto, []string{"shell", "read_file"})
+
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "shell"})
+	if auto {
+		t.Fatal("shell should never be auto-approved")
+	}
+	if decision != api.ApprovalNo {
+		t.Fatalf("expected ApprovalNo, got %v", decision)
+	}
+
+	// read_file should still auto-approve.
+	decision, auto = gate.ShouldAutoApprove(api.ToolCall{Name: "read_file"})
+	if !auto {
+		t.Fatal("read_file should be auto-approved")
+	}
+	if decision != api.ApprovalYes {
+		t.Fatalf("expected ApprovalYes, got %v", decision)
+	}
+}
+
+func TestApprovalGate_NeverAutoApprove_WriteFile(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeAuto, []string{"write_file", "str_replace_file"})
+
+	for _, name := range []string{"write_file", "str_replace_file"} {
+		decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: name})
+		if auto {
+			t.Fatalf("%s should never be auto-approved", name)
+		}
+		if decision != api.ApprovalNo {
+			t.Fatalf("expected ApprovalNo, got %v", decision)
+		}
 	}
 }
 
@@ -505,6 +663,12 @@ func TestIsBlockedHost(t *testing.T) {
 		{"172.16.0.1", true},
 		{"192.168.1.1", true},
 		{"169.254.1.1", true},
+		{"169.254.169.254", true},
+		{"100.64.0.1", true},
+		{"fd12:3456::1", true},
+		{"fc00::1", true},
+		{"fe80::1", true},
+		{"::ffff:10.0.0.1", true},
 		{"example.com", false},
 		{"8.8.8.8", false},
 	}
@@ -512,8 +676,8 @@ func TestIsBlockedHost(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
 			t.Parallel()
-			if got := isBlockedHost(tt.host); got != tt.blocked {
-				t.Errorf("isBlockedHost(%q) = %v, want %v", tt.host, got, tt.blocked)
+			if got := netutil.IsBlockedHost(tt.host); got != tt.blocked {
+				t.Errorf("IsBlockedHost(%q) = %v, want %v", tt.host, got, tt.blocked)
 			}
 		})
 	}
@@ -591,7 +755,7 @@ func TestNewSecureHTTPClient_BlocksRedirectToBlockedHost(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newSecureHTTPClient()
+	client := netutil.SecureHTTPClient()
 	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	resp, err := client.Do(req)
 	if err == nil {
@@ -624,5 +788,178 @@ func TestBuiltInToolExecutor_Execute_FetchURL_BlocksRedirectToLocalhost(t *testi
 	}
 	if !strings.Contains(result.Error, "blocked") && !strings.Contains(result.Error, "redirect") {
 		t.Errorf("expected blocked/redirect error, got: %s", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_ValidatePath_BlocksExactEtc(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+
+	_, err := exec.validatePath("/etc")
+	if err == nil {
+		t.Fatal("expected error for /etc")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked error, got: %v", err)
+	}
+}
+
+func TestBuiltInToolExecutor_ValidatePath_BlocksSshDir(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+
+	_, err := exec.validatePath("~/.ssh/id_rsa")
+	if err == nil {
+		t.Fatal("expected error for ~/.ssh/id_rsa")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked error, got: %v", err)
+	}
+}
+
+func TestBuiltInToolExecutor_ValidatePath_BlocksProtectedDBPath(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "sessions.db")
+
+	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil, dbPath)
+
+	_, err := exec.validatePath(dbPath)
+	if err == nil {
+		t.Fatal("expected error for protected DB path")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked error, got: %v", err)
+	}
+
+	// Also block the parent directory.
+	_, err = exec.validatePath(filepath.Join(tmp, filepath.Dir(dbPath)))
+	// Wait, dbPath is already inside tmp. The parent of dbPath is tmp.
+	// Since sandboxRoot is tmp, accessing tmp itself is allowed by sandbox.
+	// But protectedPaths should block it regardless.
+	parentDir := filepath.Dir(dbPath)
+	_, err = exec.validatePath(parentDir)
+	if err == nil {
+		t.Fatal("expected error for protected DB parent dir")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked error, got: %v", err)
+	}
+}
+
+func TestAtomicWriteFile_NewFile_Mode0600(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "newfile.txt")
+
+	if err := atomicWriteFile(target, []byte("hello")); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	mode := info.Mode().Perm()
+	if mode != 0600 {
+		t.Fatalf("expected mode 0600, got %04o", mode)
+	}
+}
+
+func TestAtomicWriteFile_PreservesExistingMode(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "existing.txt")
+
+	// Create existing file with mode 0644.
+	if err := os.WriteFile(target, []byte("old"), 0644); err != nil {
+		t.Fatalf("write existing: %v", err)
+	}
+
+	if err := atomicWriteFile(target, []byte("new")); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	mode := info.Mode().Perm()
+	if mode != 0644 {
+		t.Fatalf("expected mode 0644 to be preserved, got %04o", mode)
+	}
+}
+
+func TestAtomicWriteFile_Atomic(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "atomic.txt")
+
+	// Write a large payload so a non-atomic write would be observable.
+	payload := make([]byte, 1024*1024)
+	for i := range payload {
+		payload[i] = 'x'
+	}
+
+	// Verify no temp file leaked.
+	entries, _ := os.ReadDir(tmp)
+	before := len(entries)
+
+	if err := atomicWriteFile(target, payload); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+
+	entries, _ = os.ReadDir(tmp)
+	after := len(entries)
+	if after != before+1 {
+		t.Fatalf("expected 1 new file, got %d (before=%d, after=%d)", after-before, before, after)
+	}
+
+	// Verify target has the full content.
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if len(data) != len(payload) {
+		t.Fatalf("expected %d bytes, got %d", len(payload), len(data))
+	}
+}
+
+func TestCuratedEnv(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("HOME", "/home/user")
+	t.Setenv("OPENAI_API_KEY", "sk-secret")
+	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("MY_PASSWORD", "hunter2")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/ssh")
+	t.Setenv("SAFE_VAR", "visible")
+
+	env := curatedEnv()
+	m := make(map[string]string, len(env))
+	for _, e := range env {
+		k, v, _ := strings.Cut(e, "=")
+		m[k] = v
+	}
+
+	if m["PATH"] != "/usr/bin" {
+		t.Errorf("PATH = %q, want /usr/bin", m["PATH"])
+	}
+	if m["HOME"] != "/home/user" {
+		t.Errorf("HOME = %q, want /home/user", m["HOME"])
+	}
+	if m["SAFE_VAR"] != "visible" {
+		t.Errorf("SAFE_VAR = %q, want visible", m["SAFE_VAR"])
+	}
+	if _, ok := m["OPENAI_API_KEY"]; ok {
+		t.Error("OPENAI_API_KEY should be scrubbed")
+	}
+	if _, ok := m["GITHUB_TOKEN"]; ok {
+		t.Error("GITHUB_TOKEN should be scrubbed")
+	}
+	if _, ok := m["MY_PASSWORD"]; ok {
+		t.Error("MY_PASSWORD should be scrubbed")
+	}
+	if _, ok := m["SSH_AUTH_SOCK"]; ok {
+		t.Error("SSH_AUTH_SOCK should be scrubbed")
 	}
 }

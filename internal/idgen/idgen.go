@@ -4,16 +4,15 @@ package idgen
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
-	"time"
 )
 
-// GenerateID generates a random 16-character hex ID.
-// Falls back to a timestamp if crypto/rand fails.
+// GenerateID generates a random 32-character lowercase hex ID.
+// It panics if the system's CSPRNG fails, which is effectively impossible
+// on supported platforms.
 func GenerateID() string {
-	b := make([]byte, 8)
+	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+		panic("idgen: crypto/rand.Read failed: " + err.Error())
 	}
 	return hex.EncodeToString(b)
 }

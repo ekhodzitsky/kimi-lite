@@ -46,7 +46,8 @@ type StateChangeMsg struct {
 
 // ApprovalRequestMsg requests user approval for tool calls.
 type ApprovalRequestMsg struct {
-	Calls []api.ToolCall
+	Calls     []api.ToolCall
+	RequestID int64
 }
 
 // ApprovalResponseMsg carries the user's approval decision.
@@ -109,8 +110,8 @@ func (m *Model) inputHeight() int {
 
 // turnManager is the interface needed from core.TurnManager.
 type turnManager interface {
-	RunTurn(ctx context.Context, sessionID string, input string) (<-chan string, error)
-	ResumeWithApproval(ctx context.Context, sessionID string, approvals map[string]api.ApprovalDecision) error
+	RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
+	ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error
 }
 
 // sessionManager is the interface needed from core.SessionManager.
@@ -145,6 +146,7 @@ type Model struct {
 	height int
 
 	pendingApprovals  []api.ToolCall
+	approvalRequestID int64
 	approvalIndex     int
 	approvalDecisions map[string]api.ApprovalDecision
 
@@ -157,7 +159,7 @@ type Model struct {
 	store          api.Store
 
 	// Streaming state
-	streamCh     <-chan string
+	streamCh     <-chan api.TurnEvent
 	streamCancel context.CancelFunc
 
 	// Focus management
@@ -287,6 +289,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ApprovalRequestMsg:
 		m.pendingApprovals = msg.Calls
+		m.approvalRequestID = msg.RequestID
 		m.approvalIndex = 0
 		m.setState(api.TurnWaitingApproval)
 
@@ -603,18 +606,27 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 	return cmds
 }
 
-// readStreamChunk returns a command that reads the next chunk from the stream.
+// readStreamChunk returns a command that reads the next event from the stream.
 func (m *Model) readStreamChunk() tea.Cmd {
 	ch := m.streamCh // capture at command creation time
 	return func() tea.Msg {
 		if ch == nil {
 			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true}}
 		}
-		content, ok := <-ch
+		event, ok := <-ch
 		if !ok {
 			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true}}
 		}
-		return StreamChunkMsg{Chunk: api.StreamChunk{Content: content}}
+		switch event.Type {
+		case api.TurnEventContent:
+			return StreamChunkMsg{Chunk: api.StreamChunk{Content: event.Content}}
+		case api.TurnEventDone:
+			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true, ToolCalls: event.ToolCalls}}
+		case api.TurnEventError:
+			return ErrorMsg{Err: event.Error}
+		default:
+			return nil
+		}
 	}
 }
 
@@ -678,7 +690,9 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 	}
 
 	if chunk.Done {
-		m.setState(api.TurnIdle)
+		if m.state != api.TurnError {
+			m.setState(api.TurnIdle)
+		}
 		m.streamCh = nil
 		if lastMsg := m.lastAssistantMessage(); lastMsg != nil {
 			lastMsg.SetStreaming(false)
@@ -813,12 +827,14 @@ func (m *Model) approveCurrent(decision api.ApprovalDecision) tea.Cmd {
 
 func (m *Model) resumeWithApprovals(approvals map[string]api.ApprovalDecision) tea.Cmd {
 	// Clear state in main thread before returning async command.
+	reqID := m.approvalRequestID
 	m.pendingApprovals = nil
+	m.approvalRequestID = 0
 	m.approvalIndex = -1
 	m.approvalDecisions = nil
 	return func() tea.Msg {
 		if m.turnManager != nil && m.session != nil {
-			_ = m.turnManager.ResumeWithApproval(m.appCtx, m.session.ID, approvals)
+			_ = m.turnManager.ResumeWithApproval(m.appCtx, m.session.ID, reqID, approvals)
 		}
 		return StateChangeMsg{State: api.TurnThinking}
 	}
@@ -870,8 +886,8 @@ func (m *Model) renderApprovalDialog(background string) string {
 	call := m.pendingApprovals[m.approvalIndex]
 	var b strings.Builder
 	b.WriteString("Tool call requires approval\n\n")
-	b.WriteString(fmt.Sprintf("Tool: %s\n", call.Name))
-	b.WriteString(fmt.Sprintf("Arguments: %s\n", call.Arguments))
+	fmt.Fprintf(&b, "Tool: %s\n", call.Name)
+	fmt.Fprintf(&b, "Arguments: %s\n", call.Arguments)
 	b.WriteString("\n[y] yes  [n] no  [a] always")
 
 	dialog := m.styles.ApprovalDialog.Render(b.String())

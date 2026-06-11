@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
-	_ "modernc.org/sqlite"
 )
 
 //go:embed migrations/001_initial.sql
@@ -23,15 +25,87 @@ type SQLite struct {
 	db *sql.DB
 }
 
-// NewSQLite opens (or creates) a SQLite database at dbPath and runs migrations.
-func NewSQLite(dbPath string) (*SQLite, error) {
+// sqliteDSN builds a properly escaped SQLite connection string.
+func sqliteDSN(dbPath string) string {
 	q := url.Values{}
 	q.Set("_fk", "1")
+	// Connection-scoped PRAGMAs via the driver _pragma DSN key.
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "synchronous(NORMAL)")
 	if dbPath == ":memory:" {
 		q.Set("cache", "shared")
+		return dbPath + "?" + q.Encode()
 	}
-	u := url.URL{Scheme: "file", Opaque: dbPath, RawQuery: q.Encode()}
-	db, err := sql.Open("sqlite", u.String())
+	u := url.URL{Scheme: "file", Path: dbPath, RawQuery: q.Encode()}
+	dsn := u.String()
+	// url.URL adds "//" for relative paths, which SQLite interprets as an
+	// authority component. Strip it to produce the valid file:path form.
+	if !filepath.IsAbs(dbPath) {
+		dsn = "file:" + u.EscapedPath() + "?" + u.RawQuery
+	}
+	return dsn
+}
+
+// migrateTurnsStateColumn recreates the turns table with state as TEXT if it
+// currently has INTEGER type. SQLite is dynamically typed, so existing string
+// data is preserved during the copy.
+func migrateTurnsStateColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(turns)`)
+	if err != nil {
+		return fmt.Errorf("inspect turns table: %w", err)
+	}
+	defer rows.Close()
+
+	needsMigrate := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "state" && typ == "INTEGER" {
+			needsMigrate = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table_info: %w", err)
+	}
+	if !needsMigrate {
+		return nil
+	}
+
+	_, err = db.Exec(`
+		ALTER TABLE turns RENAME TO turns_old;
+		CREATE TABLE turns (
+			id         TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			state      TEXT NOT NULL,
+			input      TEXT NOT NULL DEFAULT '',
+			response   TEXT NOT NULL DEFAULT '',
+			tool_calls TEXT,
+			results    TEXT,
+			error      TEXT,
+			started_at DATETIME NOT NULL,
+			ended_at   DATETIME,
+			PRIMARY KEY (id, session_id),
+			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+		);
+		INSERT INTO turns SELECT * FROM turns_old;
+		DROP TABLE turns_old;
+		CREATE INDEX idx_turns_session_started ON turns(session_id, started_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("recreate turns table: %w", err)
+	}
+	return nil
+}
+
+// NewSQLite opens (or creates) a SQLite database at dbPath and runs migrations.
+func NewSQLite(dbPath string) (*SQLite, error) {
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -53,6 +127,19 @@ func NewSQLite(dbPath string) (*SQLite, error) {
 	if _, err := db.Exec(initialSchema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("run initial schema: %w", err)
+	}
+
+	// Migrate: add tool_call_id column if missing (schema v1 -> v2).
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN tool_call_id TEXT`); err != nil {
+		// SQLite returns an error if the column already exists; ignore it.
+		// We cannot use IF NOT EXISTS with ADD COLUMN, so we rely on the error.
+		_ = err
+	}
+
+	// Migrate: change turns.state from INTEGER to TEXT if needed (schema v2 -> v3).
+	if err := migrateTurnsStateColumn(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate turns.state column: %w", err)
 	}
 
 	// Mark any orphaned TurnStreaming records as TurnError from previous crashes.
@@ -186,8 +273,8 @@ func (s *SQLite) AppendMessage(ctx context.Context, sessionID string, msg api.Me
 	}
 
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages (id, session_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		msg.ID, sessionID, string(msg.Role), msg.Content, string(toolCallsJSON), msg.CreatedAt.UTC(),
+		`INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, sessionID, string(msg.Role), msg.Content, msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
 	); err != nil {
 		return fmt.Errorf("insert message: %w", err)
 	}
@@ -203,7 +290,7 @@ func (s *SQLite) GetMessages(ctx context.Context, sessionID string, limit int) (
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, role, content, tool_calls, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit,
+		`SELECT id, role, content, tool_call_id, tool_calls, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get messages: %w", err)
@@ -215,7 +302,7 @@ func (s *SQLite) GetMessages(ctx context.Context, sessionID string, limit int) (
 		var msg api.Message
 		var roleStr string
 		var toolCallsJSON string
-		if err := rows.Scan(&msg.ID, &roleStr, &msg.Content, &toolCallsJSON, &msg.CreatedAt); err != nil {
+		if err := rows.Scan(&msg.ID, &roleStr, &msg.Content, &msg.ToolCallID, &toolCallsJSON, &msg.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		msg.Role = api.Role(roleStr)
@@ -264,8 +351,8 @@ func (s *SQLite) ReplaceMessages(ctx context.Context, sessionID string, msgs []a
 			return fmt.Errorf("marshal tool calls: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO messages (id, session_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			msg.ID, sessionID, string(msg.Role), msg.Content, string(toolCallsJSON), msg.CreatedAt.UTC(),
+			`INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			msg.ID, sessionID, string(msg.Role), msg.Content, msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
 		); err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
@@ -343,7 +430,7 @@ func (s *SQLite) GetTurns(ctx context.Context, sessionID string, limit int) ([]a
 		if err := rows.Scan(&turn.ID, &stateStr, &turn.Input, &turn.Response, &toolCallsJSON, &resultsJSON, &turn.Error, &turn.StartedAt, &endedAt); err != nil {
 			return nil, fmt.Errorf("scan turn: %w", err)
 		}
-		turn.State = api.ParseTurnState(stateStr)
+		turn.State, _ = api.ParseTurnState(stateStr)
 		if toolCallsJSON != "" && toolCallsJSON != "null" {
 			if err := json.Unmarshal([]byte(toolCallsJSON), &turn.ToolCalls); err != nil {
 				return nil, fmt.Errorf("unmarshal tool calls: %w", err)

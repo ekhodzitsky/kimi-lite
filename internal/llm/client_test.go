@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -84,15 +86,16 @@ func TestClientChat(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		response       interface{}
-		statusCode     int
-		messages       []api.Message
-		tools          []api.ToolDefinition
-		wantContent    string
-		wantToolCalls  []api.ToolCall
-		wantErr        bool
-		wantErrContain string
+		name             string
+		response         interface{}
+		statusCode       int
+		messages         []api.Message
+		tools            []api.ToolDefinition
+		wantContent      string
+		wantToolCalls    []api.ToolCall
+		wantErr          bool
+		wantErrContain   string
+		wantAPIErrStatus int
 	}{
 		{
 			name: "simple response",
@@ -163,20 +166,20 @@ func TestClientChat(t *testing.T) {
 			},
 		},
 		{
-			name:           "client error",
-			response:       map[string]string{"error": "invalid request"},
-			statusCode:     http.StatusBadRequest,
-			messages:       []api.Message{{Role: api.RoleUser, Content: "Hi"}},
-			wantErr:        true,
-			wantErrContain: "client error 400",
+			name:             "client error",
+			response:         map[string]string{"error": "invalid request"},
+			statusCode:       http.StatusBadRequest,
+			messages:         []api.Message{{Role: api.RoleUser, Content: "Hi"}},
+			wantErr:          true,
+			wantAPIErrStatus: http.StatusBadRequest,
 		},
 		{
-			name:           "server error then success",
-			response:       map[string]string{"error": "overloaded"},
-			statusCode:     http.StatusServiceUnavailable,
-			messages:       []api.Message{{Role: api.RoleUser, Content: "Hi"}},
-			wantErr:        true,
-			wantErrContain: "max retries exceeded",
+			name:             "server error then success",
+			response:         map[string]string{"error": "overloaded"},
+			statusCode:       http.StatusServiceUnavailable,
+			messages:         []api.Message{{Role: api.RoleUser, Content: "Hi"}},
+			wantErr:          true,
+			wantAPIErrStatus: http.StatusServiceUnavailable,
 		},
 		{
 			name: "empty choices",
@@ -188,10 +191,10 @@ func TestClientChat(t *testing.T) {
 				} `json:"message"`
 				FinishReason string `json:"finish_reason"`
 			}{}},
-			statusCode:     http.StatusOK,
-			messages:       []api.Message{{Role: api.RoleUser, Content: "Hi"}},
-			wantErr:        true,
-			wantErrContain: "empty response",
+			statusCode:       http.StatusOK,
+			messages:         []api.Message{{Role: api.RoleUser, Content: "Hi"}},
+			wantErr:          true,
+			wantAPIErrStatus: http.StatusOK,
 		},
 	}
 
@@ -232,6 +235,14 @@ func TestClientChat(t *testing.T) {
 				}
 				if tt.wantErrContain != "" && !strings.Contains(err.Error(), tt.wantErrContain) {
 					t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErrContain)
+				}
+				if tt.wantAPIErrStatus != 0 {
+					var apiErr *api.APIError
+					if !errors.As(err, &apiErr) {
+						t.Errorf("expected *api.APIError in error chain, got %T", err)
+					} else if apiErr.StatusCode != tt.wantAPIErrStatus {
+						t.Errorf("apiErr.StatusCode = %d, want %d", apiErr.StatusCode, tt.wantAPIErrStatus)
+					}
 				}
 				return
 			}
@@ -349,12 +360,13 @@ func TestClientChatStream(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		streamData     string
-		wantContents   []string
-		wantDone       bool
-		wantErr        bool
-		wantErrContain string
+		name             string
+		streamData       string
+		wantContents     []string
+		wantDone         bool
+		wantErr          bool
+		wantErrContain   string
+		wantAPIErrStatus int
 	}{
 		{
 			name: "simple stream",
@@ -393,10 +405,10 @@ data: [DONE]
 			wantDone:     true,
 		},
 		{
-			name:           "stream server error",
-			streamData:     ``,
-			wantErr:        true,
-			wantErrContain: "client error 401",
+			name:             "stream server error",
+			streamData:       ``,
+			wantErr:          true,
+			wantAPIErrStatus: http.StatusUnauthorized,
 		},
 	}
 
@@ -431,6 +443,14 @@ data: [DONE]
 				}
 				if tt.wantErrContain != "" && !strings.Contains(err.Error(), tt.wantErrContain) {
 					t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErrContain)
+				}
+				if tt.wantAPIErrStatus != 0 {
+					var apiErr *api.APIError
+					if !errors.As(err, &apiErr) {
+						t.Errorf("expected *api.APIError in error chain, got %T", err)
+					} else if apiErr.StatusCode != tt.wantAPIErrStatus {
+						t.Errorf("apiErr.StatusCode = %d, want %d", apiErr.StatusCode, tt.wantAPIErrStatus)
+					}
 				}
 				return
 			}
@@ -593,7 +613,7 @@ func TestClientBuildChatRequest(t *testing.T) {
 		{Role: api.RoleAssistant, Content: "Hi!", ToolCalls: []api.ToolCall{
 			{ID: "call_1", Name: "foo", Arguments: `{}`},
 		}},
-		{Role: api.RoleTool, Content: "result", ID: "call_1"},
+		{Role: api.RoleTool, Content: "result", ID: "msg-4", ToolCallID: "call_1"},
 	}
 
 	tools := []api.ToolDefinition{
@@ -793,7 +813,11 @@ func TestIsRetryableError(t *testing.T) {
 		{"nil", nil, false},
 		{"context canceled", context.Canceled, false},
 		{"context deadline exceeded", context.DeadlineExceeded, true},
-		{"network error", &net.DNSError{IsTimeout: true}, true},
+		{"network timeout", &net.DNSError{IsTimeout: true}, true},
+		{"dns not found", &net.DNSError{IsNotFound: true}, false},
+		{"connection refused", &net.OpError{Err: syscall.ECONNREFUSED}, false},
+		{"connection reset", &net.OpError{Err: syscall.ECONNRESET}, true},
+		{"unexpected EOF", io.ErrUnexpectedEOF, true},
 		{"random error", fmt.Errorf("random"), false},
 	}
 
@@ -833,5 +857,379 @@ func TestLookupModel(t *testing.T) {
 				t.Errorf("Provider = %q, want %q", info.Provider, tt.wantProvider)
 			}
 		})
+	}
+}
+
+func TestBuildChatRequest_ToolCallID(t *testing.T) {
+	t.Parallel()
+
+	c := NewClient(api.LLMConfig{BaseURL: "https://example.com", APIKey: "key", Model: "m"}, nil)
+
+	messages := []api.Message{
+		{ID: "msg-1", Role: api.RoleAssistant, Content: "let me check", ToolCalls: []api.ToolCall{{ID: "call-abc", Name: "read_file", Arguments: `{}`}}},
+		{ID: "msg-2", Role: api.RoleTool, Content: "hello", ToolCallID: "call-abc"},
+		{ID: "msg-3", Role: api.RoleTool, Content: "world", ToolCallID: ""},
+	}
+
+	req := c.buildChatRequest(messages, nil, false)
+
+	if len(req.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(req.Messages))
+	}
+
+	// Assistant message should NOT have tool_call_id.
+	if req.Messages[0].ToolCallID != "" {
+		t.Errorf("assistant message tool_call_id = %q, want empty", req.Messages[0].ToolCallID)
+	}
+
+	// Tool message with matching call ID must forward it.
+	if req.Messages[1].ToolCallID != "call-abc" {
+		t.Errorf("tool message tool_call_id = %q, want call-abc", req.Messages[1].ToolCallID)
+	}
+
+	// Tool message with empty call ID should remain empty.
+	if req.Messages[2].ToolCallID != "" {
+		t.Errorf("tool message tool_call_id = %q, want empty", req.Messages[2].ToolCallID)
+	}
+}
+
+func TestStreamReader_CancelledContext_ReturnsPromptly(t *testing.T) {
+	t.Parallel()
+
+	pr, _ := io.Pipe()
+	reader := NewStreamReader(pr)
+	defer reader.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := reader.ReadChunk(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestStreamReader_CancelMidRead_NoRace(t *testing.T) {
+	t.Parallel()
+
+	pr, pw := io.Pipe()
+	reader := NewStreamReader(pr)
+	defer reader.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Write a partial SSE event so Scan blocks mid-event.
+	go func() {
+		_, _ = pw.Write([]byte("data: "))
+		// Cancel after the reader is blocked.
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+		// Closing the pipe unblocks the scanner.
+		_ = pw.Close()
+	}()
+
+	_, err := reader.ReadChunk(ctx)
+	if err == nil {
+		t.Fatal("expected an error after cancellation")
+	}
+	// The error may be context.Canceled (checked before readRawChunk)
+	// or an io error from the closed pipe; both are acceptable.
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Logf("got error: %v (acceptable)", err)
+	}
+}
+
+func TestSortedToolCalls(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		accumulator map[int]*rawToolCall
+		want        []api.ToolCall
+	}{
+		{
+			name:        "empty",
+			accumulator: map[int]*rawToolCall{},
+			want:        nil,
+		},
+		{
+			name: "contiguous indices",
+			accumulator: map[int]*rawToolCall{
+				0: {Index: 0, ID: "call_1", Name: "read_file"},
+				1: {Index: 1, ID: "call_2", Name: "write_file"},
+			},
+			want: []api.ToolCall{
+				{ID: "call_1", Name: "read_file"},
+				{ID: "call_2", Name: "write_file"},
+			},
+		},
+		{
+			name: "non-contiguous indices",
+			accumulator: map[int]*rawToolCall{
+				0: {Index: 0, ID: "call_1", Name: "read_file"},
+				2: {Index: 2, ID: "call_3", Name: "edit_file"},
+			},
+			want: []api.ToolCall{
+				{ID: "call_1", Name: "read_file"},
+				{ID: "call_3", Name: "edit_file"},
+			},
+		},
+		{
+			name: "reverse order insertion",
+			accumulator: map[int]*rawToolCall{
+				2: {Index: 2, ID: "call_3", Name: "edit_file"},
+				0: {Index: 0, ID: "call_1", Name: "read_file"},
+				1: {Index: 1, ID: "call_2", Name: "write_file"},
+			},
+			want: []api.ToolCall{
+				{ID: "call_1", Name: "read_file"},
+				{ID: "call_2", Name: "write_file"},
+				{ID: "call_3", Name: "edit_file"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sortedToolCalls(tt.accumulator)
+			if len(got) != len(tt.want) {
+				t.Fatalf("len = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("[%d] = %+v, want %+v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestStreamReader_LargePayload(t *testing.T) {
+	t.Parallel()
+
+	// Build a payload larger than the default 64 KB scanner limit.
+	largeContent := strings.Repeat("x", 128*1024)
+	payload := fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, largeContent)
+	input := "data: " + payload + "\n\ndata: [DONE]\n\n"
+
+	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
+	defer reader.Close()
+
+	chunk, err := reader.ReadChunk(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chunk.Content != largeContent {
+		t.Errorf("content length = %d, want %d", len(chunk.Content), len(largeContent))
+	}
+
+	chunk, err = reader.ReadChunk(context.Background())
+	if err != io.EOF {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+	if !chunk.Done {
+		t.Error("expected Done = true")
+	}
+}
+
+func TestClientChatRetryAfterHeader(t *testing.T) {
+	t.Parallel()
+
+	callCount := atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := callCount.Add(1)
+		if count == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "assistant", Content: "OK"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "test-key", Model: "test"}, server.Client())
+
+	start := time.Now()
+	msg, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if msg.Content != "OK" {
+		t.Errorf("content = %q, want OK", msg.Content)
+	}
+	if callCount.Load() != 2 {
+		t.Errorf("callCount = %d, want 2", callCount.Load())
+	}
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("elapsed = %v, want >= 900ms", elapsed)
+	}
+}
+
+func TestClientChatRetryAfterHTTPDate(t *testing.T) {
+	t.Parallel()
+
+	callCount := atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := callCount.Add(1)
+		if count == 1 {
+			w.Header().Set("Retry-After", time.Now().UTC().Add(500*time.Millisecond).Format(http.TimeFormat))
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"overloaded"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "assistant", Content: "OK"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "test-key", Model: "test"}, server.Client())
+
+	msg, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if msg.Content != "OK" {
+		t.Errorf("content = %q, want OK", msg.Content)
+	}
+	if callCount.Load() != 2 {
+		t.Errorf("callCount = %d, want 2", callCount.Load())
+	}
+}
+
+func TestClientChatStream_FinishReasonLength(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "test-key", Model: "test"}, server.Client())
+
+	stream, err := client.ChatStream(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat stream: %v", err)
+	}
+
+	var lastChunk api.StreamChunk
+	for chunk := range stream {
+		lastChunk = chunk
+	}
+
+	if !lastChunk.Done {
+		t.Fatal("expected last chunk to be Done")
+	}
+	if lastChunk.FinishReason != "length" {
+		t.Errorf("FinishReason = %q, want length", lastChunk.FinishReason)
+	}
+}
+
+func TestClientChat_FinishReasonStop(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "assistant", Content: "OK"},
+				FinishReason: "stop",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "test-key", Model: "test"}, server.Client())
+
+	msg, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if msg.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want stop", msg.FinishReason)
+	}
+}
+
+func TestNewClient_TrailingSlashBaseURL(t *testing.T) {
+	t.Parallel()
+
+	var reqPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "assistant", Content: "OK"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL + "/", APIKey: "test-key", Model: "test"}, server.Client())
+	_, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if reqPath != "/chat/completions" {
+		t.Errorf("request path = %q, want /chat/completions", reqPath)
 	}
 }

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/git"
 	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
@@ -72,8 +74,12 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		sandboxRoot = "."
 	}
 
-	// Create built-in tool executor (nil httpClient forces secure default)
-	builtInExec := core.NewBuiltInToolExecutor(cfg.Behavior.ShellTimeout, sandboxRoot, nil)
+	// Create built-in tool executor (nil httpClient forces secure default).
+	// Protect the app's own config and DB paths regardless of sandbox.
+	configDir, _ := config.EnsureConfigDir()
+	configPath := filepath.Join(configDir, "config.toml")
+	builtInExec := core.NewBuiltInToolExecutor(cfg.Behavior.ShellTimeout, sandboxRoot, nil, configPath, cfg.Session.DBPath)
+	builtInExec.SetAllowShell(cfg.Behavior.AllowShell)
 
 	// Attempt MCP connection (non-fatal)
 	var mcpClient api.MCPClient
