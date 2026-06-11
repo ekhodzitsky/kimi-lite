@@ -1192,3 +1192,39 @@ func TestClientChat_FinishReasonStop(t *testing.T) {
 		t.Errorf("FinishReason = %q, want stop", msg.FinishReason)
 	}
 }
+
+func TestNewClient_TrailingSlashBaseURL(t *testing.T) {
+	t.Parallel()
+
+	var reqPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "assistant", Content: "OK"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL + "/", APIKey: "test-key", Model: "test"}, server.Client())
+	_, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if reqPath != "/chat/completions" {
+		t.Errorf("request path = %q, want /chat/completions", reqPath)
+	}
+}

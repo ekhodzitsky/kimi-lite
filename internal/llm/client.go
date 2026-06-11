@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"time"
@@ -30,6 +31,7 @@ const (
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+	endpoint   string
 	apiKey     string
 	model      string
 	timeout    time.Duration
@@ -48,9 +50,14 @@ func NewClient(cfg api.LLMConfig, httpClient *http.Client) *Client {
 	if timeout == 0 {
 		timeout = defaultTimeout
 	}
+	endpoint, _ := url.JoinPath(cfg.BaseURL, "chat/completions")
+	if endpoint == "" {
+		endpoint = cfg.BaseURL + "/chat/completions"
+	}
 	return &Client{
 		httpClient: httpClient,
 		baseURL:    cfg.BaseURL,
+		endpoint:   endpoint,
 		apiKey:     cfg.APIKey,
 		model:      cfg.Model,
 		timeout:    timeout,
@@ -288,7 +295,7 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 			retryAfterDelay = 0
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("create request: %w", err)
 		}
