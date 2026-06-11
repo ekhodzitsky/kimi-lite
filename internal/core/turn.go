@@ -360,7 +360,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 
 	select {
 	case eventCh <- api.TurnEvent{Type: api.TurnEventDone, ToolCalls: toolCalls}:
-	default:
+	case <-ctx.Done():
 	}
 
 	assistantMsg := api.Message{
@@ -395,7 +395,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 		if ctx.Err() != nil {
 			select {
 			case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
-			default:
+			case <-ctx.Done():
 			}
 			tm.setError(ctx, sessionID, turn, ctx.Err())
 			return "", nil, ctx.Err()
@@ -404,7 +404,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 		if chunk.Error != nil {
 			select {
 			case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: chunk.Error}:
-			default:
+			case <-ctx.Done():
 			}
 			tm.setError(ctx, sessionID, turn, chunk.Error)
 			return "", nil, chunk.Error
@@ -415,7 +415,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 				msg := fmt.Sprintf("response exceeded max size of %d bytes", maxStreamResponseSize)
 				select {
 				case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: errors.New(msg)}:
-				default:
+				case <-ctx.Done():
 				}
 				tm.setError(ctx, sessionID, turn, errors.New(msg))
 				return "", nil, errors.New(msg)
@@ -426,7 +426,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 			case <-ctx.Done():
 				select {
 				case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
-				default:
+				case <-ctx.Done():
 				}
 				tm.setError(ctx, sessionID, turn, ctx.Err())
 				return "", nil, ctx.Err()
@@ -442,7 +442,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 	if ctx.Err() != nil {
 		select {
 		case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
-		default:
+		case <-ctx.Done():
 		}
 		tm.setError(ctx, sessionID, turn, ctx.Err())
 		return "", nil, ctx.Err()

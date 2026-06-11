@@ -172,6 +172,10 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 		for {
 			select {
 			case <-ctx.Done():
+				select {
+				case ch <- api.StreamChunk{Error: ctx.Err()}:
+				case <-ctx.Done():
+				}
 				return
 			case <-timer.C:
 				select {

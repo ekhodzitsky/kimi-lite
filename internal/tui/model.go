@@ -690,7 +690,9 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 	}
 
 	if chunk.Done {
-		m.setState(api.TurnIdle)
+		if m.state != api.TurnError {
+			m.setState(api.TurnIdle)
+		}
 		m.streamCh = nil
 		if lastMsg := m.lastAssistantMessage(); lastMsg != nil {
 			lastMsg.SetStreaming(false)

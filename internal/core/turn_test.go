@@ -835,3 +835,52 @@ func TestTurnManager_executeToolCalls_ContextCancellation(t *testing.T) {
 		t.Errorf("result[2] error = %q, want context cancelled", results[2].Error)
 	}
 }
+
+func TestTurnManager_RunTurn_StreamErrorTypedEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	streamErr := fmt.Errorf("llm stream exploded")
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "partial"},
+			api.StreamChunk{Error: streamErr},
+		),
+	}
+	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "test")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	var gotContent bool
+	var gotError *api.TurnEvent
+	for ev := range outCh {
+		switch ev.Type {
+		case api.TurnEventContent:
+			gotContent = true
+		case api.TurnEventError:
+			gotError = &ev
+		case api.TurnEventDone:
+			t.Fatal("expected no Done event after error")
+		}
+	}
+
+	if !gotContent {
+		t.Error("expected content event before error")
+	}
+	if gotError == nil {
+		t.Fatal("expected typed error event")
+	}
+	if gotError.Error != streamErr {
+		t.Errorf("error = %v, want %v", gotError.Error, streamErr)
+	}
+	// Verify the turn state reflects the error.
+	turn := tm.CurrentTurn()
+	if turn == nil || turn.State != api.TurnError {
+		t.Fatalf("expected turn state TurnError, got %v", turn)
+	}
+}
