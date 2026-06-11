@@ -86,14 +86,15 @@ func (tm *TurnManager) PendingApprovals() ([]api.ToolCall, int64) {
 // The requestID must match the current pending round; a mismatch is rejected.
 func (tm *TurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	tm.pendingMu.Lock()
-	defer tm.pendingMu.Unlock()
-
 	if len(tm.pendingCalls) == 0 {
+		tm.pendingMu.Unlock()
 		return fmt.Errorf("no pending approvals")
 	}
 	if tm.requestID != requestID {
+		tm.pendingMu.Unlock()
 		return fmt.Errorf("requestID mismatch: got %d, want %d", requestID, tm.requestID)
 	}
+	tm.pendingMu.Unlock()
 
 	tm.mu.RLock()
 	turn := tm.turn
