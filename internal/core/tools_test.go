@@ -682,6 +682,62 @@ func TestBuiltInToolExecutor_Execute_FetchURL_BlocksRedirectToLocalhost(t *testi
 	}
 }
 
+func TestBuiltInToolExecutor_ValidatePath_BlocksExactEtc(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+
+	_, err := exec.validatePath("/etc")
+	if err == nil {
+		t.Fatal("expected error for /etc")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked error, got: %v", err)
+	}
+}
+
+func TestBuiltInToolExecutor_ValidatePath_BlocksSshDir(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+
+	_, err := exec.validatePath("~/.ssh/id_rsa")
+	if err == nil {
+		t.Fatal("expected error for ~/.ssh/id_rsa")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked error, got: %v", err)
+	}
+}
+
+func TestBuiltInToolExecutor_ValidatePath_BlocksProtectedDBPath(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "sessions.db")
+
+	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil, dbPath)
+
+	_, err := exec.validatePath(dbPath)
+	if err == nil {
+		t.Fatal("expected error for protected DB path")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked error, got: %v", err)
+	}
+
+	// Also block the parent directory.
+	_, err = exec.validatePath(filepath.Join(tmp, filepath.Dir(dbPath)))
+	// Wait, dbPath is already inside tmp. The parent of dbPath is tmp.
+	// Since sandboxRoot is tmp, accessing tmp itself is allowed by sandbox.
+	// But protectedPaths should block it regardless.
+	parentDir := filepath.Dir(dbPath)
+	_, err = exec.validatePath(parentDir)
+	if err == nil {
+		t.Fatal("expected error for protected DB parent dir")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked error, got: %v", err)
+	}
+}
+
 func TestCuratedEnv(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
 	t.Setenv("HOME", "/home/user")

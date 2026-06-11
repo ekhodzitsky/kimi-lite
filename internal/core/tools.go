@@ -27,15 +27,18 @@ const (
 
 // BuiltInToolExecutor executes the built-in tool set.
 type BuiltInToolExecutor struct {
-	shellTimeout time.Duration
-	readOnly     map[string]bool
-	sandboxRoot  string
-	httpClient   *http.Client
+	shellTimeout   time.Duration
+	readOnly       map[string]bool
+	sandboxRoot    string
+	httpClient     *http.Client
+	protectedPaths []string
 }
 
 // NewBuiltInToolExecutor creates a new BuiltInToolExecutor.
 // shellTimeout is applied to every shell command.
-func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, httpClient *http.Client) *BuiltInToolExecutor {
+// protectedPaths are resolved and checked in validatePath; any path equal to
+// or under a protected path is refused regardless of sandboxRoot.
+func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, httpClient *http.Client, protectedPaths ...string) *BuiltInToolExecutor {
 	if shellTimeout <= 0 {
 		shellTimeout = 30 * time.Second
 	}
@@ -47,10 +50,32 @@ func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, http
 			sandboxRoot = resolved
 		}
 	}
+
+	// Resolve and expand protected paths (files and their parent dirs).
+	resolvedProtected := make([]string, 0, len(protectedPaths)*2)
+	for _, p := range protectedPaths {
+		p = expandTilde(p)
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err == nil {
+			abs = resolved
+		}
+		resolvedProtected = append(resolvedProtected, abs)
+		// Also protect the parent directory.
+		parent := filepath.Dir(abs)
+		if parent != abs {
+			resolvedProtected = append(resolvedProtected, parent)
+		}
+	}
+
 	return &BuiltInToolExecutor{
-		shellTimeout: shellTimeout,
-		sandboxRoot:  sandboxRoot,
-		httpClient:   httpClient,
+		shellTimeout:   shellTimeout,
+		sandboxRoot:    sandboxRoot,
+		httpClient:     httpClient,
+		protectedPaths: resolvedProtected,
 		readOnly: map[string]bool{
 			"read_file": true,
 			"glob":      true,
@@ -60,15 +85,70 @@ func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, http
 	}
 }
 
+// expandTilde replaces a leading "~/" with the user's home directory.
+func expandTilde(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
+// isUnder reports whether target is equal to or under base.
+// Both paths must be clean and absolute.
+func isUnder(target, base string) bool {
+	if target == base {
+		return true
+	}
+	sep := string(filepath.Separator)
+	if !strings.HasSuffix(base, sep) {
+		base += sep
+	}
+	return strings.HasPrefix(target, base)
+}
+
 func (e *BuiltInToolExecutor) validatePath(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	path = expandTilde(path)
 	cleaned := filepath.Clean(path)
 	absPath, err := filepath.Abs(cleaned)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
+
+	// Check sensitive paths on the unresolved absolute path first.
+	// This catches symlinks like /etc → /private/etc on macOS.
+	sensitive := []string{"/etc", "/proc", "/sys", "/dev"}
+	for _, s := range sensitive {
+		if isUnder(absPath, s) {
+			return "", fmt.Errorf("sandbox: access to %s is blocked", absPath)
+		}
+	}
+
+	// Block user secret trees when no sandbox root is set (fallback case).
+	if e.sandboxRoot == "" {
+		secretTrees := []string{
+			expandTilde("~/.ssh"),
+			expandTilde("~/.aws"),
+			expandTilde("~/.gnupg"),
+		}
+		for _, s := range secretTrees {
+			if isUnder(absPath, s) {
+				return "", fmt.Errorf("sandbox: access to %s is blocked", absPath)
+			}
+		}
+	}
+
+	// Block protected app paths on the unresolved path too.
+	for _, protected := range e.protectedPaths {
+		if isUnder(absPath, protected) {
+			return "", fmt.Errorf("sandbox: access to %s is blocked", absPath)
+		}
+	}
+
 	resolvedPath, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -92,13 +172,14 @@ func (e *BuiltInToolExecutor) validatePath(path string) (string, error) {
 		}
 	}
 	absPath = resolvedPath
-	// Always block sensitive system paths
-	sensitivePrefixes := []string{"/etc/", "/proc/", "/sys/", "/dev/"}
-	for _, prefix := range sensitivePrefixes {
-		if strings.HasPrefix(absPath, prefix) {
+
+	// Re-check protected paths on the resolved path as well.
+	for _, protected := range e.protectedPaths {
+		if isUnder(absPath, protected) {
 			return "", fmt.Errorf("sandbox: access to %s is blocked", absPath)
 		}
 	}
+
 	if e.sandboxRoot != "" {
 		root := e.sandboxRoot
 		if !strings.HasSuffix(root, string(filepath.Separator)) {
