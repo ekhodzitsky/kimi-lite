@@ -125,15 +125,19 @@ func sortedToolCalls(accumulator map[int]*rawToolCall) []api.ToolCall {
 // The returned channel is closed when the stream ends or an error occurs.
 // Callers should check chunk.Error for stream errors.
 func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+	ctx, cancel := context.WithCancel(ctx)
+
 	reqBody := c.buildChatRequest(messages, tools, true)
 	body, err := c.doRequestStream(ctx, reqBody)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("chat stream request failed: %w", err)
 	}
 
 	ch := make(chan api.StreamChunk, 64)
 	go func() {
 		defer close(ch)
+		defer cancel()
 		defer body.Close()
 
 		reader := NewStreamReader(body)
@@ -167,6 +171,8 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-timer.C:
 				select {
 				case ch <- api.StreamChunk{Error: fmt.Errorf("stream idle timeout after %v", idleTimeout)}:
