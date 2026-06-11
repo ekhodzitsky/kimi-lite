@@ -29,6 +29,7 @@ func DefaultConfig() *api.Config {
 			},
 			ShellTimeout: 30 * time.Second,
 			MaxTurns:     50,
+			AllowShell:   true,
 		},
 		Session: api.SessionConfig{
 			DBPath:     "~/.local/share/kimi-lite/sessions.db",

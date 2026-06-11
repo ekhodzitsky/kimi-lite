@@ -25,6 +25,7 @@ const (
 	maxFileWriteSize   = 10 * 1024 * 1024 // 10 MB
 	maxFileReadSize    = 10 * 1024 * 1024 // 10 MB
 	maxShellOutputSize = 1024 * 1024      // 1 MB
+	maxShellCommandLen = 4096             // 4 KB
 )
 
 // BuiltInToolExecutor executes the built-in tool set.
@@ -34,6 +35,7 @@ type BuiltInToolExecutor struct {
 	sandboxRoot    string
 	httpClient     *http.Client
 	protectedPaths []string
+	allowShell     bool
 }
 
 // NewBuiltInToolExecutor creates a new BuiltInToolExecutor.
@@ -78,6 +80,7 @@ func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, http
 		sandboxRoot:    sandboxRoot,
 		httpClient:     httpClient,
 		protectedPaths: resolvedProtected,
+		allowShell:     true,
 		readOnly: map[string]bool{
 			"read_file": true,
 			"glob":      true,
@@ -85,6 +88,11 @@ func NewBuiltInToolExecutor(shellTimeout time.Duration, sandboxRoot string, http
 			"fetch_url": true,
 		},
 	}
+}
+
+// SetAllowShell controls whether the shell tool is enabled.
+func (e *BuiltInToolExecutor) SetAllowShell(v bool) {
+	e.allowShell = v
 }
 
 // expandTilde replaces a leading "~/" with the user's home directory.
@@ -277,7 +285,7 @@ func (e *BuiltInToolExecutor) Definitions() []api.ToolDefinition {
 		},
 		"required": []string{"pattern", "path"},
 	})
-	addDef("shell", "Execute a shell command with a configurable timeout.", map[string]interface{}{
+	addDef("shell", "Execute a shell command with a configurable timeout. Note: the shell is NOT path-sandboxed; only the approval gate constrains it.", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
@@ -572,9 +580,19 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args map[string]int
 	if command == "" {
 		return "", "command is required"
 	}
+	if len(command) > maxShellCommandLen {
+		return "", fmt.Sprintf("command exceeds max length of %d bytes", maxShellCommandLen)
+	}
+	if !e.allowShell {
+		return "", "shell tool is disabled"
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, e.shellTimeout)
 	defer cancel()
 
+	// NOTE: shell is NOT path-sandboxed; cmd.Dir is a working directory, not a
+	// chroot. The only guard is the approval gate, which never auto-approves
+	// the shell tool regardless of configuration.
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Env = curatedEnv()
 	if e.sandboxRoot != "" {

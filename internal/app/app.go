@@ -78,6 +78,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	configDir, _ := config.EnsureConfigDir()
 	configPath := filepath.Join(configDir, "config.toml")
 	builtInExec := core.NewBuiltInToolExecutor(cfg.Behavior.ShellTimeout, sandboxRoot, nil, configPath, cfg.Session.DBPath)
+	builtInExec.SetAllowShell(cfg.Behavior.AllowShell)
 
 	// Attempt MCP connection (non-fatal)
 	var mcpClient api.MCPClient

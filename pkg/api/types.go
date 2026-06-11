@@ -302,6 +302,7 @@ type BehaviorConfig struct {
 	AutoApprove  []string
 	ShellTimeout time.Duration
 	MaxTurns     int
+	AllowShell   bool
 }
 
 // SessionConfig holds session persistence settings.

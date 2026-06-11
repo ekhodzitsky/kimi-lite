@@ -464,6 +464,85 @@ func TestBuiltInToolExecutor_Execute_Shell_NonZeroExit(t *testing.T) {
 	}
 }
 
+func TestBuiltInToolExecutor_Execute_Shell_Disabled(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec.SetAllowShell(false)
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: `{"command":"echo hello"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error when shell is disabled")
+	}
+	if !strings.Contains(result.Error, "disabled") {
+		t.Fatalf("expected disabled error, got: %q", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_CommandTooLong(t *testing.T) {
+	t.Parallel()
+	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+
+	longCmd := strings.Repeat("a", maxShellCommandLen+1)
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: fmt.Sprintf(`{"command":"%s"}`, longCmd),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for command exceeding max length")
+	}
+	if !strings.Contains(result.Error, "exceeds max length") {
+		t.Fatalf("expected length error, got: %q", result.Error)
+	}
+}
+
+func TestApprovalGate_NeverAutoApprove_Shell(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeAuto, []string{"shell", "read_file"})
+
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "shell"})
+	if auto {
+		t.Fatal("shell should never be auto-approved")
+	}
+	if decision != api.ApprovalNo {
+		t.Fatalf("expected ApprovalNo, got %v", decision)
+	}
+
+	// read_file should still auto-approve.
+	decision, auto = gate.ShouldAutoApprove(api.ToolCall{Name: "read_file"})
+	if !auto {
+		t.Fatal("read_file should be auto-approved")
+	}
+	if decision != api.ApprovalYes {
+		t.Fatalf("expected ApprovalYes, got %v", decision)
+	}
+}
+
+func TestApprovalGate_NeverAutoApprove_WriteFile(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeAuto, []string{"write_file", "str_replace_file"})
+
+	for _, name := range []string{"write_file", "str_replace_file"} {
+		decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: name})
+		if auto {
+			t.Fatalf("%s should never be auto-approved", name)
+		}
+		if decision != api.ApprovalNo {
+			t.Fatalf("expected ApprovalNo, got %v", decision)
+		}
+	}
+}
+
 func TestBuiltInToolExecutor_Execute_FetchURL_BlocksLocalhost(t *testing.T) {
 	t.Parallel()
 	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
