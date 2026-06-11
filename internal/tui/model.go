@@ -46,7 +46,8 @@ type StateChangeMsg struct {
 
 // ApprovalRequestMsg requests user approval for tool calls.
 type ApprovalRequestMsg struct {
-	Calls []api.ToolCall
+	Calls     []api.ToolCall
+	RequestID int64
 }
 
 // ApprovalResponseMsg carries the user's approval decision.
@@ -110,7 +111,7 @@ func (m *Model) inputHeight() int {
 // turnManager is the interface needed from core.TurnManager.
 type turnManager interface {
 	RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
-	ResumeWithApproval(ctx context.Context, sessionID string, approvals map[string]api.ApprovalDecision) error
+	ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error
 }
 
 // sessionManager is the interface needed from core.SessionManager.
@@ -145,6 +146,7 @@ type Model struct {
 	height int
 
 	pendingApprovals  []api.ToolCall
+	approvalRequestID int64
 	approvalIndex     int
 	approvalDecisions map[string]api.ApprovalDecision
 
@@ -287,6 +289,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ApprovalRequestMsg:
 		m.pendingApprovals = msg.Calls
+		m.approvalRequestID = msg.RequestID
 		m.approvalIndex = 0
 		m.setState(api.TurnWaitingApproval)
 
@@ -822,12 +825,14 @@ func (m *Model) approveCurrent(decision api.ApprovalDecision) tea.Cmd {
 
 func (m *Model) resumeWithApprovals(approvals map[string]api.ApprovalDecision) tea.Cmd {
 	// Clear state in main thread before returning async command.
+	reqID := m.approvalRequestID
 	m.pendingApprovals = nil
+	m.approvalRequestID = 0
 	m.approvalIndex = -1
 	m.approvalDecisions = nil
 	return func() tea.Msg {
 		if m.turnManager != nil && m.session != nil {
-			_ = m.turnManager.ResumeWithApproval(m.appCtx, m.session.ID, approvals)
+			_ = m.turnManager.ResumeWithApproval(m.appCtx, m.session.ID, reqID, approvals)
 		}
 		return StateChangeMsg{State: api.TurnThinking}
 	}

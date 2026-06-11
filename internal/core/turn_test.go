@@ -259,7 +259,8 @@ func TestTurnManager_RunTurn_ManualApproval(t *testing.T) {
 	}
 
 	// Approve and resume
-	if err := tm.ResumeWithApproval(ctx, sess.ID, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err != nil {
+	_, reqID := tm.PendingApprovals()
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err != nil {
 		t.Fatalf("resume with approval: %v", err)
 	}
 
@@ -655,5 +656,125 @@ func TestTurnManager_RunTurn_Overlapping(t *testing.T) {
 		t.Fatalf("RunTurn after completion: %v", err)
 	}
 	for range ch2 {
+	}
+}
+
+func TestTurnManager_RunTurn_StaleRequestIDIgnored(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "tc1", Name: "shell", Arguments: `{}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			if callCount == 2 {
+				return streamChunks(
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "tc2", Name: "shell", Arguments: `{}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
+		},
+		defs:          []api.ToolDefinition{{Name: "shell", Description: "shell"}},
+		readOnlyTools: map[string]bool{},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalNo, false // manual approval required
+		},
+	}
+
+	tm := NewTurnManager(llm, tools, approval, store, nil)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "test input")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	var contents []string
+	done := make(chan struct{})
+	go func() {
+		for e := range outCh {
+			if e.Type == api.TurnEventContent {
+				contents = append(contents, e.Content)
+			}
+		}
+		close(done)
+	}()
+
+	// Wait for pending approval state.
+	for i := 0; i < 100; i++ {
+		turn := tm.CurrentTurn()
+		if turn != nil && turn.State == api.TurnWaitingApproval {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Get the current requestID.
+	_, reqID := tm.PendingApprovals()
+
+	// Send a stale approval (wrong requestID) — should be rejected.
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID-1, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err == nil {
+		t.Fatal("expected error for stale requestID")
+	}
+
+	// Send a matching approval.
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err != nil {
+		t.Fatalf("resume with approval: %v", err)
+	}
+
+	// Second round also needs approval.
+	var reqID2 int64
+	for i := 0; i < 100; i++ {
+		calls, id := tm.PendingApprovals()
+		if len(calls) > 0 && id > reqID {
+			reqID2 = id
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if reqID2 == 0 {
+		t.Fatal("expected second round pending approvals")
+	}
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID2, map[string]api.ApprovalDecision{"tc2": api.ApprovalYes}); err != nil {
+		t.Fatalf("resume with approval round 2: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn to complete")
+	}
+
+	turn := tm.CurrentTurn()
+	if turn.State != api.TurnIdle {
+		t.Errorf("state = %d, want TurnIdle", turn.State)
+	}
+	if len(turn.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(turn.Results))
+	}
+	if turn.Results[0].Error != "" {
+		t.Errorf("unexpected result 0 error: %s", turn.Results[0].Error)
+	}
+	if turn.Results[1].Error != "" {
+		t.Errorf("unexpected result 1 error: %s", turn.Results[1].Error)
 	}
 }

@@ -16,6 +16,14 @@ import (
 
 const maxStreamResponseSize = 10 * 1024 * 1024 // 10 MB
 
+// approvalPayload carries approval decisions together with the requestID
+// they are intended for, preventing stale approvals from affecting the
+// wrong tool round.
+type approvalPayload struct {
+	requestID int64
+	decisions map[string]api.ApprovalDecision
+}
+
 // TurnManager orchestrates a single user input → LLM response cycle.
 type TurnManager struct {
 	llm      api.LLMClient
@@ -28,7 +36,8 @@ type TurnManager struct {
 
 	pendingMu    sync.Mutex
 	pendingCalls []api.ToolCall
-	approvalCh   chan map[string]api.ApprovalDecision
+	requestID    int64
+	approvalCh   chan approvalPayload
 	wg           sync.WaitGroup
 	running      atomic.Bool
 }
@@ -41,7 +50,7 @@ func NewTurnManager(llm api.LLMClient, tools api.ToolExecutor, approval api.Appr
 		approval:   approval,
 		store:      store,
 		cfg:        cfg,
-		approvalCh: make(chan map[string]api.ApprovalDecision, 1),
+		approvalCh: make(chan approvalPayload, 1),
 	}
 }
 
@@ -64,20 +73,26 @@ func (tm *TurnManager) CurrentTurn() *api.Turn {
 	return &t
 }
 
-// PendingApprovals returns a copy of the currently pending tool calls awaiting approval.
-func (tm *TurnManager) PendingApprovals() []api.ToolCall {
+// PendingApprovals returns a copy of the currently pending tool calls and the
+// requestID for the round they belong to. A zero requestID means no approvals
+// are currently pending.
+func (tm *TurnManager) PendingApprovals() ([]api.ToolCall, int64) {
 	tm.pendingMu.Lock()
 	defer tm.pendingMu.Unlock()
-	return append([]api.ToolCall(nil), tm.pendingCalls...)
+	return append([]api.ToolCall(nil), tm.pendingCalls...), tm.requestID
 }
 
 // ResumeWithApproval resumes a turn that is waiting for manual approval.
-func (tm *TurnManager) ResumeWithApproval(ctx context.Context, sessionID string, approvals map[string]api.ApprovalDecision) error {
+// The requestID must match the current pending round; a mismatch is rejected.
+func (tm *TurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	tm.pendingMu.Lock()
 	defer tm.pendingMu.Unlock()
 
 	if len(tm.pendingCalls) == 0 {
 		return fmt.Errorf("no pending approvals")
+	}
+	if tm.requestID != requestID {
+		return fmt.Errorf("requestID mismatch: got %d, want %d", requestID, tm.requestID)
 	}
 
 	tm.mu.RLock()
@@ -88,7 +103,7 @@ func (tm *TurnManager) ResumeWithApproval(ctx context.Context, sessionID string,
 	}
 
 	select {
-	case tm.approvalCh <- approvals:
+	case tm.approvalCh <- approvalPayload{requestID: requestID, decisions: approvals}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -225,36 +240,53 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 		results, pending := tm.executeToolCalls(ctx, sessionID, turn, toolCalls)
 
 		if len(pending) > 0 {
-			var approvals map[string]api.ApprovalDecision
+			var payload approvalPayload
 			select {
-			case approvals = <-tm.approvalCh:
+			case payload = <-tm.approvalCh:
 			case <-ctx.Done():
 				tm.setError(ctx, sessionID, turn, ctx.Err())
 				return
 			}
 
-			for _, call := range pending {
-				decision, ok := approvals[call.ID]
-				if !ok {
-					decision = api.ApprovalNo
-				}
-				if decision == api.ApprovalDiff {
-					decision = api.ApprovalNo
-				}
-				var result api.ToolResult
-				if decision == api.ApprovalNo {
-					result = api.ToolResult{
+			// Ignore stale approval payloads whose requestID does not match
+			// the current pending set.
+			tm.pendingMu.Lock()
+			currentID := tm.requestID
+			tm.pendingMu.Unlock()
+			if payload.requestID != currentID {
+				slog.Warn("ignoring stale approval payload", "got", payload.requestID, "want", currentID)
+				// Treat all pending calls as denied.
+				for _, call := range pending {
+					results = append(results, api.ToolResult{
 						CallID: call.ID,
 						Name:   call.Name,
-						Error:  "tool call denied",
-					}
-				} else {
-					result, err = tm.tools.Execute(ctx, call)
-					if err != nil {
-						result.Error = err.Error()
-					}
+						Error:  "tool call denied (stale approval)",
+					})
 				}
-				results = append(results, result)
+			} else {
+				for _, call := range pending {
+					decision, ok := payload.decisions[call.ID]
+					if !ok {
+						decision = api.ApprovalNo
+					}
+					if decision == api.ApprovalDiff {
+						decision = api.ApprovalNo
+					}
+					var result api.ToolResult
+					if decision == api.ApprovalNo {
+						result = api.ToolResult{
+							CallID: call.ID,
+							Name:   call.Name,
+							Error:  "tool call denied",
+						}
+					} else {
+						result, err = tm.tools.Execute(ctx, call)
+						if err != nil {
+							result.Error = err.Error()
+						}
+					}
+					results = append(results, result)
+				}
 			}
 
 			tm.pendingMu.Lock()
@@ -449,6 +481,7 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 		}
 		tm.pendingMu.Lock()
 		tm.pendingCalls = append([]api.ToolCall(nil), pending...)
+		tm.requestID++
 		tm.pendingMu.Unlock()
 	}
 
