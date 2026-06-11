@@ -1125,3 +1125,70 @@ func TestClientChatRetryAfterHTTPDate(t *testing.T) {
 		t.Errorf("callCount = %d, want 2", callCount.Load())
 	}
 }
+
+func TestClientChatStream_FinishReasonLength(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "test-key", Model: "test"}, server.Client())
+
+	stream, err := client.ChatStream(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat stream: %v", err)
+	}
+
+	var lastChunk api.StreamChunk
+	for chunk := range stream {
+		lastChunk = chunk
+	}
+
+	if !lastChunk.Done {
+		t.Fatal("expected last chunk to be Done")
+	}
+	if lastChunk.FinishReason != "length" {
+		t.Errorf("FinishReason = %q, want length", lastChunk.FinishReason)
+	}
+}
+
+func TestClientChat_FinishReasonStop(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "assistant", Content: "OK"},
+				FinishReason: "stop",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "test-key", Model: "test"}, server.Client())
+
+	msg, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if msg.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want stop", msg.FinishReason)
+	}
+}

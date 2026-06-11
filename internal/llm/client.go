@@ -80,9 +80,13 @@ func (c *Client) Chat(ctx context.Context, messages []api.Message, tools []api.T
 
 	choice := resp.Choices[0].Message
 	msg := &api.Message{
-		Role:      api.Role(choice.Role),
-		Content:   choice.Content,
-		CreatedAt: time.Now().UTC(),
+		Role:         api.Role(choice.Role),
+		Content:      choice.Content,
+		FinishReason: resp.Choices[0].FinishReason,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if msg.FinishReason == "length" || msg.FinishReason == "content_filter" {
+		slog.Warn("LLM response truncated", "finish_reason", msg.FinishReason)
 	}
 
 	if len(choice.ToolCalls) > 0 {
@@ -197,7 +201,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 				raw, err := res.raw, res.err
 				if err == io.EOF {
 					select {
-					case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator)}:
+					case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator), FinishReason: raw.FinishReason}:
 					case <-ctx.Done():
 					}
 					return
@@ -224,8 +228,11 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 				}
 
 				if raw.Done {
+					if raw.FinishReason == "length" || raw.FinishReason == "content_filter" {
+						slog.Warn("LLM stream truncated", "finish_reason", raw.FinishReason)
+					}
 					select {
-					case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator)}:
+					case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator), FinishReason: raw.FinishReason}:
 					case <-ctx.Done():
 					}
 					return

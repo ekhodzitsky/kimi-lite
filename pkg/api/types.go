@@ -26,12 +26,13 @@ const (
 
 // Message represents a single message in a conversation.
 type Message struct {
-	ID         string     `json:"id"`
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	ID           string     `json:"id"`
+	Role         Role       `json:"role"`
+	Content      string     `json:"content"`
+	ToolCallID   string     `json:"tool_call_id,omitempty"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	FinishReason string     `json:"finish_reason,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 // ToolCall represents a single tool invocation requested by the LLM.
@@ -151,10 +152,11 @@ type LLMClient interface {
 
 // StreamChunk represents a single chunk from a streaming LLM response.
 type StreamChunk struct {
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	Done      bool       `json:"done"`
-	Error     error      `json:"-"`
+	Content      string     `json:"content"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	Done         bool       `json:"done"`
+	FinishReason string     `json:"finish_reason,omitempty"`
+	Error        error      `json:"-"`
 }
 
 // TurnEventType identifies the kind of event emitted during a turn.
