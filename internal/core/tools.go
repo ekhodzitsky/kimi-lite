@@ -370,6 +370,53 @@ func (e *BuiltInToolExecutor) execReadFile(args map[string]interface{}) (string,
 	return string(data), ""
 }
 
+// atomicWriteFile writes data to a temporary file in the same directory as
+// target, fsyncs it, then renames it over target. New files are created with
+// mode 0600; existing files preserve their original mode.
+func atomicWriteFile(target string, data []byte) error {
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+
+	mode := os.FileMode(0600)
+	if info, err := os.Stat(target); err == nil {
+		mode = info.Mode().Perm()
+	}
+
+	f, err := os.CreateTemp(dir, ".kimi-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := f.Name()
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("fsync temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, target); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
+}
+
 func (e *BuiltInToolExecutor) execWriteFile(args map[string]interface{}) (string, string) {
 	path, _ := args["path"].(string)
 	content, _ := args["content"].(string)
@@ -380,10 +427,7 @@ func (e *BuiltInToolExecutor) execWriteFile(args map[string]interface{}) (string
 	if err != nil {
 		return "", err.Error()
 	}
-	if err := os.MkdirAll(filepath.Dir(validPath), 0755); err != nil {
-		return "", fmt.Sprintf("create directory: %v", err)
-	}
-	if err := os.WriteFile(validPath, []byte(content), 0644); err != nil {
+	if err := atomicWriteFile(validPath, []byte(content)); err != nil {
 		return "", fmt.Sprintf("write file: %v", err)
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), ""
@@ -412,7 +456,7 @@ func (e *BuiltInToolExecutor) execStrReplaceFile(args map[string]interface{}) (s
 	if len(content) > maxFileWriteSize {
 		return "", fmt.Sprintf("result exceeds max size of %d bytes", maxFileWriteSize)
 	}
-	if err := os.WriteFile(validPath, []byte(content), 0644); err != nil {
+	if err := atomicWriteFile(validPath, []byte(content)); err != nil {
 		return "", fmt.Sprintf("write file: %v", err)
 	}
 	return fmt.Sprintf("replaced in %s", path), ""

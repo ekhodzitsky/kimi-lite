@@ -738,6 +738,84 @@ func TestBuiltInToolExecutor_ValidatePath_BlocksProtectedDBPath(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteFile_NewFile_Mode0600(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "newfile.txt")
+
+	if err := atomicWriteFile(target, []byte("hello")); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	mode := info.Mode().Perm()
+	if mode != 0600 {
+		t.Fatalf("expected mode 0600, got %04o", mode)
+	}
+}
+
+func TestAtomicWriteFile_PreservesExistingMode(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "existing.txt")
+
+	// Create existing file with mode 0644.
+	if err := os.WriteFile(target, []byte("old"), 0644); err != nil {
+		t.Fatalf("write existing: %v", err)
+	}
+
+	if err := atomicWriteFile(target, []byte("new")); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	mode := info.Mode().Perm()
+	if mode != 0644 {
+		t.Fatalf("expected mode 0644 to be preserved, got %04o", mode)
+	}
+}
+
+func TestAtomicWriteFile_Atomic(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "atomic.txt")
+
+	// Write a large payload so a non-atomic write would be observable.
+	payload := make([]byte, 1024*1024)
+	for i := range payload {
+		payload[i] = 'x'
+	}
+
+	// Verify no temp file leaked.
+	entries, _ := os.ReadDir(tmp)
+	before := len(entries)
+
+	if err := atomicWriteFile(target, payload); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+
+	entries, _ = os.ReadDir(tmp)
+	after := len(entries)
+	if after != before+1 {
+		t.Fatalf("expected 1 new file, got %d (before=%d, after=%d)", after-before, before, after)
+	}
+
+	// Verify target has the full content.
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if len(data) != len(payload) {
+		t.Fatalf("expected %d bytes, got %d", len(payload), len(data))
+	}
+}
+
 func TestCuratedEnv(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
 	t.Setenv("HOME", "/home/user")
