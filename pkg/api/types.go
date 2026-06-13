@@ -363,6 +363,7 @@ type Config struct {
 	Permission  PermissionConfig `mapstructure:"permission"`
 	Session     SessionConfig    `mapstructure:"session"`
 	MCP         MCPConfig        `mapstructure:"mcp"`
+	WebSearch   WebSearchConfig  `mapstructure:"web_search"`
 	UI          UIConfig         `mapstructure:"ui"`
 	Keybindings KeybindingConfig `mapstructure:"keybindings"`
 }
@@ -430,6 +431,34 @@ type SessionConfig struct {
 type MCPConfig struct {
 	GuardCommand string `mapstructure:"guard_command"`
 	GuardConfig  string `mapstructure:"guard_config"`
+}
+
+// WebSearchConfig holds web search provider settings.
+type WebSearchConfig struct {
+	Endpoint string        `mapstructure:"endpoint"`
+	APIKey   string        `json:"-" mapstructure:"api_key"`
+	Timeout  time.Duration `mapstructure:"timeout"`
+}
+
+// WebSearchResult represents a single web search result.
+type WebSearchResult struct {
+	Title   string `json:"title"`
+	Date    string `json:"date,omitempty"`
+	URL     string `json:"url"`
+	Snippet string `json:"snippet"`
+	Content string `json:"content,omitempty"`
+}
+
+// WebSearchOptions controls the behavior of a web search query.
+type WebSearchOptions struct {
+	Limit          int
+	IncludeContent bool
+}
+
+// WebSearcher performs web searches on behalf of the built-in web_search tool.
+type WebSearcher interface {
+	// Search runs a web search for the given query and returns matching results.
+	Search(ctx context.Context, query string, opts WebSearchOptions) ([]WebSearchResult, error)
 }
 
 // UIConfig holds UI settings.

@@ -28,7 +28,7 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.LLM.Timeout != 60*time.Second {
 		t.Errorf("expected timeout 60s, got %v", cfg.LLM.Timeout)
 	}
-	wantAutoApprove := []string{"read_file", "grep", "glob", "fetch_url", "list_directory"}
+	wantAutoApprove := []string{"read_file", "grep", "glob", "fetch_url", "list_directory", "web_search"}
 	if len(cfg.Behavior.AutoApprove) != len(wantAutoApprove) {
 		t.Errorf("expected auto-approve list %v, got %v", wantAutoApprove, cfg.Behavior.AutoApprove)
 	}

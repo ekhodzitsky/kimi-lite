@@ -53,6 +53,7 @@ type BuiltInToolExecutor struct {
 	allowShell     bool
 	passEnv        bool
 	root           *os.Root
+	webSearcher    api.WebSearcher
 }
 
 // ToolExecutorConfig holds configuration for NewBuiltInToolExecutor.
@@ -62,6 +63,7 @@ type ToolExecutorConfig struct {
 	HTTPClient     *http.Client
 	ProtectedPaths []string
 	PassEnv        bool
+	WebSearcher    api.WebSearcher
 }
 
 // NewBuiltInToolExecutor creates a new BuiltInToolExecutor.
@@ -115,6 +117,17 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 		}
 	}
 
+	readOnly := map[string]bool{
+		"read_file":      true,
+		"glob":           true,
+		"grep":           true,
+		"fetch_url":      true,
+		"list_directory": true,
+	}
+	if cfg.WebSearcher != nil {
+		readOnly["web_search"] = true
+	}
+
 	return &BuiltInToolExecutor{
 		shellTimeout:   shellTimeout,
 		sandboxRoot:    sandboxRoot,
@@ -123,13 +136,8 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 		allowShell:     true,
 		passEnv:        cfg.PassEnv,
 		root:           root,
-		readOnly: map[string]bool{
-			"read_file":      true,
-			"glob":           true,
-			"grep":           true,
-			"fetch_url":      true,
-			"list_directory": true,
-		},
+		webSearcher:    cfg.WebSearcher,
+		readOnly:       readOnly,
 	}, nil
 }
 
@@ -349,6 +357,12 @@ type listDirArgs struct {
 	Path string `json:"path"`
 }
 
+type webSearchArgs struct {
+	Query          string `json:"query"`
+	Limit          int    `json:"limit"`
+	IncludeContent bool   `json:"include_content"`
+}
+
 func decodeArgs[T any](raw string) (T, error) {
 	var v T
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
@@ -359,7 +373,7 @@ func decodeArgs[T any](raw string) (T, error) {
 
 // Definitions returns all available tool definitions.
 func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinition {
-	defs := make([]api.ToolDefinition, 0, 9)
+	defs := make([]api.ToolDefinition, 0, 10)
 
 	addDef := func(name, desc string, params map[string]any) {
 		p, err := marshalParams(params)
@@ -508,6 +522,26 @@ func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinitio
 		},
 		"required": []string{"path"},
 	})
+	if e.webSearcher != nil {
+		addDef("web_search", "Search the web for a query and return a list of results.", map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{
+					"type":        "string",
+					"description": "The search query.",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Maximum number of results (1-20, default 5).",
+				},
+				"include_content": map[string]any{
+					"type":        "boolean",
+					"description": "Whether to include full page content for each result (default false).",
+				},
+			},
+			"required": []string{"query"},
+		})
+	}
 
 	return defs
 }
@@ -614,6 +648,16 @@ func (e *BuiltInToolExecutor) Execute(ctx context.Context, call api.ToolCall) (a
 			result.Error = err.Error()
 		} else {
 			result.Output, err = e.execListDirectory(ctx, args)
+			if err != nil {
+				result.Error = err.Error()
+			}
+		}
+	case "web_search":
+		args, err := decodeArgs[webSearchArgs](call.Arguments)
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Output, err = e.execWebSearch(ctx, args)
 			if err != nil {
 				result.Error = err.Error()
 			}
@@ -1325,6 +1369,53 @@ func (e *BuiltInToolExecutor) execListDirectory(ctx context.Context, args listDi
 		lines = append(lines, fmt.Sprintf("%s %s", marker, entry.Name()))
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+func (e *BuiltInToolExecutor) execWebSearch(ctx context.Context, args webSearchArgs) (string, error) {
+	if e.webSearcher == nil {
+		return "", fmt.Errorf("web search is not configured")
+	}
+	if args.Query == "" {
+		return "", fmt.Errorf("query is required")
+	}
+	if args.Limit <= 0 {
+		args.Limit = 5
+	}
+	if args.Limit > 20 {
+		args.Limit = 20
+	}
+
+	results, err := e.webSearcher.Search(ctx, args.Query, api.WebSearchOptions{
+		Limit:          args.Limit,
+		IncludeContent: args.IncludeContent,
+	})
+	if err != nil {
+		return "", fmt.Errorf("web search: %w", err)
+	}
+
+	var lines []string
+	lines = append(lines, fmt.Sprintf("Results for %q (%d):", args.Query, len(results)))
+	for i, r := range results {
+		num := i + 1
+		date := r.Date
+		if date == "" {
+			date = "n/a"
+		}
+		lines = append(lines, fmt.Sprintf("%d. %s (%s)\n   URL: %s\n   %s", num, r.Title, date, r.URL, r.Snippet))
+		if args.IncludeContent && r.Content != "" {
+			lines = append(lines, "   Content:\n"+indent(r.Content, "   "))
+		}
+	}
+	return strings.Join(lines, "\n\n"), nil
+}
+
+// indent prefixes every line of s with prefix.
+func indent(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args fetchURLArgs) (string, error) {

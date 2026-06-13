@@ -48,6 +48,11 @@ max_history = 50
 guard_command = "mcp-guard"
 guard_config = "/tmp/mcp.toml"
 
+[web_search]
+endpoint = "https://search.example.com"
+api_key = "search-key"
+timeout = "25s"
+
 [ui]
 theme = "light"
 show_token_count = false
@@ -136,6 +141,11 @@ approve_always = "a"
 	// MCP
 	assertNotEmpty("mcp.guard_command", cfg.MCP.GuardCommand)
 	assertNotEmpty("mcp.guard_config", cfg.MCP.GuardConfig)
+
+	// WebSearch
+	assertNotEmpty("web_search.endpoint", cfg.WebSearch.Endpoint)
+	assertNotEmpty("web_search.api_key", cfg.WebSearch.APIKey)
+	assertPositiveDuration("web_search.timeout", cfg.WebSearch.Timeout)
 
 	// UI
 	assertNotEmpty("ui.theme", cfg.UI.Theme)

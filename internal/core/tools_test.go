@@ -79,6 +79,7 @@ func TestBuiltInToolExecutor_IsReadOnly(t *testing.T) {
 		{"str_replace_file", false},
 		{"edit", false},
 		{"shell", false},
+		{"web_search", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1876,5 +1877,183 @@ func TestBuiltInToolExecutor_Execute_Shell_PassEnv(t *testing.T) {
 	want := "OPENAI=sk-secret SAFE=visible"
 	if out != want {
 		t.Errorf("output = %q, want %q", out, want)
+	}
+}
+
+func TestBuiltInToolExecutor_Definitions_WebSearchRegisteredWhenProviderSet(t *testing.T) {
+	t.Parallel()
+	fake := &fakeWebSearcher{results: []api.WebSearchResult{{Title: "x", URL: "https://x", Snippet: "y"}}}
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, WebSearcher: fake})
+
+	defs := exec.Definitions(context.Background())
+	if len(defs) != 10 {
+		t.Fatalf("expected 10 tool definitions, got %d", len(defs))
+	}
+	found := false
+	for _, d := range defs {
+		if d.Name == "web_search" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected web_search definition")
+	}
+	if !exec.IsReadOnly("web_search") {
+		t.Error("web_search should be read-only")
+	}
+}
+
+func TestBuiltInToolExecutor_Definitions_WebSearchNotRegisteredWhenProviderMissing(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	defs := exec.Definitions(context.Background())
+	if len(defs) != 9 {
+		t.Fatalf("expected 9 tool definitions, got %d", len(defs))
+	}
+	for _, d := range defs {
+		if d.Name == "web_search" {
+			t.Fatal("web_search should not be registered without a provider")
+		}
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WebSearch(t *testing.T) {
+	t.Parallel()
+	fake := &fakeWebSearcher{
+		results: []api.WebSearchResult{
+			{Title: "Go", URL: "https://go.dev", Snippet: "The Go programming language", Date: "2024-01-01"},
+			{Title: "Go Wiki", URL: "https://github.com/golang/go/wiki", Snippet: "Wiki", Content: "body text"},
+		},
+	}
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, WebSearcher: fake})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "web_search",
+		Arguments: `{"query":"golang","limit":2,"include_content":true}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "Go") {
+		t.Errorf("output missing title: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "https://go.dev") {
+		t.Errorf("output missing URL: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "body text") {
+		t.Errorf("output missing content: %s", result.Output)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("expected 1 search call, got %d", len(fake.calls))
+	}
+	if fake.calls[0].Limit != 2 {
+		t.Errorf("limit = %d, want 2", fake.calls[0].Limit)
+	}
+	if !fake.calls[0].IncludeContent {
+		t.Error("expected IncludeContent=true")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WebSearch_DefaultLimit(t *testing.T) {
+	t.Parallel()
+	fake := &fakeWebSearcher{results: []api.WebSearchResult{{Title: "x", URL: "https://x", Snippet: "y"}}}
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, WebSearcher: fake})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "web_search",
+		Arguments: `{"query":"test"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if len(fake.calls) != 1 || fake.calls[0].Limit != 5 {
+		t.Errorf("expected default limit 5, got %v", fake.calls)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WebSearch_CapsLimit(t *testing.T) {
+	t.Parallel()
+	fake := &fakeWebSearcher{results: []api.WebSearchResult{{Title: "x", URL: "https://x", Snippet: "y"}}}
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, WebSearcher: fake})
+
+	_, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "web_search",
+		Arguments: `{"query":"test","limit":100}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(fake.calls) != 1 || fake.calls[0].Limit != 20 {
+		t.Errorf("expected capped limit 20, got %v", fake.calls)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WebSearch_MissingProvider(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "web_search",
+		Arguments: `{"query":"test"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error when web search is not configured")
+	}
+	if !strings.Contains(result.Error, "not configured") {
+		t.Errorf("expected not configured error, got: %q", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WebSearch_MissingQuery(t *testing.T) {
+	t.Parallel()
+	fake := &fakeWebSearcher{results: []api.WebSearchResult{{Title: "x", URL: "https://x", Snippet: "y"}}}
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, WebSearcher: fake})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "web_search",
+		Arguments: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for missing query")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WebSearch_ProviderError(t *testing.T) {
+	t.Parallel()
+	fake := &fakeWebSearcher{err: errors.New("provider down")}
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, WebSearcher: fake})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "web_search",
+		Arguments: `{"query":"test"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error from provider")
+	}
+	if !strings.Contains(result.Error, "provider down") {
+		t.Errorf("expected provider error, got: %q", result.Error)
 	}
 }
