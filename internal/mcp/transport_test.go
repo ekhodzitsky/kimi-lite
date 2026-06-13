@@ -402,6 +402,118 @@ func main() {
 	}
 }
 
+func TestStdioTransport_CloseKillsOnTimeout(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix signals required")
+	}
+
+	// `sleep` exits on SIGTERM, so the graceful-wait path should terminate it
+	// quickly once the configured grace period expires.
+	tr := NewStdioTransport("sleep", "30")
+	tr.closeTimeout = 50 * time.Millisecond
+	ctx := context.Background()
+
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	tr.mu.Lock()
+	pid := tr.cmd.Process.Pid
+	tr.mu.Unlock()
+
+	start := time.Now()
+	if err := tr.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Fatalf("Close took too long: %v", elapsed)
+	}
+	if elapsed < 50*time.Millisecond {
+		t.Fatalf("Close returned before grace period: %v", elapsed)
+	}
+	if err := syscall.Kill(pid, 0); err == nil {
+		t.Fatal("expected child process to be killed")
+	}
+}
+
+func TestStdioTransport_ConnectStartFailureCleanup(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("echo")
+	tr.newCmd = func(name string, arg ...string) *exec.Cmd {
+		return exec.Command("/nonexistent-binary-for-test")
+	}
+
+	ctx := context.Background()
+	err := tr.Connect(ctx)
+	if err == nil {
+		t.Fatal("expected error for failing start")
+	}
+
+	// After a failed start the transport should be cleanly unusable, not
+	// half-connected.
+	_, err = tr.Send(ctx, "test", nil)
+	if err == nil {
+		t.Fatal("expected Send error after failed Connect")
+	}
+	if !strings.Contains(err.Error(), "not connected") && !strings.Contains(err.Error(), "transport closed") {
+		t.Fatalf("expected not-connected/closed error, got: %v", err)
+	}
+
+	if err := tr.Close(); err != nil {
+		t.Fatalf("close after failed connect: %v", err)
+	}
+}
+
+func TestStdioTransport_DecodeErrorBroadcast(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+read line
+echo 'this is not json'
+`
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "badjson.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write helper script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	ctx := context.Background()
+
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer tr.Close()
+
+	// Send blocks until the readLoop broadcasts the decode error.
+	_, err := tr.Send(ctx, "ping", nil)
+	if err == nil {
+		t.Fatal("expected error for malformed JSON response")
+	}
+	if !strings.Contains(err.Error(), "parse error") && !strings.Contains(err.Error(), "-32700") {
+		t.Fatalf("expected parse error, got: %v", err)
+	}
+
+	// readErr should now be set, so a follow-up send fast-fails.
+	ctx2, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_, err = tr.Send(ctx2, "ping", nil)
+	if err == nil {
+		t.Fatal("expected fast-fail error after decode error")
+	}
+	if !strings.Contains(err.Error(), "parse error") &&
+		!strings.Contains(err.Error(), "decode JSON-RPC response") &&
+		!strings.Contains(err.Error(), "transport closed") {
+		t.Fatalf("expected cached readErr or closed error, got: %v", err)
+	}
+}
+
 func TestStdioTransport_EOFFastFail(t *testing.T) {
 	t.Parallel()
 
