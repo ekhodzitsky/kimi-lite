@@ -6,29 +6,41 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
-// fakeMCPClient is a test double for api.MCPClient.
-type fakeMCPClient struct {
+// mockMCPClient is a test double for api.MCPClient.
+type mockMCPClient struct {
 	listToolsFunc func(ctx context.Context) ([]api.ToolDefinition, error)
 	callToolFunc  func(ctx context.Context, name string, args map[string]any) (string, error)
+	closeFunc     func() error
 }
 
-func (f *fakeMCPClient) Connect(ctx context.Context) error { return nil }
-func (f *fakeMCPClient) Close() error                      { return nil }
-func (f *fakeMCPClient) ListTools(ctx context.Context) ([]api.ToolDefinition, error) {
-	if f.listToolsFunc != nil {
-		return f.listToolsFunc(ctx)
+func (m *mockMCPClient) Connect(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockMCPClient) ListTools(ctx context.Context) ([]api.ToolDefinition, error) {
+	if m.listToolsFunc != nil {
+		return m.listToolsFunc(ctx)
 	}
 	return nil, nil
 }
-func (f *fakeMCPClient) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
-	if f.callToolFunc != nil {
-		return f.callToolFunc(ctx, name, args)
+
+func (m *mockMCPClient) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	if m.callToolFunc != nil {
+		return m.callToolFunc(ctx, name, args)
 	}
 	return "", nil
+}
+
+func (m *mockMCPClient) Close() error {
+	if m.closeFunc != nil {
+		return m.closeFunc()
+	}
+	return nil
 }
 
 func TestToolExecutor_Definitions(t *testing.T) {
@@ -37,7 +49,7 @@ func TestToolExecutor_Definitions(t *testing.T) {
 	t.Run("prefixes returned names", func(t *testing.T) {
 		t.Parallel()
 
-		client := &fakeMCPClient{
+		client := &mockMCPClient{
 			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
 				return []api.ToolDefinition{
 					{Name: "read_file", Description: "read", Parameters: json.RawMessage(`{"type":"object"}`)},
@@ -62,7 +74,7 @@ func TestToolExecutor_Definitions(t *testing.T) {
 	t.Run("returns nil on ListTools error with no cache", func(t *testing.T) {
 		t.Parallel()
 
-		client := &fakeMCPClient{
+		client := &mockMCPClient{
 			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
 				return nil, errors.New("mcp unavailable")
 			},
@@ -74,29 +86,56 @@ func TestToolExecutor_Definitions(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to cached definitions on ListTools error", func(t *testing.T) {
+	t.Run("caches and falls back on ListTools error", func(t *testing.T) {
 		t.Parallel()
 
 		callCount := 0
-		client := &fakeMCPClient{
+		client := &mockMCPClient{
 			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
 				callCount++
 				if callCount == 1 {
-					return []api.ToolDefinition{{Name: "cached", Description: "cached", Parameters: json.RawMessage(`{})`)}}, nil
+					return []api.ToolDefinition{{Name: "read_file", Description: "Read a file"}}, nil
 				}
-				return nil, errors.New("mcp unavailable")
+				return nil, errors.New("network error")
 			},
 		}
 		exec := NewToolExecutor(client)
-		first := exec.Definitions(context.Background())
-		cached := []api.ToolDefinition{{Name: "mcp_cached", Description: "cached", Parameters: json.RawMessage(`{})`)}}
-		if !reflect.DeepEqual(first, cached) {
-			t.Fatalf("first defs = %+v, want %+v", first, cached)
+
+		defs1 := exec.Definitions(context.Background())
+		if len(defs1) != 1 || defs1[0].Name != "mcp_read_file" {
+			t.Fatalf("first defs = %+v, want one mcp_read_file", defs1)
 		}
 
-		second := exec.Definitions(context.Background())
-		if !reflect.DeepEqual(second, cached) {
-			t.Fatalf("fallback defs = %+v, want %+v", second, cached)
+		defs2 := exec.Definitions(context.Background())
+		want := []api.ToolDefinition{{Name: "mcp_read_file", Description: "Read a file"}}
+		if !reflect.DeepEqual(defs2, want) {
+			t.Fatalf("cached defs = %+v, want %+v", defs2, want)
+		}
+	})
+
+	t.Run("context cancellation returns promptly", func(t *testing.T) {
+		t.Parallel()
+
+		client := &mockMCPClient{
+			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+		exec := NewToolExecutor(client)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		start := time.Now()
+		defs := exec.Definitions(ctx)
+		elapsed := time.Since(start)
+
+		if defs != nil {
+			t.Fatalf("expected nil definitions on cancelled context, got %v", defs)
+		}
+		if elapsed > 1*time.Second {
+			t.Fatalf("expected prompt return on cancelled context, took %v", elapsed)
 		}
 	})
 }
@@ -109,7 +148,7 @@ func TestToolExecutor_Execute(t *testing.T) {
 
 		var calledName string
 		var calledArgs map[string]any
-		client := &fakeMCPClient{
+		client := &mockMCPClient{
 			callToolFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 				calledName = name
 				calledArgs = args
@@ -149,7 +188,7 @@ func TestToolExecutor_Execute(t *testing.T) {
 	t.Run("invalid arguments return ToolResult.Error with nil Go error", func(t *testing.T) {
 		t.Parallel()
 
-		exec := NewToolExecutor(&fakeMCPClient{})
+		exec := NewToolExecutor(&mockMCPClient{})
 		result, err := exec.Execute(context.Background(), api.ToolCall{
 			ID:        "call-2",
 			Name:      "mcp_bad",
@@ -175,7 +214,7 @@ func TestToolExecutor_Execute(t *testing.T) {
 	t.Run("CallTool error surfaces in ToolResult.Error with nil Go error", func(t *testing.T) {
 		t.Parallel()
 
-		client := &fakeMCPClient{
+		client := &mockMCPClient{
 			callToolFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 				return "", errors.New("tool crashed")
 			},
