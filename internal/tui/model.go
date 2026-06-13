@@ -179,6 +179,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 	st := styles.New(cfg.UI.Theme)
 
 	inp := input.New(st, input.ConfigurableKeyMap(cfg.Keybindings), cfg.Session.MaxHistory)
+	inp.SetEditor(cfg.UI.Editor)
 	vp := viewport.New(st)
 
 	sb, err := sidebar.New(st, session.Path)

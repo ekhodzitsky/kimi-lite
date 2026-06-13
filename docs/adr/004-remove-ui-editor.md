@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted, amended
 
 ## Context
 
@@ -23,5 +23,24 @@ as a new top-level workflow rather than retrofitting a dead config field.
 
 - `pkg/api.UIConfig` no longer carries `Editor`.
 - Existing TOML files with `ui.editor` will be silently ignored.
-- No ADR is required for future re-introduction, but any new public field must
-  follow the same pattern and be wired to real behavior before release.
+
+## Amendment: external-editor workflow
+
+External editor integration was implemented as a real workflow. The `Editor`
+field was reintroduced to `pkg/api.UIConfig`, and `keybindings.external_editor`
+(default `ctrl+g`) was added. Pressing the binding in the input component
+writes the current buffer to a temp file, runs the editor via
+`tea.ExecProcess`, and reads the saved content back into the textarea on return.
+The temp file is cleaned up afterward. Resolution order is:
+
+1. `ui.editor` if non-empty.
+2. `$VISUAL` if set.
+3. `$EDITOR` if set.
+4. `vi` as a final fallback.
+
+## Consequences
+
+- `pkg/api.UIConfig` carries `Editor` again and is wired to behavior.
+- `pkg/api.KeybindingConfig` carries `ExternalEditor` (default `ctrl+g`).
+- Existing TOML files with `ui.editor` now launch the configured editor.
+- Any new public field must still be wired to real behavior before release.

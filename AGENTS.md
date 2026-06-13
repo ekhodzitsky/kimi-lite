@@ -84,7 +84,7 @@ Business logic layer.
 Bubble Tea terminal UI.
 
 - `Model` — root model composing child components
-- `input` — multi-line textarea with history
+- `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`)
 - `viewport` — scrollable output
 - `sidebar` — file browser
 - `messages` — message rendering (Markdown via Glamour)

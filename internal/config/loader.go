@@ -64,6 +64,8 @@ func NewLoader() *Loader {
 	v.SetDefault("keybindings.approve_yes", defaults.Keybindings.ApproveYes)
 	v.SetDefault("keybindings.approve_no", defaults.Keybindings.ApproveNo)
 	v.SetDefault("keybindings.approve_always", defaults.Keybindings.ApproveAlways)
+	v.SetDefault("keybindings.external_editor", defaults.Keybindings.ExternalEditor)
+	v.SetDefault("ui.editor", defaults.UI.Editor)
 	v.SetDefault("permission.rules", []api.PermissionRule{})
 
 	return &Loader{v: v}
@@ -238,6 +240,7 @@ focus_prev = "shift+tab"
 approve_yes = "y"
 approve_no = "n"
 approve_always = "a"
+external_editor = "ctrl+g"
 `
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		return fmt.Errorf("write default config: %w", err)

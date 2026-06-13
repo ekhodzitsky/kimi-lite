@@ -436,19 +436,21 @@ type MCPConfig struct {
 type UIConfig struct {
 	Theme          string `mapstructure:"theme"`
 	ShowTokenCount bool   `mapstructure:"show_token_count"`
+	Editor         string `mapstructure:"editor"`
 }
 
 // KeybindingConfig holds keybinding settings.
 type KeybindingConfig struct {
-	Send          string `mapstructure:"send"`
-	Newline       string `mapstructure:"newline"`
-	Cancel        string `mapstructure:"cancel"`
-	Quit          string `mapstructure:"quit"`
-	Yolo          string `mapstructure:"yolo"`
-	ToggleSidebar string `mapstructure:"toggle_sidebar"`
-	FocusNext     string `mapstructure:"focus_next"`
-	FocusPrev     string `mapstructure:"focus_prev"`
-	ApproveYes    string `mapstructure:"approve_yes"`
-	ApproveNo     string `mapstructure:"approve_no"`
-	ApproveAlways string `mapstructure:"approve_always"`
+	Send           string `mapstructure:"send"`
+	Newline        string `mapstructure:"newline"`
+	Cancel         string `mapstructure:"cancel"`
+	Quit           string `mapstructure:"quit"`
+	Yolo           string `mapstructure:"yolo"`
+	ToggleSidebar  string `mapstructure:"toggle_sidebar"`
+	FocusNext      string `mapstructure:"focus_next"`
+	FocusPrev      string `mapstructure:"focus_prev"`
+	ApproveYes     string `mapstructure:"approve_yes"`
+	ApproveNo      string `mapstructure:"approve_no"`
+	ApproveAlways  string `mapstructure:"approve_always"`
+	ExternalEditor string `mapstructure:"external_editor"`
 }

@@ -23,8 +23,9 @@ type SendMsg struct {
 
 // KeyMap defines keybindings for the input component.
 type KeyMap struct {
-	Send    key.Binding
-	Newline key.Binding
+	Send           key.Binding
+	Newline        key.Binding
+	ExternalEditor key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings.
@@ -38,6 +39,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("alt+enter"),
 			key.WithHelp("alt+enter", "newline"),
 		),
+		ExternalEditor: key.NewBinding(
+			key.WithKeys("ctrl+g"),
+			key.WithHelp("ctrl+g", "external editor"),
+		),
 	}
 }
 
@@ -49,6 +54,9 @@ func ConfigurableKeyMap(cfg api.KeybindingConfig) KeyMap {
 	}
 	if cfg.Newline != "" {
 		km.Newline = key.NewBinding(key.WithKeys(cfg.Newline), key.WithHelp(cfg.Newline, "newline"))
+	}
+	if cfg.ExternalEditor != "" {
+		km.ExternalEditor = key.NewBinding(key.WithKeys(cfg.ExternalEditor), key.WithHelp(cfg.ExternalEditor, "external editor"))
 	}
 	return km
 }
@@ -63,6 +71,7 @@ type Model struct {
 	draft      string
 	width      int
 	maxHistory int
+	editor     string // configured editor; env vars used as fallback
 	mu         sync.RWMutex
 }
 
@@ -134,6 +143,13 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 
+		if key.Matches(msg, km.ExternalEditor) {
+			m.mu.RLock()
+			editor := m.editor
+			m.mu.RUnlock()
+			return m.openExternalEditor(editor)
+		}
+
 		// History navigation
 		if msg.String() == "up" || msg.String() == "ctrl+p" {
 			m.mu.Lock()
@@ -168,6 +184,10 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			m.textarea.CursorEnd()
 			return tea.Batch(cmds...)
 		}
+
+	case editorFinishedMsg:
+		m.handleEditorFinished(msg)
+		return tea.Batch(cmds...)
 	}
 
 	// Pass other messages to textarea
@@ -216,6 +236,14 @@ func (m *Model) Reset() {
 // SetValue sets the input value.
 func (m *Model) SetValue(s string) {
 	m.textarea.SetValue(s)
+}
+
+// SetEditor sets the external editor command. An empty value falls back to
+// $VISUAL, $EDITOR, or vi at trigger time.
+func (m *Model) SetEditor(editor string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.editor = editor
 }
 
 func (m *Model) updateStyles() {
