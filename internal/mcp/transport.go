@@ -118,6 +118,29 @@ func (b *boundedBuffer) String() string {
 	return string(ordered)
 }
 
+// buildEnv returns the environment for the subprocess, starting from the
+// minimal environment and overlaying any configured Env values.
+func (t *StdioTransport) buildEnv() []string {
+	base := minimalEnv()
+	if len(t.env) == 0 {
+		return base
+	}
+	m := make(map[string]string, len(base))
+	for _, e := range base {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			m[k] = v
+		}
+	}
+	for k, v := range t.env {
+		m[k] = v
+	}
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
 // minimalEnv returns a minimal environment for MCP child processes.
 // It preserves PATH, HOME, LANG, and TMPDIR while excluding variables
 // that likely contain secrets.
@@ -165,6 +188,8 @@ func minimalEnv() []string {
 type StdioTransport struct {
 	command string
 	args    []string
+	env     map[string]string
+	cwd     string
 
 	mu           sync.Mutex
 	cmd          *exec.Cmd
@@ -196,6 +221,16 @@ func NewStdioTransport(command string, args ...string) *StdioTransport {
 	}
 }
 
+// SetEnv sets extra environment variables for the subprocess.
+func (t *StdioTransport) SetEnv(env map[string]string) {
+	t.env = env
+}
+
+// SetCWD sets the working directory for the subprocess.
+func (t *StdioTransport) SetCWD(cwd string) {
+	t.cwd = cwd
+}
+
 // Connect starts the subprocess and begins reading responses.
 func (t *StdioTransport) Connect(ctx context.Context) error {
 	t.mu.Lock()
@@ -216,7 +251,10 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 	cmd := t.newCmd(path, t.args...)
 	// Provide a curated minimal environment so the child can resolve
 	// binaries and access $HOME, but does not inherit secrets.
-	cmd.Env = minimalEnv()
+	cmd.Env = t.buildEnv()
+	if t.cwd != "" {
+		cmd.Dir = t.cwd
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.mu.Unlock()
