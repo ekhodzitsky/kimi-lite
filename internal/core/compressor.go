@@ -70,7 +70,7 @@ func formatMessageForSummary(msg api.Message) string {
 		fmt.Fprintf(&b, "\n  tool_call: %s(%s)", tc.Name, tc.Arguments)
 	}
 	if msg.ToolCallID != "" {
-		fmt.Fprintf(&b, "\n  tool_result for call %s", msg.ToolCallID)
+		fmt.Fprintf(&b, "\n  tool_result for call %s: %s", msg.ToolCallID, msg.Content)
 	}
 	b.WriteString("\n")
 	return b.String()

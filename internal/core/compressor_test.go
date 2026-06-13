@@ -396,6 +396,47 @@ func TestContextCompressor_Compact_PreservesLeadingSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestContextCompressor_Compact_IncludesToolCallsAndResultsInSummary(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	base := time.Now().UTC().Add(-time.Hour)
+	seed := []api.Message{
+		{ID: "m1", Role: api.RoleUser, Content: "first", CreatedAt: base},
+		{ID: "m2", Role: api.RoleUser, Content: "second", CreatedAt: base.Add(time.Minute)},
+		{ID: "m3", Role: api.RoleAssistant, Content: "I'll read it", ToolCalls: []api.ToolCall{{ID: "tc1", Name: "read_file", Arguments: `{"path":"a.go"}`}}, CreatedAt: base.Add(2 * time.Minute)},
+		{ID: "m4", Role: api.RoleTool, Content: "package main\nfunc main() {}", ToolCallID: "tc1", CreatedAt: base.Add(3 * time.Minute)},
+		{ID: "m5", Role: api.RoleUser, Content: "what next", CreatedAt: base.Add(4 * time.Minute)},
+		{ID: "m6", Role: api.RoleUser, Content: "another", CreatedAt: base.Add(5 * time.Minute)},
+	}
+	for _, msg := range seed {
+		_ = store.AppendMessage(ctx, sess.ID, msg)
+	}
+
+	var prompt string
+	llm := &mockLLMClient{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			prompt = messages[0].Content
+			return &api.Message{Content: "summary"}, nil
+		},
+	}
+
+	compressor := NewContextCompressor(llm, 0, 0)
+	_, err := compressor.Compact(ctx, store, sess.ID, 2)
+	if err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+
+	if !strings.Contains(prompt, "tool_call: read_file({\"path\":\"a.go\"})") {
+		t.Errorf("summary prompt missing tool_call details; got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "tool_result for call tc1: package main") {
+		t.Errorf("summary prompt missing tool_result content; got:\n%s", prompt)
+	}
+}
+
 func TestContextCompressor_Compact_PairAwareBoundary(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
