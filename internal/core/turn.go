@@ -26,16 +26,18 @@ type approvalPayload struct {
 
 // TurnManager orchestrates a single user input → LLM response cycle.
 type TurnManager struct {
-	llm         api.LLMClient
-	tools       api.ToolExecutor
-	approval    api.ApprovalGate
-	store       api.Store
-	cfg         api.ConfigProvider
-	hookRunner  api.HookRunner
-	metrics     api.MetricsCollector
-	sandboxRoot string
-	mu          sync.RWMutex
-	turn        *api.Turn
+	llm              api.LLMClient
+	tools            api.ToolExecutor
+	approval         api.ApprovalGate
+	store            api.Store
+	cfg              api.ConfigProvider
+	hookRunner       api.HookRunner
+	metrics          api.MetricsCollector
+	sandboxRoot      string
+	protectedPaths   []string
+	currentSessionID string
+	mu               sync.RWMutex
+	turn             *api.Turn
 
 	pendingMu    sync.Mutex
 	pendingCalls []api.ToolCall
@@ -79,6 +81,20 @@ func (tm *TurnManager) SetSandboxRoot(root string) {
 	tm.sandboxRoot = root
 }
 
+// SetProtectedPaths sets additional paths that must be blocked by diff previews.
+// This mirrors BuiltInToolExecutor.protectedPaths.
+func (tm *TurnManager) SetProtectedPaths(paths []string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.protectedPaths = paths
+}
+
+func (tm *TurnManager) getProtectedPaths() []string {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.protectedPaths
+}
+
 // CurrentTurn returns a deep copy of the current turn.
 func (tm *TurnManager) CurrentTurn() *api.Turn {
 	tm.mu.RLock()
@@ -108,31 +124,37 @@ func (tm *TurnManager) PendingApprovals() ([]api.ToolCall, int64) {
 }
 
 // ResumeWithApproval resumes a turn that is waiting for manual approval.
-// The requestID must match the current pending round; a mismatch is rejected.
-func (tm *TurnManager) ResumeWithApproval(ctx context.Context, _ string, requestID int64, approvals map[string]api.ApprovalDecision) error {
-	tm.pendingMu.Lock()
-	if len(tm.pendingCalls) == 0 {
-		tm.pendingMu.Unlock()
-		return fmt.Errorf("no pending approvals")
-	}
-	if tm.requestID != requestID {
-		tm.pendingMu.Unlock()
-		return fmt.Errorf("requestID mismatch: got %d, want %d", requestID, tm.requestID)
-	}
-	tm.pendingMu.Unlock()
-
+// The requestID must match the current pending round and the sessionID must
+// match the turn that created the pending calls; otherwise the request is rejected.
+func (tm *TurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	tm.mu.RLock()
 	turn := tm.turn
+	currentSessionID := tm.currentSessionID
 	tm.mu.RUnlock()
 	if turn == nil {
 		return fmt.Errorf("no active turn")
 	}
+	if currentSessionID != sessionID {
+		return fmt.Errorf("sessionID mismatch: got %q, want %q", sessionID, currentSessionID)
+	}
 
+	tm.pendingMu.Lock()
+	defer tm.pendingMu.Unlock()
+	if len(tm.pendingCalls) == 0 {
+		return fmt.Errorf("no pending approvals")
+	}
+	if tm.requestID != requestID {
+		return fmt.Errorf("requestID mismatch: got %d, want %d", requestID, tm.requestID)
+	}
+
+	payload := approvalPayload{requestID: requestID, decisions: approvals}
 	select {
-	case tm.approvalCh <- approvalPayload{requestID: requestID, decisions: approvals}:
+	case tm.approvalCh <- payload:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	default:
+		return fmt.Errorf("approval channel busy")
 	}
 }
 
@@ -209,6 +231,7 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 
 	tm.mu.Lock()
 	tm.turn = turn
+	tm.currentSessionID = sessionID
 	tm.mu.Unlock()
 
 	// Persistence policy: turn-save failure is fatal at turn start...
@@ -238,13 +261,13 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 	tools := tm.tools.Definitions(ctx)
 
 	// Start the first LLM stream synchronously so that immediate errors are returned.
+	eventCh := make(chan api.TurnEvent, 16)
 	streamCh, err := tm.llm.ChatStream(ctx, messages, tools)
 	if err != nil {
-		tm.setError(ctx, sessionID, turn, fmt.Errorf("chat stream: %w", err))
+		tm.setError(ctx, sessionID, turn, fmt.Errorf("chat stream: %w", err), nil)
 		return nil, fmt.Errorf("chat stream: %w", err)
 	}
 
-	eventCh := make(chan api.TurnEvent, 16)
 	tm.wg.Add(1)
 	go tm.run(ctx, sessionID, turn, tools, streamCh, eventCh, msgLimit)
 
@@ -252,8 +275,8 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 }
 
 func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int) {
-	defer tm.running.Store(false)
 	defer tm.wg.Done()
+	defer tm.running.Store(false)
 	defer close(eventCh)
 	defer func() {
 		tm.cancelMu.Lock()
@@ -264,7 +287,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 	content, toolCalls, err := tm.consumeStream(ctx, sessionID, turn, firstStream, eventCh)
 	if err != nil {
 		tm.persistPartialResponse(ctx, sessionID, turn, content)
-		tm.setError(ctx, sessionID, turn, err)
+		tm.setError(ctx, sessionID, turn, err, eventCh)
 		return
 	}
 
@@ -287,10 +310,10 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 	}
 	for round := 0; len(toolCalls) > 0; round++ {
 		if round >= maxToolRounds {
-			tm.setError(ctx, sessionID, turn, fmt.Errorf("max tool rounds (%d) exceeded", maxToolRounds))
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("max tool rounds (%d) exceeded", maxToolRounds), eventCh)
 			return
 		}
-		results, pending := tm.executeToolCalls(ctx, sessionID, turn, toolCalls)
+		results, pending, pendingIdx := tm.executeToolCalls(ctx, sessionID, turn, toolCalls)
 
 		if len(pending) > 0 {
 			_, reqID := tm.PendingApprovals()
@@ -298,7 +321,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 			select {
 			case eventCh <- api.TurnEvent{Type: api.TurnEventApprovalRequest, ToolCalls: pending, RequestID: reqID}:
 			case <-ctx.Done():
-				tm.setError(ctx, sessionID, turn, ctx.Err())
+				tm.setError(ctx, sessionID, turn, ctx.Err(), eventCh)
 				return
 			}
 
@@ -308,7 +331,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 				select {
 				case payload = <-tm.approvalCh:
 				case <-ctx.Done():
-					tm.setError(ctx, sessionID, turn, ctx.Err())
+					tm.setError(ctx, sessionID, turn, ctx.Err(), eventCh)
 					return
 				}
 
@@ -319,13 +342,13 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 				tm.pendingMu.Unlock()
 				if payload.requestID != currentID {
 					slog.Warn("ignoring stale approval payload", "got", payload.requestID, "want", currentID)
-					// Treat all pending calls as denied.
-					for _, call := range pending {
-						results = append(results, api.ToolResult{
+					// Treat all pending calls as denied at their original indices.
+					for j, call := range pending {
+						results[pendingIdx[j]] = api.ToolResult{
 							CallID: call.ID,
 							Name:   call.Name,
 							Error:  "tool call denied (stale approval)",
-						})
+						}
 					}
 					break approvalLoop
 				}
@@ -352,10 +375,10 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 							case eventCh <- api.TurnEvent{
 								Type:        api.TurnEventApprovalDiff,
 								DiffCallID:  call.ID,
-								DiffContent: ToolCallDiff(call, tm.sandboxRoot),
+								DiffContent: ToolCallDiff(call, tm.sandboxRoot, tm.getProtectedPaths()),
 							}:
 							case <-ctx.Done():
-								tm.setError(ctx, sessionID, turn, ctx.Err())
+								tm.setError(ctx, sessionID, turn, ctx.Err(), eventCh)
 								return
 							}
 						}
@@ -364,13 +387,13 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 					continue approvalLoop
 				}
 
-				for _, call := range pending {
+				for j, call := range pending {
 					if err := ctx.Err(); err != nil {
-						results = append(results, api.ToolResult{
+						results[pendingIdx[j]] = api.ToolResult{
 							CallID: call.ID,
 							Name:   call.Name,
 							Error:  fmt.Sprintf("context cancelled: %v", err),
-						})
+						}
 						continue
 					}
 					decision, ok := payload.decisions[call.ID]
@@ -390,7 +413,13 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 							result.Error = err.Error()
 						}
 					}
-					results = append(results, result)
+					if result.CallID == "" {
+						result.CallID = call.ID
+					}
+					if result.Name == "" {
+						result.Name = call.Name
+					}
+					results[pendingIdx[j]] = result
 				}
 				break approvalLoop
 			}
@@ -411,7 +440,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 			select {
 			case eventCh <- api.TurnEvent{Type: api.TurnEventToolResult, Result: result}:
 			case <-ctx.Done():
-				tm.setError(ctx, sessionID, turn, ctx.Err())
+				tm.setError(ctx, sessionID, turn, ctx.Err(), eventCh)
 				return
 			}
 		}
@@ -424,7 +453,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 			CreatedAt: time.Now().UTC(),
 		}
 		if err := tm.store.AppendMessage(ctx, sessionID, assistantMsg); err != nil {
-			tm.setError(ctx, sessionID, turn, fmt.Errorf("append message: %w", err))
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("append message: %w", err), eventCh)
 			return
 		}
 
@@ -445,27 +474,27 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 				CreatedAt:  time.Now().UTC(),
 			}
 			if err := tm.store.AppendMessage(ctx, sessionID, toolMsg); err != nil {
-				tm.setError(ctx, sessionID, turn, fmt.Errorf("append message: %w", err))
+				tm.setError(ctx, sessionID, turn, fmt.Errorf("append message: %w", err), eventCh)
 				return
 			}
 		}
 
 		messages, err := tm.store.GetMessages(ctx, sessionID, msgLimit)
 		if err != nil {
-			tm.setError(ctx, sessionID, turn, fmt.Errorf("get messages: %w", err))
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("get messages: %w", err), eventCh)
 			return
 		}
 
 		streamCh, err := tm.llm.ChatStream(ctx, messages, tools)
 		if err != nil {
-			tm.setError(ctx, sessionID, turn, fmt.Errorf("chat stream: %w", err))
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("chat stream: %w", err), eventCh)
 			return
 		}
 
 		content, toolCalls, err = tm.consumeStream(ctx, sessionID, turn, streamCh, eventCh)
 		if err != nil {
 			tm.persistPartialResponse(ctx, sessionID, turn, content)
-			tm.setError(ctx, sessionID, turn, err)
+			tm.setError(ctx, sessionID, turn, err, eventCh)
 			return
 		}
 
@@ -574,19 +603,21 @@ func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn,
 }
 
 // executeToolCalls runs each tool call after checking the approval gate.
-// It returns results for auto-approved/denied calls and a slice of pending calls
-// that require manual approval.
-func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, turn *api.Turn, calls []api.ToolCall) ([]api.ToolResult, []api.ToolCall) {
-	results := make([]api.ToolResult, 0, len(calls))
+// It returns a result slice with placeholders for pending calls, the pending
+// calls, and the indices at which pending-call results must be inserted to
+// preserve the original call order.
+func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, turn *api.Turn, calls []api.ToolCall) ([]api.ToolResult, []api.ToolCall, []int) {
+	results := make([]api.ToolResult, len(calls))
 	pending := make([]api.ToolCall, 0)
+	pendingIdx := make([]int, 0)
 
-	for _, call := range calls {
+	for i, call := range calls {
 		if err := ctx.Err(); err != nil {
-			results = append(results, api.ToolResult{
+			results[i] = api.ToolResult{
 				CallID: call.ID,
 				Name:   call.Name,
 				Error:  fmt.Sprintf("context cancelled: %v", err),
-			})
+			}
 			continue
 		}
 
@@ -594,15 +625,16 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 
 		if !autoApproved {
 			pending = append(pending, call)
+			pendingIdx = append(pendingIdx, i)
 			continue
 		}
 
 		if decision == api.ApprovalNo {
-			results = append(results, api.ToolResult{
+			results[i] = api.ToolResult{
 				CallID: call.ID,
 				Name:   call.Name,
 				Error:  "tool call denied",
-			})
+			}
 			continue
 		}
 
@@ -610,7 +642,13 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 		if err != nil {
 			result.Error = err.Error()
 		}
-		results = append(results, result)
+		if result.CallID == "" {
+			result.CallID = call.ID
+		}
+		if result.Name == "" {
+			result.Name = call.Name
+		}
+		results[i] = result
 	}
 
 	if len(pending) > 0 {
@@ -626,10 +664,10 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 		tm.pendingMu.Unlock()
 	}
 
-	return results, pending
+	return results, pending, pendingIdx
 }
 
-func (tm *TurnManager) setError(ctx context.Context, sessionID string, turn *api.Turn, err error) {
+func (tm *TurnManager) setError(ctx context.Context, sessionID string, turn *api.Turn, err error, eventCh chan api.TurnEvent) {
 	tm.metrics.IncCounter("turn.errored")
 	tm.mu.Lock()
 	turn.State = api.TurnError
@@ -642,6 +680,12 @@ func (tm *TurnManager) setError(ctx context.Context, sessionID string, turn *api
 	tm.pendingMu.Unlock()
 	if saveErr := tm.store.SaveTurn(ctx, sessionID, *turn); saveErr != nil {
 		slog.Error("failed to save turn", "error", saveErr)
+	}
+	if eventCh != nil {
+		select {
+		case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: err}:
+		case <-ctx.Done():
+		}
 	}
 	tm.mu.Lock()
 	tm.turn = turn
@@ -667,6 +711,9 @@ func (tm *TurnManager) persistPartialResponse(ctx context.Context, sessionID str
 }
 
 func (tm *TurnManager) runHooks(ctx context.Context, event api.HookEvent, sessionID, turnID, input string) {
+	if ctx.Err() != nil {
+		return
+	}
 	if tm.hookRunner == nil {
 		return
 	}
@@ -681,6 +728,9 @@ func (tm *TurnManager) runHooks(ctx context.Context, event api.HookEvent, sessio
 }
 
 func (tm *TurnManager) runApprovalHook(ctx context.Context, event api.HookEvent, sessionID, turnID string, calls []api.ToolCall) {
+	if ctx.Err() != nil {
+		return
+	}
 	if tm.hookRunner == nil || len(calls) == 0 {
 		return
 	}

@@ -110,16 +110,40 @@ func (e *RiskEvaluator) baseline(name string) api.RiskLevel {
 	return api.RiskLevelMedium
 }
 
+// resolveForEscape resolves symlinks in p. If p does not exist, it resolves
+// symlinks in the parent directory and appends the base name so that paths to
+// not-yet-created files are evaluated consistently with the resolved root.
+func resolveForEscape(p string) string {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err == nil {
+		return resolved
+	}
+	dir := filepath.Dir(p)
+	if dir == p {
+		return filepath.Clean(p)
+	}
+	resolvedDir := resolveForEscape(dir)
+	return filepath.Join(resolvedDir, filepath.Base(p))
+}
+
 // pathEscapes reports whether the given path resolves outside the sandbox root.
+// It expands "~" and resolves symlinks on both the path and the root before
+// comparison so that escapes via relative segments or symlinks are detected.
 func (e *RiskEvaluator) pathEscapes(p string) bool {
 	if e.sandboxRoot == "" {
 		return false
 	}
-	if !filepath.IsAbs(p) {
-		p = filepath.Join(e.sandboxRoot, p)
-	}
-	resolved := filepath.Clean(p)
+
 	root := filepath.Clean(e.sandboxRoot)
+	root = resolveForEscape(root)
+
+	p = expandTilde(p)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(root, p)
+	}
+
+	resolved := resolveForEscape(filepath.Clean(p))
+
 	if resolved == root {
 		return false
 	}

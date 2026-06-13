@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +25,16 @@ func TestAPIError_Error(t *testing.T) {
 			name: "without message",
 			err:  &APIError{StatusCode: http.StatusInternalServerError},
 			want: "API error 500",
+		},
+		{
+			name: "with body",
+			err:  &APIError{StatusCode: http.StatusBadRequest, Message: "invalid request", Body: "details"},
+			want: "API error 400: invalid request: details",
+		},
+		{
+			name: "truncates long body",
+			err:  &APIError{StatusCode: http.StatusBadRequest, Body: strings.Repeat("x", 300)},
+			want: "API error 400: " + strings.Repeat("x", 256) + "...",
 		},
 	}
 

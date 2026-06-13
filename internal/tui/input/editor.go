@@ -3,6 +3,7 @@ package input
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -84,8 +85,13 @@ func readTempFile(path string) (string, error) {
 
 // openExternalEditor writes the current textarea value to a temp file and
 // returns a tea.Cmd that launches the configured editor via tea.ExecProcess.
-// The temp file is removed after the editor exits.
-func (m *Model) openExternalEditor(editor string) tea.Cmd {
+// The temp file is removed after the editor exits. The supplied context
+// controls the editor subprocess; when it is cancelled the editor is killed.
+func (m *Model) openExternalEditor(ctx context.Context, editor string) tea.Cmd {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	content := m.textarea.Value()
 	path, err := writeTempFile(content)
 	if err != nil {
@@ -94,7 +100,7 @@ func (m *Model) openExternalEditor(editor string) tea.Cmd {
 		}
 	}
 
-	cmd, err := parseEditor(context.Background(), resolveEditor(editor), path)
+	cmd, err := parseEditor(ctx, resolveEditor(editor), path)
 	if err != nil {
 		_ = os.Remove(path)
 		return func() tea.Msg {
@@ -121,6 +127,7 @@ func (m *Model) handleEditorFinished(msg editorFinishedMsg) {
 
 	content, err := readTempFile(msg.path)
 	if err != nil {
+		slog.Warn("external editor: failed to read temp file", "path", msg.path, "error", err)
 		return
 	}
 	m.textarea.SetValue(content)

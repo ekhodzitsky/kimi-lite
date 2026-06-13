@@ -1093,7 +1093,7 @@ func TestTurnManager_executeToolCalls_ContextCancellation(t *testing.T) {
 		{ID: "tc3", Name: "read_file", Arguments: `{}`},
 	}
 
-	results, pending := tm.executeToolCalls(ctx, sess.ID, turn, calls)
+	results, pending, _ := tm.executeToolCalls(ctx, sess.ID, turn, calls)
 
 	if len(pending) != 0 {
 		t.Fatalf("expected no pending calls, got %d", len(pending))
@@ -1416,5 +1416,174 @@ func TestTurnManager_RunTurn_SingleSaveBeforeStream(t *testing.T) {
 	}
 	if store.savedTurns[0].State != api.TurnStreaming {
 		t.Errorf("pre-stream turn state = %d, want TurnStreaming", store.savedTurns[0].State)
+	}
+}
+
+func TestTurnManager_ResumeWithApproval_SessionIDMismatch(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+				{ID: "tc1", Name: "write_file", Arguments: `{"path":"/tmp/out.txt","content":"x"}`},
+			}},
+		),
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
+		},
+		defs: []api.ToolDefinition{{Name: "write_file", Description: "write"}},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalNo, false
+		},
+	}
+
+	tm := NewTurnManager(llm, tools, approval, store, nil)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Write")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	for i := 0; i < 100; i++ {
+		turn := tm.CurrentTurn()
+		if turn != nil && turn.State == api.TurnWaitingApproval {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_, reqID := tm.PendingApprovals()
+	if err := tm.ResumeWithApproval(ctx, "wrong-session", reqID, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err == nil {
+		t.Fatal("expected error for sessionID mismatch")
+	}
+
+	cancel()
+	for range outCh {
+	}
+}
+
+func TestTurnManager_ExecuteToolCalls_PreservesMixedOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "tc1", Name: "read_file", Arguments: `{}`},
+						{ID: "tc2", Name: "write_file", Arguments: `{"path":"/tmp/out.txt","content":"x"}`},
+						{ID: "tc3", Name: "read_file", Arguments: `{}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(api.StreamChunk{Done: true})(ctx, messages, tools)
+		},
+	}
+	executeOrder := []string{}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			executeOrder = append(executeOrder, call.ID)
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
+		},
+		defs: []api.ToolDefinition{
+			{Name: "read_file", Description: "read"},
+			{Name: "write_file", Description: "write"},
+		},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			if call.Name == "read_file" {
+				return api.ApprovalYes, true
+			}
+			return api.ApprovalNo, false
+		},
+	}
+
+	tm := NewTurnManager(llm, tools, approval, store, nil)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Mixed calls")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	// Wait for the approval request to be emitted, then approve the pending write_file.
+	approved := false
+	for e := range outCh {
+		if e.Type == api.TurnEventApprovalRequest {
+			_, reqID := tm.PendingApprovals()
+			if err := tm.ResumeWithApproval(ctx, sess.ID, reqID, map[string]api.ApprovalDecision{"tc2": api.ApprovalYes}); err != nil {
+				t.Fatalf("resume with approval: %v", err)
+			}
+			approved = true
+		}
+		if approved && e.Type == api.TurnEventDone {
+			break
+		}
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil || turn.State != api.TurnIdle {
+		t.Fatalf("expected turn to complete, got state %v", turn)
+	}
+	if len(turn.Results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(turn.Results))
+	}
+	wantOrder := []string{"tc1", "tc2", "tc3"}
+	for i, want := range wantOrder {
+		if turn.Results[i].CallID != want {
+			t.Errorf("result[%d].CallID = %q, want %q", i, turn.Results[i].CallID, want)
+		}
+	}
+	// Auto-approved read_file calls must execute before the pending write_file is approved.
+	if len(executeOrder) < 2 || executeOrder[0] != "tc1" || executeOrder[1] != "tc3" {
+		t.Errorf("unexpected auto-approve execute order: %v", executeOrder)
+	}
+}
+
+func TestTurnManager_RunTurn_ErrorEventEmitted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	streamErr := fmt.Errorf("llm stream exploded")
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "partial"},
+			api.StreamChunk{Error: streamErr},
+		),
+	}
+	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "test")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	var gotError *api.TurnEvent
+	for ev := range outCh {
+		if ev.Type == api.TurnEventError {
+			gotError = &ev
+		}
+	}
+
+	if gotError == nil {
+		t.Fatal("expected TurnEventError to be emitted")
+	}
+	if gotError.Error != streamErr {
+		t.Errorf("error event = %v, want %v", gotError.Error, streamErr)
 	}
 }

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -48,6 +49,42 @@ func TestRiskEvaluator_PathEscape(t *testing.T) {
 	level, reason := e.Evaluate(call)
 	if level != api.RiskLevelHigh {
 		t.Errorf("path escape risk = %q, want high (%s)", level, reason)
+	}
+}
+
+func TestRiskEvaluator_SymlinkEscape(t *testing.T) {
+	t.Parallel()
+
+	sandbox := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	linkPath := filepath.Join(sandbox, "link.txt")
+	if err := os.Symlink(outsideFile, linkPath); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	e := NewRiskEvaluator(nil, sandbox)
+	call := api.ToolCall{Name: "write_file", Arguments: `{"path":"` + linkPath + `"}`}
+	level, reason := e.Evaluate(call)
+	if level != api.RiskLevelHigh {
+		t.Errorf("symlink escape risk = %q, want high (%s)", level, reason)
+	}
+}
+
+func TestRiskEvaluator_TildeEscape(t *testing.T) {
+	t.Parallel()
+
+	sandbox := t.TempDir()
+	e := NewRiskEvaluator(nil, sandbox)
+
+	call := api.ToolCall{Name: "write_file", Arguments: `{"path":"~/.ssh/id_rsa"}`}
+	level, reason := e.Evaluate(call)
+	if level != api.RiskLevelHigh {
+		t.Errorf("tilde escape risk = %q, want high (%s)", level, reason)
 	}
 }
 

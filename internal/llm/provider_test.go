@@ -54,7 +54,7 @@ func TestNewClientFromConfig_ProvidersAndAlias(t *testing.T) {
 		},
 		Providers: map[string]api.ProviderConfig{
 			"openai": {
-				Type:         string(api.ProviderTypeOpenAI),
+				Type:         api.ProviderTypeOpenAI,
 				APIKey:       "openai-key",
 				BaseURL:      "https://api.openai.com/v1",
 				DefaultModel: "gpt-4o",
@@ -94,7 +94,7 @@ func TestNewClientFromConfig_RawDefaultModel(t *testing.T) {
 		LLM: api.LLMConfig{Timeout: 60 * time.Second},
 		Providers: map[string]api.ProviderConfig{
 			"kimi": {
-				Type:         string(api.ProviderTypeKimi),
+				Type:         api.ProviderTypeKimi,
 				APIKey:       "kimi-key",
 				BaseURL:      "https://api.moonshot.cn/v1",
 				DefaultModel: "kimi-k2.5",
@@ -122,7 +122,7 @@ func TestNewClientFromConfig_UnsupportedProvider(t *testing.T) {
 		LLM: api.LLMConfig{Timeout: 60 * time.Second},
 		Providers: map[string]api.ProviderConfig{
 			"anthropic": {
-				Type:         string(api.ProviderTypeAnthropic),
+				Type:         api.ProviderTypeAnthropic,
 				APIKey:       "key",
 				BaseURL:      "https://api.anthropic.com",
 				DefaultModel: "claude-3",
@@ -174,7 +174,7 @@ func TestNewClientFromConfig_CustomHeaders(t *testing.T) {
 		LLM: api.LLMConfig{Timeout: 5 * time.Second},
 		Providers: map[string]api.ProviderConfig{
 			"openai": {
-				Type:         string(api.ProviderTypeOpenAI),
+				Type:         api.ProviderTypeOpenAI,
 				APIKey:       "key",
 				BaseURL:      server.URL,
 				DefaultModel: "gpt-4o",
@@ -234,7 +234,7 @@ func TestResolveModelFromConfig(t *testing.T) {
 		LLM: api.LLMConfig{Timeout: 60 * time.Second},
 		Providers: map[string]api.ProviderConfig{
 			"openai": {
-				Type:         string(api.ProviderTypeOpenAI),
+				Type:         api.ProviderTypeOpenAI,
 				APIKey:       "key",
 				BaseURL:      "https://api.openai.com/v1",
 				DefaultModel: "gpt-4o",
@@ -292,4 +292,77 @@ func TestResolveModelFromConfig(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
+}
+
+func TestNewClientFromConfig_EmptyBaseURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  *api.Config
+	}{
+		{
+			name: "legacy provider",
+			cfg: &api.Config{
+				LLM: api.LLMConfig{
+					Provider: "moonshot",
+					APIKey:   "key",
+					Model:    "kimi-k2.5",
+					Timeout:  60 * time.Second,
+				},
+			},
+		},
+		{
+			name: "providers table",
+			cfg: &api.Config{
+				LLM: api.LLMConfig{Timeout: 60 * time.Second},
+				Providers: map[string]api.ProviderConfig{
+					"openai": {
+						Type:         api.ProviderTypeOpenAI,
+						APIKey:       "key",
+						DefaultModel: "gpt-4o",
+					},
+				},
+				DefaultProvider: "openai",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := NewClientFromConfig(tt.cfg, nil)
+			if err == nil {
+				t.Fatal("expected error for empty base_url")
+			}
+			if !contains(err.Error(), "base_url") {
+				t.Errorf("error = %q, want containing base_url", err.Error())
+			}
+		})
+	}
+}
+
+func TestNewClientFromConfig_VertexAIUnsupported(t *testing.T) {
+	t.Parallel()
+
+	cfg := &api.Config{
+		LLM: api.LLMConfig{Timeout: 60 * time.Second},
+		Providers: map[string]api.ProviderConfig{
+			"vertex": {
+				Type:         api.ProviderTypeVertexAI,
+				APIKey:       "key",
+				BaseURL:      "https://vertexai.example.com",
+				DefaultModel: "gemini",
+			},
+		},
+		DefaultProvider: "vertex",
+	}
+
+	_, err := NewClientFromConfig(cfg, nil)
+	if err == nil {
+		t.Fatal("expected error for unsupported provider")
+	}
+	if !contains(err.Error(), "not yet supported") {
+		t.Errorf("error = %q, want not yet supported", err.Error())
+	}
 }

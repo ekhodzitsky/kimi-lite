@@ -14,6 +14,10 @@ const defaultSubagentTimeout = 60 * time.Second
 // defaultSubagentMaxRounds is used when a request does not specify one.
 const defaultSubagentMaxRounds = 10
 
+// maxSubagentRounds is the hard upper bound for MaxRounds to prevent runaway
+// subagent runs.
+const maxSubagentRounds = 50
+
 // runLoop executes an ephemeral LLM↔tool loop for the given subagent config.
 func runLoop(ctx context.Context, r *Runner, cfg agentConfig, req api.SubagentRequest) (*api.SubagentResult, error) {
 	start := now()
@@ -29,15 +33,22 @@ func runLoop(ctx context.Context, r *Runner, cfg agentConfig, req api.SubagentRe
 	if maxRounds <= 0 {
 		maxRounds = defaultSubagentMaxRounds
 	}
+	if maxRounds > maxSubagentRounds {
+		maxRounds = maxSubagentRounds
+	}
 
 	messages := []api.Message{
 		{Role: api.RoleSystem, Content: cfg.systemPrompt, CreatedAt: start},
 		{Role: api.RoleUser, Content: req.Prompt, CreatedAt: start},
 	}
 
-	allowed := cfg.tools
-	if len(req.AllowedTools) > 0 {
-		allowed = intersect(allowed, req.AllowedTools)
+	// A nil AllowedTools means "use the agent's default allowlist"; an
+	// explicitly empty slice means "no tools are allowed".
+	var allowed []string
+	if req.AllowedTools != nil {
+		allowed = intersect(cfg.tools, req.AllowedTools)
+	} else {
+		allowed = cfg.tools
 	}
 	defs := filterDefinitions(r.toolExecutor.Definitions(ctx), allowed)
 
@@ -52,6 +63,9 @@ func runLoop(ctx context.Context, r *Runner, cfg agentConfig, req api.SubagentRe
 		if err != nil {
 			return nil, fmt.Errorf("subagent llm chat: %w", err)
 		}
+		if msg == nil {
+			return nil, fmt.Errorf("subagent llm returned nil message")
+		}
 		messages = append(messages, *msg)
 
 		if len(msg.ToolCalls) == 0 {
@@ -65,7 +79,13 @@ func runLoop(ctx context.Context, r *Runner, cfg agentConfig, req api.SubagentRe
 		for _, tc := range msg.ToolCalls {
 			result, err := r.toolExecutor.Execute(ctx, tc)
 			if err != nil {
-				result = api.ToolResult{CallID: tc.ID, Name: tc.Name, Error: err.Error()}
+				if result.CallID == "" {
+					result.CallID = tc.ID
+				}
+				if result.Name == "" {
+					result.Name = tc.Name
+				}
+				result.Error = err.Error()
 			}
 			messages = append(messages, api.Message{
 				Role:       api.RoleTool,
@@ -90,14 +110,20 @@ func toolResultContent(result api.ToolResult) string {
 	return result.Output + "\nError: " + result.Error
 }
 
-// intersect returns the elements of a that are also in b, preserving a's order.
+// intersect returns the elements of a that are also in b, preserving a's order
+// and removing duplicates from a.
 func intersect(a, b []string) []string {
 	want := make(map[string]struct{}, len(b))
 	for _, n := range b {
 		want[n] = struct{}{}
 	}
 	out := make([]string, 0, len(a))
+	seen := make(map[string]struct{}, len(a))
 	for _, n := range a {
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
 		if _, ok := want[n]; ok {
 			out = append(out, n)
 		}

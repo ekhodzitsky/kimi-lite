@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,11 @@ import (
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
+
+// maxFrameSize limits the size of a single JSON-RPC frame read from stdin.
+// It protects the server from unbounded memory growth and replaces the
+// 64 KB default limit of bufio.Scanner.
+const maxFrameSize = 8 * 1024 * 1024 // 8 MB
 
 // appRunner is the application interface consumed by the ACP server.
 // It mirrors the interface used by cmd/kimi-lite/main.go so that *app.App
@@ -30,9 +36,10 @@ type Server struct {
 	app    appRunner
 	logger *slog.Logger
 
-	mu       sync.Mutex
-	session  *api.Session
-	cancelFn context.CancelFunc
+	mu             sync.Mutex
+	session        *api.Session
+	promptInFlight bool
+	cancelFn       context.CancelFunc
 
 	writeMu sync.Mutex
 }
@@ -51,11 +58,17 @@ func NewServer(application appRunner, logger *slog.Logger) *Server {
 // Run reads JSON-RPC requests from stdin and writes responses to stdout until
 // stdin is closed or the context is cancelled.
 func (s *Server) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
-	scanner := bufio.NewScanner(stdin)
+	defer func() {
+		if err := s.app.Close(); err != nil {
+			s.logger.Error("app close failed", "error", err)
+		}
+	}()
+
+	reader := bufio.NewReader(stdin)
 	enc := json.NewEncoder(stdout)
 	var wg sync.WaitGroup
 
-	for scanner.Scan() {
+	for {
 		select {
 		case <-ctx.Done():
 			wg.Wait()
@@ -63,7 +76,27 @@ func (s *Server) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 		default:
 		}
 
-		line := scanner.Bytes()
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			wg.Wait()
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("read stdin: %w", err)
+		}
+
+		// Remove trailing newline/CR for cleaner logging and parsing.
+		line = bytes.TrimSuffix(line, []byte{'\n'})
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+
+		if len(line) > maxFrameSize {
+			if werr := s.writeError(ctx, enc, nil, -32700, "parse error", fmt.Errorf("frame exceeds maximum size of %d bytes", maxFrameSize)); werr != nil {
+				wg.Wait()
+				return fmt.Errorf("write oversized frame error: %w", werr)
+			}
+			continue
+		}
+
 		if len(line) == 0 {
 			continue
 		}
@@ -71,6 +104,7 @@ func (s *Server) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 		var req jsonRPCRequest
 		if err := json.Unmarshal(line, &req); err != nil {
 			if werr := s.writeError(ctx, enc, nil, -32700, "parse error", err); werr != nil {
+				wg.Wait()
 				return fmt.Errorf("write parse error: %w", werr)
 			}
 			continue
@@ -94,13 +128,6 @@ func (s *Server) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 			return err
 		}
 	}
-
-	wg.Wait()
-
-	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("scan stdin: %w", err)
-	}
-	return nil
 }
 
 // handle dispatches a single JSON-RPC request.
@@ -133,14 +160,18 @@ func (s *Server) writeError(ctx context.Context, enc *json.Encoder, id any, code
 	default:
 	}
 
+	errObj := &jsonRPCError{
+		Code:    code,
+		Message: message,
+	}
+	if cause != nil {
+		errObj.Data = cause.Error()
+	}
+
 	resp := jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
-		Error: &jsonRPCError{
-			Code:    code,
-			Message: message,
-			Data:    cause.Error(),
-		},
+		Error:   errObj,
 	}
 
 	s.writeMu.Lock()
@@ -212,6 +243,26 @@ func (s *Server) setSession(sess *api.Session) {
 	s.session = sess
 }
 
+// startPrompt attempts to mark a prompt as in-flight. It returns false if
+// another prompt is already running.
+func (s *Server) startPrompt() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.promptInFlight {
+		return false
+	}
+	s.promptInFlight = true
+	return true
+}
+
+// endPrompt clears the in-flight prompt flag and its cancel function.
+func (s *Server) endPrompt() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.promptInFlight = false
+	s.cancelFn = nil
+}
+
 // setCancel stores the cancel function for the current prompt.
 func (s *Server) setCancel(fn context.CancelFunc) {
 	s.mu.Lock()
@@ -219,20 +270,31 @@ func (s *Server) setCancel(fn context.CancelFunc) {
 	s.cancelFn = fn
 }
 
-// cancelCurrent cancels the in-flight prompt if any.
-func (s *Server) cancelCurrent() {
+// cancelCurrent cancels the in-flight prompt if any. It returns true if a
+// prompt was actually cancelled.
+func (s *Server) cancelCurrent() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cancelFn != nil {
-		s.cancelFn()
-		s.cancelFn = nil
+	if !s.promptInFlight || s.cancelFn == nil {
+		return false
 	}
+	s.cancelFn()
+	s.cancelFn = nil
+	return true
 }
 
-// changeWorkingDir switches to dir when non-empty and different from cwd.
+// changeWorkingDir validates dir and switches to it when non-empty and
+// different from the current working directory.
 func changeWorkingDir(dir string) error {
 	if dir == "" {
 		return nil
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("stat working directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", dir)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {

@@ -80,7 +80,7 @@ Business logic layer.
 - `CompositeToolExecutor` — routes tool calls across multiple executors
 - `ApprovalGate` — auto/manual/yolo approval modes; the TUI approval dialog supports an in-memory diff preview (`d`) for file-edit tools
 - `ContextCompressor` — summarizes conversation history via LLM while preserving leading system/identity prompts verbatim and using pair-aware boundaries so assistant/tool-call groups are not split across the summary/recent boundary
-- DNS rebinding protection via custom `DialContext` in `newSecureHTTPClient` (used by `fetch_url`)
+- DNS rebinding protection via custom `DialContext` in `netutil.SecureHTTPClient`/`netutil.SecureTransport` (used by `fetch_url` and MCP HTTP transports)
 
 ### `internal/tui`
 Bubble Tea terminal UI.
@@ -112,6 +112,7 @@ Git integration via shelling out to `git`.
 - `Status()` — `git status` output
 - `Diff(path)` — file diff
 - `IsRepo()` — checks for `.git`
+- `Commit(ctx, message)` — creates a checkpoint commit with `--no-verify` and a local identity
 
 ### `internal/app`
 DI container and application lifecycle.

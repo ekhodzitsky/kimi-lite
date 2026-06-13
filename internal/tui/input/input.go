@@ -2,10 +2,12 @@
 package input
 
 import (
+	"context"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
@@ -85,6 +87,7 @@ type Model struct {
 	editor         string // configured editor; env vars used as fallback
 	fileCandidates []string
 	mention        *mentionState
+	ctx            context.Context
 	mu             sync.RWMutex
 }
 
@@ -124,9 +127,13 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		m.mu.RLock()
+		// Lock for the entire key handling path so mutable state (history,
+		// mention selection, editor configuration) is not modified concurrently
+		// with SetFileCandidates / SetEditor / SetContext calls.
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
 		km := m.keyMap
-		m.mu.RUnlock()
 
 		// @-mention completion navigation takes precedence.
 		if m.mention != nil {
@@ -155,7 +162,6 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		if key.Matches(msg, km.Send) {
 			content := strings.TrimSpace(m.textarea.Value())
 			if content != "" {
-				m.mu.Lock()
 				// De-duplicate consecutive entries.
 				if len(m.history) == 0 || m.history[len(m.history)-1] != content {
 					m.history = append(m.history, content)
@@ -166,7 +172,6 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				}
 				m.histIdx = -1
 				m.draft = ""
-				m.mu.Unlock()
 				m.textarea.Reset()
 				m.mention = nil
 				return func() tea.Msg {
@@ -183,16 +188,11 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		}
 
 		if key.Matches(msg, km.ExternalEditor) {
-			m.mu.RLock()
-			editor := m.editor
-			m.mu.RUnlock()
-			return m.openExternalEditor(editor)
+			return m.openExternalEditor(m.ctx, m.editor)
 		}
 
 		// History navigation
 		if msg.String() == "up" || msg.String() == "ctrl+p" {
-			m.mu.Lock()
-			defer m.mu.Unlock()
 			if len(m.history) == 0 {
 				return nil
 			}
@@ -209,8 +209,6 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		}
 
 		if msg.String() == "down" || msg.String() == "ctrl+n" {
-			m.mu.Lock()
-			defer m.mu.Unlock()
 			if m.histIdx == -1 {
 				return nil
 			}
@@ -297,6 +295,14 @@ func (m *Model) SetEditor(editor string) {
 	m.editor = editor
 }
 
+// SetContext sets the context used to control the external editor subprocess.
+// When the context is cancelled, the running editor process is terminated.
+func (m *Model) SetContext(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ctx = ctx
+}
+
 // SetFileCandidates sets the list of file paths available for @-mention
 // completion. The caller is responsible for keeping the list in sync with the
 // sidebar tree.
@@ -351,9 +357,11 @@ func (m *Model) cursorPosition() int {
 }
 
 // wordAtCursor returns the word surrounding the cursor and its byte range in
-// the current value. Word boundaries are whitespace characters.
+// the current value. Word boundaries are whitespace characters. All cursor and
+// boundary logic is rune-based so multi-byte characters are handled correctly.
 func (m *Model) wordAtCursor() (word string, start, end int) {
 	value := m.textarea.Value()
+	runes := []rune(value)
 	pos := m.cursorPosition()
 	if pos < 0 {
 		pos = 0
@@ -361,23 +369,45 @@ func (m *Model) wordAtCursor() (word string, start, end int) {
 	if pos > len(value) {
 		pos = len(value)
 	}
-	start = pos
-	for start > 0 && !isWordBoundary(value[start-1]) {
-		start--
+
+	// Convert byte cursor position to a rune index.
+	rpos := 0
+	for i := range value {
+		if i >= pos {
+			break
+		}
+		rpos++
 	}
-	end = pos
-	for end < len(value) && !isWordBoundary(value[end]) {
-		end++
+
+	startRune := rpos
+	for startRune > 0 && !isWordBoundary(runes[startRune-1]) {
+		startRune--
 	}
+	endRune := rpos
+	for endRune < len(runes) && !isWordBoundary(runes[endRune]) {
+		endRune++
+	}
+
+	start = runeOffsetToByte(value, startRune)
+	end = runeOffsetToByte(value, endRune)
 	return value[start:end], start, end
 }
 
-func isWordBoundary(b byte) bool {
-	switch b {
-	case ' ', '\t', '\n', '\r':
-		return true
+// runeOffsetToByte returns the byte offset in s that corresponds to the given
+// rune offset.
+func runeOffsetToByte(s string, runeOffset int) int {
+	count := 0
+	for i := range s {
+		if count == runeOffset {
+			return i
+		}
+		count++
 	}
-	return false
+	return len(s)
+}
+
+func isWordBoundary(r rune) bool {
+	return unicode.IsSpace(r)
 }
 
 // detectMention updates the active mention state based on the current word at

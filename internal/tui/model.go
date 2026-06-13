@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -84,13 +85,17 @@ func (m *Model) layout() layoutRect {
 	if vpHeight < minViewportHeight {
 		vpHeight = minViewportHeight
 	}
+	statusY := vpHeight + inputHeight
+	if statusY > m.height {
+		statusY = m.height
+	}
 	return layoutRect{
 		sbWidth:      sbWidth,
 		contentWidth: contentWidth,
 		vpWidth:      contentWidth - viewportWidthPadding,
 		vpHeight:     vpHeight,
 		inputHeight:  inputHeight,
-		statusY:      vpHeight + inputHeight,
+		statusY:      statusY,
 	}
 }
 
@@ -182,6 +187,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 
 	inp := input.New(st, input.ConfigurableKeyMap(cfg.Keybindings), cfg.Session.MaxHistory)
 	inp.SetEditor(cfg.UI.Editor)
+	inp.SetContext(appCtx)
 	vp := viewport.New(st)
 
 	sb, err := sidebar.New(st, session.Path)
@@ -366,17 +372,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setState(api.TurnWaitingApproval)
 
 	case SessionsMsg:
-		cmds = append(cmds, m.handleSessions()...)
+		cmds = append(cmds, m.listSessionsCmd())
+
+	case SessionsResultMsg:
+		if msg.Err != nil {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("list sessions: %w", msg.Err), m.styles))
+		} else if len(msg.Sessions) == 0 {
+			m.addMessage(msgcomp.NewUserMessage("No sessions found.", m.styles))
+		} else {
+			for _, s := range msg.Sessions {
+				m.addMessage(msgcomp.NewUserMessage(
+					fmt.Sprintf("Session: %s (%s) — updated %s", s.ID, s.Path, s.UpdatedAt.Format("2006-01-02 15:04")),
+					m.styles,
+				))
+			}
+		}
+		m.setState(api.TurnIdle)
 
 	case CheckpointMsg:
-		if m.gitProvider != nil {
-			if err := m.gitProvider.Commit(m.appCtx, ""); err != nil {
-				m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("checkpoint failed: %w", err), m.styles))
-			} else {
-				m.addMessage(msgcomp.NewUserMessage("Checkpoint created.", m.styles))
-			}
+		cmds = append(cmds, m.checkpointCmd())
+
+	case CheckpointResultMsg:
+		if msg.Err != nil {
+			m.addMessage(msgcomp.NewErrorMessage(msg.Err, m.styles))
 		} else {
-			m.addMessage(msgcomp.NewUserMessage("No git provider available.", m.styles))
+			m.addMessage(msgcomp.NewUserMessage("Checkpoint created.", m.styles))
 		}
 		m.setState(api.TurnIdle)
 
@@ -707,6 +727,12 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 		m.mu.Unlock()
 		streamCh, err := m.turnManager.RunTurn(ctx, m.session.ID, content)
 		if err != nil {
+			cancel()
+			m.mu.Lock()
+			m.streamCancel = nil
+			m.streamCh = nil
+			m.streamCanceled = true
+			m.mu.Unlock()
 			m.addMessage(msgcomp.NewErrorMessage(err, m.styles))
 			m.setState(api.TurnError)
 			return cmds
@@ -725,27 +751,48 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 	return cmds
 }
 
-func (m *Model) handleSessions() []tea.Cmd {
-	var cmds []tea.Cmd
-	if m.store != nil && m.session != nil {
-		sessions, err := m.store.ListSessions(m.appCtx, m.session.Path, 0)
-		if err != nil {
-			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("list sessions: %w", err), m.styles))
-		} else if len(sessions) == 0 {
-			m.addMessage(msgcomp.NewUserMessage("No sessions found.", m.styles))
-		} else {
-			for _, s := range sessions {
-				m.addMessage(msgcomp.NewUserMessage(
-					fmt.Sprintf("Session: %s (%s) — updated %s", s.ID, s.Path, s.UpdatedAt.Format("2006-01-02 15:04")),
-					m.styles,
-				))
-			}
-		}
-	} else {
-		m.addMessage(msgcomp.NewUserMessage("No sessions available.", m.styles))
+// listSessionsCmd returns a command that lists sessions asynchronously.
+func (m *Model) listSessionsCmd() tea.Cmd {
+	m.mu.RLock()
+	store := m.store
+	var path string
+	if m.session != nil {
+		path = m.session.Path
 	}
-	m.setState(api.TurnIdle)
-	return cmds
+	appCtx := m.appCtx
+	m.mu.RUnlock()
+
+	timeout := sessionsTimeout
+	return func() tea.Msg {
+		if store == nil || path == "" {
+			return SessionsResultMsg{Err: fmt.Errorf("no sessions available")}
+		}
+		ctx, cancel := context.WithTimeout(appCtx, timeout)
+		defer cancel()
+		sessions, err := store.ListSessions(ctx, path, 0)
+		return SessionsResultMsg{Sessions: sessions, Err: err}
+	}
+}
+
+// checkpointCmd returns a command that creates a checkpoint asynchronously.
+func (m *Model) checkpointCmd() tea.Cmd {
+	m.mu.RLock()
+	gp := m.gitProvider
+	appCtx := m.appCtx
+	m.mu.RUnlock()
+
+	timeout := checkpointTimeout
+	return func() tea.Msg {
+		if gp == nil {
+			return CheckpointResultMsg{Err: fmt.Errorf("no git provider available")}
+		}
+		ctx, cancel := context.WithTimeout(appCtx, timeout)
+		defer cancel()
+		if err := gp.Commit(ctx, ""); err != nil {
+			return CheckpointResultMsg{Err: fmt.Errorf("checkpoint failed: %w", err)}
+		}
+		return CheckpointResultMsg{}
+	}
 }
 
 // readStreamChunk returns a command that reads the next event from the stream.
@@ -754,6 +801,14 @@ func (m *Model) readStreamChunk() tea.Cmd {
 	return func() tea.Msg {
 		if ch == nil {
 			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true}}
+		}
+		// Guard against stale events after cancellation or a new stream starting.
+		m.mu.RLock()
+		currentCh := m.streamCh
+		canceled := m.streamCanceled
+		m.mu.RUnlock()
+		if ch != currentCh || canceled {
+			return nil
 		}
 		event, ok := <-ch
 		if !ok {
@@ -773,6 +828,7 @@ func (m *Model) readStreamChunk() tea.Cmd {
 		case api.TurnEventApprovalDiff:
 			return ApprovalDiffMsg{CallID: event.DiffCallID, Diff: event.DiffContent}
 		default:
+			slog.Warn("unknown turn event type", "type", event.Type)
 			return nil
 		}
 	}
@@ -782,15 +838,22 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 	var cmds []tea.Cmd
 
 	// Guard against stale buffered chunks after stream cancellation.
-	if !chunk.Done && m.streamCh == nil && m.streamCanceled {
+	m.mu.RLock()
+	streamCh := m.streamCh
+	streamCanceled := m.streamCanceled
+	m.mu.RUnlock()
+	if !chunk.Done && streamCh == nil && streamCanceled {
 		return cmds
 	}
 
 	if chunk.Error != nil {
 		m.addMessage(msgcomp.NewErrorMessage(chunk.Error, m.styles))
 		m.setState(api.TurnError)
+		m.mu.Lock()
+		m.streamCancel = nil
 		m.streamCh = nil
 		m.streamCanceled = true
+		m.mu.Unlock()
 		m.rb.setLastBlockStart(0)
 		return cmds
 	}
@@ -813,7 +876,11 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 			})
 			return cmds
 		}
+		m.mu.Lock()
+		m.streamCancel = nil
 		m.streamCh = nil
+		m.streamCanceled = false
+		m.mu.Unlock()
 		return cmds
 	}
 
@@ -890,9 +957,23 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 		// Forward the diff request to the turn manager so it can emit a
 		// TurnEventApprovalDiff while keeping the pending call active.
 		reqID := m.approval.requestID()
+		m.mu.RLock()
+		tm := m.turnManager
+		var sessionID string
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+
+		timeout := approvalTimeout
 		cmds = append(cmds, func() tea.Msg {
-			if m.turnManager != nil && m.session != nil {
-				_ = m.turnManager.ResumeWithApproval(m.appCtx, m.session.ID, reqID, map[string]api.ApprovalDecision{resp.CallID: api.ApprovalDiff})
+			if tm != nil && sessionID != "" {
+				ctx, cancel := context.WithTimeout(appCtx, timeout)
+				defer cancel()
+				if err := tm.ResumeWithApproval(ctx, sessionID, reqID, map[string]api.ApprovalDecision{resp.CallID: api.ApprovalDiff}); err != nil {
+					return ErrorMsg{Err: fmt.Errorf("resume with approval: %w", err)}
+				}
 			}
 			return StateChangeMsg{State: api.TurnWaitingApproval}
 		})
@@ -905,7 +986,12 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	}
 
 	if alwaysAll && m.autoApproveSetter != nil {
+		seen := make(map[string]struct{})
 		for _, call := range m.approval.pending() {
+			if _, ok := seen[call.Name]; ok {
+				continue
+			}
+			seen[call.Name] = struct{}{}
 			m.autoApproveSetter(call.Name)
 		}
 	}
@@ -913,9 +999,24 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	reqID := m.approval.requestID()
 	m.approval.clear()
 	m.setState(api.TurnThinking)
+
+	m.mu.RLock()
+	tm := m.turnManager
+	var sessionID string
+	if m.session != nil {
+		sessionID = m.session.ID
+	}
+	appCtx := m.appCtx
+	m.mu.RUnlock()
+
+	timeout := approvalTimeout
 	cmds = append(cmds, func() tea.Msg {
-		if m.turnManager != nil && m.session != nil {
-			_ = m.turnManager.ResumeWithApproval(m.appCtx, m.session.ID, reqID, approvals)
+		if tm != nil && sessionID != "" {
+			ctx, cancel := context.WithTimeout(appCtx, timeout)
+			defer cancel()
+			if err := tm.ResumeWithApproval(ctx, sessionID, reqID, approvals); err != nil {
+				return ErrorMsg{Err: fmt.Errorf("resume with approval: %w", err)}
+			}
 		}
 		return StateChangeMsg{State: api.TurnThinking}
 	})
@@ -960,6 +1061,9 @@ func (m *Model) refreshViewport() {
 func (m *Model) renderApprovalDialog(background string) string {
 	call, ok := m.approval.currentCall()
 	if !ok {
+		return background
+	}
+	if m.session == nil {
 		return background
 	}
 	var b strings.Builder

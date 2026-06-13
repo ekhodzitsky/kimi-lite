@@ -154,7 +154,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -195,7 +197,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -238,7 +242,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -275,7 +281,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -315,7 +323,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -386,14 +396,21 @@ func TestDegradedDefault_UnresolvedAPIKey(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
-	os.Unsetenv("MOONSHOT_API_KEY")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, ".config"))
+	t.Setenv("MOONSHOT_API_KEY", "")
 
-	// Create an invalid config file to force Load() to fail
-	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte("invalid toml {"), 0644)
+	// Create an invalid config file in the default location to force Load() to
+	// fail and fall back to the built-in defaults.
+	configDir := filepath.Join(tmpDir, ".config", "kimi-lite")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("invalid toml {"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := newRootCmd()
-	cmd.SetArgs([]string{"--config", configPath})
 	err := cmd.Execute()
 
 	if err == nil {
@@ -421,7 +438,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -429,7 +448,7 @@ model = "kimi-k2.5"
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	err := runExport(context.Background(), "sess-1", filepath.Join(tmpDir, "out.json"), "")
+	err := runExport(context.Background(), "sess-1", filepath.Join(tmpDir, "out.json"), flags{configPath: ""})
 
 	w.Close()
 	os.Stderr = oldStderr
@@ -458,11 +477,17 @@ base_url = "http://localhost:1"
 db_path = "` + customDBPath + `"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", tmpDir)
 
-	// runDoctor may fail on LLM check, but the DB directory should be created.
-	_ = runDoctor(context.Background(), configPath)
+	// runDoctor is expected to fail on LLM connectivity because base_url points
+	// to localhost:1, but the DB directory should still be created.
+	err := runDoctor(context.Background(), configPath)
+	if err == nil {
+		t.Fatal("expected doctor to report an LLM connectivity issue")
+	}
 
 	if _, err := os.Stat(customDBDir); os.IsNotExist(err) {
 		t.Fatalf("expected DB directory %s to be created using custom config", customDBDir)
@@ -506,7 +531,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -562,7 +589,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -623,7 +652,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -678,7 +709,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -720,7 +753,9 @@ api_key = "test-key"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(configContent), 0644)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
@@ -738,5 +773,158 @@ model = "kimi-k2.5"
 	}
 	if !strings.Contains(err.Error(), "unsupported output format") {
 		t.Errorf("expected unsupported format error, got: %v", err)
+	}
+}
+
+func TestPromptFlag_EmptyToolCalls(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	ch := make(chan api.TurnEvent, 1)
+	ch <- api.TurnEvent{Type: api.TurnEventApprovalRequest, ToolCalls: nil}
+	close(ch)
+
+	mock := &mockApp{
+		startSessionReturn: &api.Session{ID: "sess-empty-approval", Path: "/tmp"},
+		runTurnReturn:      ch,
+	}
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return mock, nil }
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	cmd := newRootCmd()
+	var buf bytes.Buffer
+	oldStdout := stdout
+	stdout = &buf
+	defer func() { stdout = oldStdout }()
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--prompt", "edit file", "--config", configPath})
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("expected error for approval request in prompt mode")
+	}
+	if !strings.Contains(err.Error(), `tool call "unknown" requires approval`) {
+		t.Errorf("expected unknown tool approval error, got: %v", err)
+	}
+}
+
+func TestExplicitBadConfig_Fails(t *testing.T) {
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() { writeDefaultConfig = origWriteDefaultConfig }()
+
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("invalid toml {"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newRootCmd()
+	var buf bytes.Buffer
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--config", configPath})
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("expected error for explicit bad config")
+	}
+	if !strings.Contains(err.Error(), "load config") {
+		t.Errorf("expected load config error, got: %v", err)
+	}
+}
+
+func TestConflictingSessionAndContinueFlags(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return &mockApp{}, nil }
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	cmd := newRootCmd()
+	var buf bytes.Buffer
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--session", "sess-1", "--continue", "--config", configPath})
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("expected error for conflicting flags")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected mutually exclusive error, got: %v", err)
+	}
+}
+
+func TestDoctor_MCPServersClose(t *testing.T) {
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() { writeDefaultConfig = origWriteDefaultConfig }()
+
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	customDBDir := filepath.Join(tmpDir, "custom-db")
+	customDBPath := filepath.Join(customDBDir, "sessions.db")
+
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "dummy-key"
+model = "kimi-k2.5"
+base_url = "http://localhost:1"
+[session]
+db_path = "` + customDBPath + `"
+[mcp_servers.test]
+enabled = true
+transport = "http"
+url = "http://localhost:1"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tmpDir)
+
+	// runDoctor is expected to fail on LLM connectivity, but it should still
+	// attempt to connect to configured MCP servers and close the client.
+	err := runDoctor(context.Background(), configPath)
+	if err == nil {
+		t.Fatal("expected doctor to report an LLM connectivity issue")
+	}
+
+	if _, err := os.Stat(customDBDir); os.IsNotExist(err) {
+		t.Fatalf("expected DB directory %s to be created using custom config", customDBDir)
 	}
 }

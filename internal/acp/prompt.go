@@ -26,6 +26,11 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req jsonRPCRequest, en
 		return s.writeError(ctx, enc, req.ID, -32603, "no active session", err)
 	}
 
+	if !s.startPrompt() {
+		return s.writeError(ctx, enc, req.ID, -32603, "prompt already in flight", errors.New("a prompt is already running"))
+	}
+	defer s.endPrompt()
+
 	// v1 auto-approves all tool calls for ACP.
 	s.app.SetYolo(true)
 
@@ -73,6 +78,13 @@ func (s *Server) handleTurnEvent(ctx context.Context, enc *json.Encoder, event a
 			Approval:      event.ToolCalls,
 		})
 
+	case api.TurnEventApprovalDiff:
+		return s.writeNotification(ctx, enc, "session/update", sessionUpdateParams{
+			SessionUpdate: string(sessionUpdateApprovalDiff),
+			DiffCallID:    event.DiffCallID,
+			DiffContent:   event.DiffContent,
+		})
+
 	case api.TurnEventDone:
 		return nil
 
@@ -89,9 +101,9 @@ func (s *Server) handleTurnEvent(ctx context.Context, enc *json.Encoder, event a
 
 // handleSessionCancel cancels the current prompt.
 func (s *Server) handleSessionCancel(ctx context.Context, req jsonRPCRequest, enc *json.Encoder) error {
-	s.cancelCurrent()
+	cancelled := s.cancelCurrent()
 	if req.ID != nil {
-		return s.writeResult(ctx, enc, req.ID, struct{}{})
+		return s.writeResult(ctx, enc, req.ID, sessionCancelResult{Cancelled: cancelled})
 	}
 	return nil
 }

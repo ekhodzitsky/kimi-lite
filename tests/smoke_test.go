@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/store"
@@ -17,6 +20,7 @@ import (
 // It returns a fixed response on the first ChatStream call and, optionally,
 // a tool-call response before the final text response.
 type fakeLLM struct {
+	mu        sync.Mutex
 	responses []fakeResponse
 	calls     int
 }
@@ -27,10 +31,20 @@ type fakeResponse struct {
 }
 
 func (f *fakeLLM) Chat(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return &api.Message{Role: api.RoleAssistant, Content: "fake"}, nil
 }
 
 func (f *fakeLLM) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	ch := make(chan api.StreamChunk, 1)
 	idx := f.calls
 	if idx >= len(f.responses) {
@@ -56,7 +70,7 @@ type staticConfig struct {
 func (s *staticConfig) Get() *api.Config { return s.cfg }
 
 func TestTurnLoop_ReadFile(t *testing.T) {
-	t.Parallel()
+	defer goleak.VerifyNone(t)
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "smoke.db")
@@ -65,7 +79,7 @@ func TestTurnLoop_ReadFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
+	defer st.Close()
 
 	session, err := st.CreateSession(context.Background(), tmpDir)
 	if err != nil {
@@ -113,6 +127,8 @@ func TestTurnLoop_ReadFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create tool executor: %v", err)
 	}
+	defer tools.Close()
+
 	tm := core.NewTurnManager(llm, tools, approval, st, &staticConfig{cfg: cfg})
 
 	events, err := tm.RunTurn(context.Background(), session.ID, "read hello.txt")
@@ -156,5 +172,91 @@ func TestTurnLoop_ReadFile(t *testing.T) {
 
 func writeTestFile(t *testing.T, path, content string) error {
 	t.Helper()
-	return os.WriteFile(path, []byte(content), 0o600)
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// blockingFakeLLM blocks in ChatStream until its context is cancelled. It is used
+// to hold a TurnManager in the running state so concurrent RunTurn calls can be
+// rejected.
+type blockingFakeLLM struct {
+	mu       sync.Mutex
+	started  chan struct{}
+	cancelFn context.CancelFunc
+}
+
+func (f *blockingFakeLLM) Chat(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (f *blockingFakeLLM) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+	f.mu.Lock()
+	ctx, f.cancelFn = context.WithCancel(ctx)
+	started := f.started
+	f.mu.Unlock()
+	close(started)
+
+	ch := make(chan api.StreamChunk)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func (f *blockingFakeLLM) Models() []api.ModelInfo { return nil }
+
+func TestRunTurn_RejectsConcurrentCalls(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "concurrent.db")
+
+	st, err := store.NewSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer st.Close()
+
+	session, err := st.CreateSession(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	llm := &blockingFakeLLM{started: make(chan struct{})}
+	approval := core.NewApprovalGate(core.ModeAuto, nil, func(string) bool { return false }, nil)
+	tools, err := core.NewBuiltInToolExecutor(core.ToolExecutorConfig{
+		SandboxRoot:  tmpDir,
+		ShellTimeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("create tool executor: %v", err)
+	}
+	defer tools.Close()
+
+	tm := core.NewTurnManager(llm, tools, approval, st, &staticConfig{cfg: &api.Config{}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := tm.RunTurn(ctx, session.ID, "first prompt")
+	if err != nil {
+		t.Fatalf("first RunTurn: %v", err)
+	}
+	defer func() {
+		cancel()
+		for range events {
+		}
+	}()
+
+	select {
+	case <-llm.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocking LLM did not start")
+	}
+
+	_, err = tm.RunTurn(ctx, session.ID, "second prompt")
+	if err == nil {
+		t.Fatal("expected concurrent RunTurn to be rejected")
+	}
 }

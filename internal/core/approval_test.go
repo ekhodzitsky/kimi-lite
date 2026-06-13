@@ -235,6 +235,35 @@ func TestApprovalGate_UserRule_AskReadFile(t *testing.T) {
 	}
 }
 
+func TestApprovalGate_EditTool_NeverAutoApprove(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeAuto, []string{"edit"}, func(name string) bool { return name == "edit" }, nil)
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "edit"})
+	if auto {
+		t.Error("expected manual approval for edit tool")
+	}
+	if decision != api.ApprovalNo {
+		t.Errorf("decision = %d, want ApprovalNo", decision)
+	}
+}
+
+func TestApprovalGate_AddAutoApprove_Dedupes(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeAuto, []string{}, func(name string) bool { return name == "read_file" }, nil)
+	gate.AddAutoApprove("read_file")
+	gate.AddAutoApprove("read_file")
+
+	rules := 0
+	for _, r := range gate.rules {
+		if r.Tool == "read_file" && r.Decision == api.PermissionAllow && r.Scope == api.PermissionScopeSession {
+			rules++
+		}
+	}
+	if rules != 1 {
+		t.Errorf("expected 1 session allow rule for read_file, got %d", rules)
+	}
+}
+
 func TestApprovalGate_GlobRule(t *testing.T) {
 	t.Parallel()
 	rules := []api.PermissionRule{

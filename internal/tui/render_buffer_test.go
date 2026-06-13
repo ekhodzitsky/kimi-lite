@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -197,5 +198,31 @@ func TestRenderBuffer_LargeRebuildDoesNotOverflow(t *testing.T) {
 	wantLen := 100*100 + 99*len("\n\n")
 	if len(got) != wantLen {
 		t.Errorf("rebuilt length = %d, want %d", len(got), wantLen)
+	}
+}
+
+func TestRenderBuffer_AppendBlockIsO1Amortized(t *testing.T) {
+	t.Parallel()
+
+	rb := newRenderBuffer()
+	for i := 0; i < 100; i++ {
+		rb.appendBlock(fmt.Sprintf("block-%d", i))
+	}
+
+	// The immutable prefix should not have been materialized by appendBlock;
+	// blocks are kept in the pending slice and joined lazily.
+	if rb.prefix != "" {
+		t.Errorf("prefix should remain empty when only appending blocks, got %q", rb.prefix)
+	}
+	if len(rb.completed) != 100 {
+		t.Errorf("completed blocks = %d, want 100", len(rb.completed))
+	}
+
+	want := "block-0"
+	for i := 1; i < 100; i++ {
+		want += "\n\n" + fmt.Sprintf("block-%d", i)
+	}
+	if got := rb.String(); got != want {
+		t.Errorf("String() mismatch:\ngot:  %q\nwant: %q", got, want)
 	}
 }

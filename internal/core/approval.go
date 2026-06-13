@@ -81,9 +81,15 @@ func (g *ApprovalGate) SetRiskEvaluator(eval *RiskEvaluator, threshold api.RiskL
 }
 
 // AddAutoApprove adds a session-scope allow rule for the named tool.
+// Duplicate session-scope allow rules for the same tool are ignored.
 func (g *ApprovalGate) AddAutoApprove(name string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	for _, r := range g.rules {
+		if r.Tool == name && r.Decision == api.PermissionAllow && r.Scope == api.PermissionScopeSession {
+			return
+		}
+	}
 	g.rules = append(g.rules, api.PermissionRule{
 		Tool:     name,
 		Decision: api.PermissionAllow,
@@ -97,6 +103,7 @@ var neverAutoApprove = map[string]struct{}{
 	"shell":            {},
 	"write_file":       {},
 	"str_replace_file": {},
+	"edit":             {},
 }
 
 // matchRule reports whether ruleTool matches name using glob semantics.

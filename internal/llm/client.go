@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -43,6 +44,7 @@ type Client struct {
 	maxRetries   int
 	extraHeaders http.Header
 	metrics      api.MetricsCollector
+	mu           sync.RWMutex
 }
 
 // NewClient creates a new LLM client from configuration.
@@ -74,34 +76,44 @@ func NewClient(cfg api.LLMConfig, httpClient *http.Client) *Client {
 }
 
 // SetMetricsCollector sets the metrics collector.
+// Safe for concurrent use with Chat/ChatStream.
 func (c *Client) SetMetricsCollector(m api.MetricsCollector) {
 	if m == nil {
 		m = api.NoopMetricsCollector{}
 	}
+	c.mu.Lock()
 	c.metrics = m
+	c.mu.Unlock()
 }
 
 // SetHeaders replaces any custom headers sent with each request.
+// Safe for concurrent use with Chat/ChatStream.
 func (c *Client) SetHeaders(headers map[string]string) {
+	c.mu.Lock()
 	c.extraHeaders = make(http.Header, len(headers))
 	for k, v := range headers {
 		c.extraHeaders.Set(k, v)
 	}
+	c.mu.Unlock()
 }
 
 // Chat sends messages to the LLM and returns the complete response.
 func (c *Client) Chat(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
 	start := time.Now()
-	c.metrics.IncCounter("llm.chat")
+	c.mu.RLock()
+	metrics := c.metrics
+	extraHeaders := c.extraHeaders.Clone()
+	c.mu.RUnlock()
+	metrics.IncCounter("llm.chat")
 
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
 	reqBody := c.buildChatRequest(messages, tools, false)
-	respBody, err := c.doRequest(ctx, reqBody)
+	respBody, err := c.doRequest(ctx, reqBody, extraHeaders)
 	if err != nil {
-		c.metrics.RecordError("llm.chat")
-		c.metrics.RecordLatency("llm.chat.latency", time.Since(start))
+		metrics.RecordError("llm.chat")
+		metrics.RecordLatency("llm.chat.latency", time.Since(start))
 		return nil, fmt.Errorf("chat request failed: %w", err)
 	}
 
@@ -115,8 +127,12 @@ func (c *Client) Chat(ctx context.Context, messages []api.Message, tools []api.T
 	}
 
 	choice := resp.Choices[0].Message
+	role := api.Role(choice.Role)
+	if role == "" {
+		role = api.RoleAssistant
+	}
 	msg := &api.Message{
-		Role:         api.Role(choice.Role),
+		Role:         role,
 		Content:      choice.Content,
 		FinishReason: resp.Choices[0].FinishReason,
 		CreatedAt:    time.Now().UTC(),
@@ -125,7 +141,7 @@ func (c *Client) Chat(ctx context.Context, messages []api.Message, tools []api.T
 		slog.Warn("LLM response truncated", "finish_reason", msg.FinishReason)
 	}
 
-	c.metrics.RecordLatency("llm.chat.latency", time.Since(start))
+	metrics.RecordLatency("llm.chat.latency", time.Since(start))
 
 	if len(choice.ToolCalls) > 0 {
 		msg.ToolCalls = make([]api.ToolCall, 0, len(choice.ToolCalls))
@@ -170,21 +186,25 @@ func sortedToolCalls(accumulator map[int]*rawToolCall) []api.ToolCall {
 // The streaming goroutine owns the HTTP response body and closes it via defer body.Close().
 func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
 	start := time.Now()
-	c.metrics.IncCounter("llm.stream")
+	c.mu.RLock()
+	metrics := c.metrics
+	extraHeaders := c.extraHeaders.Clone()
+	c.mu.RUnlock()
+	metrics.IncCounter("llm.stream")
 
 	ctx, cancel := context.WithCancel(ctx)
 
 	reqBody := c.buildChatRequest(messages, tools, true)
-	body, err := c.doRequestStream(ctx, reqBody)
+	body, err := c.doRequestStream(ctx, reqBody, extraHeaders)
 	if err != nil {
-		c.metrics.RecordError("llm.stream")
-		c.metrics.RecordLatency("llm.stream.latency", time.Since(start))
+		metrics.RecordError("llm.stream")
+		metrics.RecordLatency("llm.stream.latency", time.Since(start))
 		cancel()
 		return nil, fmt.Errorf("chat stream request failed: %w", err)
 	}
 
 	ch := make(chan api.StreamChunk, 64)
-	c.metrics.RecordLatency("llm.stream.latency", time.Since(start))
+	metrics.RecordLatency("llm.stream.latency", time.Since(start))
 	go func() {
 		defer close(ch)
 		defer cancel()
@@ -276,6 +296,14 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 					if raw.FinishReason == "length" || raw.FinishReason == "content_filter" {
 						slog.Warn("LLM stream truncated", "finish_reason", raw.FinishReason)
 					}
+					// Emit any terminal content before the done chunk so callers don't lose it.
+					if raw.Content != "" {
+						select {
+						case ch <- api.StreamChunk{Content: raw.Content}:
+						case <-ctx.Done():
+							return
+						}
+					}
 					select {
 					case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator), FinishReason: raw.FinishReason}:
 					case <-ctx.Done():
@@ -313,7 +341,7 @@ func (c *Client) withTimeout(ctx context.Context) (context.Context, context.Canc
 }
 
 // doRequestWithRetry performs the HTTP request with retries and returns the raw response.
-func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream bool) (*http.Response, error) {
+func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream bool, extraHeaders http.Header) (*http.Response, error) {
 	var lastErr error
 	var retryAfterDelay time.Duration
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
@@ -342,7 +370,7 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 		if stream {
 			req.Header.Set("Accept", "text/event-stream")
 		}
-		for k, vals := range c.extraHeaders {
+		for k, vals := range extraHeaders {
 			for _, v := range vals {
 				req.Header.Add(k, v)
 			}
@@ -370,7 +398,8 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			_ = resp.Body.Close()
 			slog.Debug("LLM client error", "status", resp.StatusCode, "body", string(respBody))
-			return nil, &api.APIError{StatusCode: resp.StatusCode, Message: "client error", Body: string(respBody)}
+			apiErr := &api.APIError{StatusCode: resp.StatusCode, Message: "client error", Body: string(respBody)}
+			return nil, fmt.Errorf("LLM client error: %w", apiErr)
 		}
 
 		return resp, nil
@@ -380,13 +409,13 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 }
 
 // doRequest performs a non-streaming request with retries.
-func (c *Client) doRequest(ctx context.Context, reqBody chatCompletionRequest) ([]byte, error) {
+func (c *Client) doRequest(ctx context.Context, reqBody chatCompletionRequest, extraHeaders http.Header) ([]byte, error) {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, body, false)
+	resp, err := c.doRequestWithRetry(ctx, body, false, extraHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -403,13 +432,13 @@ func (c *Client) doRequest(ctx context.Context, reqBody chatCompletionRequest) (
 // doRequestStream performs a streaming request with retries.
 // On success it returns the response body for reading SSE events.
 // The caller takes ownership of the returned body and is responsible for closing it.
-func (c *Client) doRequestStream(ctx context.Context, reqBody chatCompletionRequest) (io.ReadCloser, error) {
+func (c *Client) doRequestStream(ctx context.Context, reqBody chatCompletionRequest, extraHeaders http.Header) (io.ReadCloser, error) {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, body, true)
+	resp, err := c.doRequestWithRetry(ctx, body, true, extraHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -425,18 +454,32 @@ func parseRetryAfter(value string) time.Duration {
 	}
 	// Try integer seconds first.
 	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds < 0 {
+			return 0
+		}
 		return time.Duration(seconds) * time.Second
 	}
 	// Fall back to HTTP-date parsing.
 	if t, err := http.ParseTime(value); err == nil {
-		return time.Until(t)
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		return d
 	}
 	return 0
 }
 
 // backoff returns the delay before a retry attempt.
 func (c *Client) backoff(attempt int) time.Duration {
-	maxDelay := min(time.Duration(1<<(attempt-1))*time.Second, maxBackoffDelay)
+	shift := attempt - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > 31 {
+		shift = 31
+	}
+	maxDelay := min(time.Duration(1<<shift)*time.Second, maxBackoffDelay)
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return maxDelay

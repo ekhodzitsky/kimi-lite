@@ -65,7 +65,10 @@ func estimateTokensLegacy(msgs []api.Message) int {
 // so that summarization does not lose tool-call fidelity.
 func formatMessageForSummary(msg api.Message) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %s", msg.Role, msg.Content)
+	fmt.Fprintf(&b, "%s", msg.Role)
+	if msg.ToolCallID == "" {
+		fmt.Fprintf(&b, ": %s", msg.Content)
+	}
 	for _, tc := range msg.ToolCalls {
 		fmt.Fprintf(&b, "\n  tool_call: %s(%s)", tc.Name, tc.Arguments)
 	}
@@ -125,6 +128,9 @@ func findSafeBoundary(messages []api.Message, keepRecent int) int {
 // verbatim. It returns the number of messages that were summarized (excluding
 // leading system messages).
 func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore, sessionID string, keepRecent int) (int, error) {
+	if c == nil || c.llm == nil {
+		return 0, fmt.Errorf("context compressor LLM client is nil")
+	}
 	if keepRecent < 0 {
 		keepRecent = 0
 	}
@@ -246,11 +252,19 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 		}
 	}
 	// If leading and recent timestamps collide at nanosecond precision, bump
-	// the oldest recent message forward so the summary remains strictly
-	// between them. This is safe because ReplaceMessages persists the adjusted
-	// slice.
-	if len(recent) > 0 && !summaryCreatedAt.Before(recent[0].CreatedAt) {
-		recent[0].CreatedAt = summaryCreatedAt.Add(time.Nanosecond)
+	// all affected recent messages forward so the summary remains strictly
+	// before every preserved recent message and order is preserved. This is
+	// safe because ReplaceMessages persists the adjusted slice.
+	if len(recent) > 0 {
+		next := summaryCreatedAt
+		for i := range recent {
+			if !recent[i].CreatedAt.After(next) {
+				next = next.Add(time.Nanosecond)
+				recent[i].CreatedAt = next
+			} else {
+				next = recent[i].CreatedAt
+			}
+		}
 	}
 	summaryMsg := api.Message{
 		ID:        idgen.GenerateID(),
@@ -258,7 +272,10 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 		Content:   fmt.Sprintf("Previous conversation summary: %s", resp.Content),
 		CreatedAt: summaryCreatedAt,
 	}
-	newMessages := append(append(leading, summaryMsg), recent...)
+	newMessages := make([]api.Message, 0, len(leading)+1+len(recent))
+	newMessages = append(newMessages, leading...)
+	newMessages = append(newMessages, summaryMsg)
+	newMessages = append(newMessages, recent...)
 	if err := store.ReplaceMessages(ctx, sessionID, newMessages); err != nil {
 		return 0, fmt.Errorf("replace messages: %w", err)
 	}

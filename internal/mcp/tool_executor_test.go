@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,6 +223,25 @@ func TestToolExecutor_IsReadOnly(t *testing.T) {
 	})
 }
 
+func TestToolExecutor_Definitions_DoesNotMutateInput(t *testing.T) {
+	t.Parallel()
+
+	original := []api.ToolDefinition{
+		{Name: "read_file", Description: "Read"},
+	}
+	client := &mockMCPClient{
+		listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
+			return original, nil
+		},
+	}
+	exec := NewToolExecutor(client)
+	_ = exec.Definitions(context.Background())
+
+	if original[0].Name != "read_file" {
+		t.Fatalf("client's tool definition was mutated to %q", original[0].Name)
+	}
+}
+
 func TestToolExecutor_Execute(t *testing.T) {
 	t.Parallel()
 
@@ -316,6 +336,26 @@ func TestToolExecutor_Execute(t *testing.T) {
 		}
 		if result.Output != "" {
 			t.Errorf("result.Output = %q, want empty", result.Output)
+		}
+	})
+
+	t.Run("non-mcp prefix returns error result", func(t *testing.T) {
+		t.Parallel()
+
+		exec := NewToolExecutor(&mockMCPClient{})
+		result, err := exec.Execute(context.Background(), api.ToolCall{
+			ID:        "call-4",
+			Name:      "read_file",
+			Arguments: `{"path":"a.txt"}`,
+		})
+		if err != nil {
+			t.Fatalf("expected nil Go error, got %v", err)
+		}
+		if result.Error == "" {
+			t.Fatal("expected non-empty result.Error")
+		}
+		if !strings.Contains(result.Error, "mcp_") {
+			t.Errorf("expected mcp_ prefix error, got %q", result.Error)
 		}
 	})
 }

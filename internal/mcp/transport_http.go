@@ -9,30 +9,37 @@ import (
 	"net/http"
 	"os"
 	"sync/atomic"
-	"time"
+
+	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
 )
+
+const maxHTTPResponseSize = 8 * 1024 * 1024 // 8 MB
 
 // HTTPTransport implements Transport using JSON-RPC POST requests over HTTP.
 // It is a minimal implementation suitable for MCP servers that accept a single
 // JSON-RPC request per HTTP POST and return the JSON-RPC response in the body.
 type HTTPTransport struct {
-	url       string
-	headers   map[string]string
-	bearerEnv string
-	client    *http.Client
-	nextID    int64
+	url        string
+	headers    map[string]string
+	bearerEnv  string
+	client     *http.Client
+	ownsClient bool
+	nextID     int64
 }
 
 // NewHTTPTransport creates a new HTTP MCP transport.
 func NewHTTPTransport(url string, headers map[string]string, bearerEnv string, client *http.Client) *HTTPTransport {
+	ownsClient := false
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = netutil.SecureHTTPClient()
+		ownsClient = true
 	}
 	return &HTTPTransport{
-		url:       url,
-		headers:   headers,
-		bearerEnv: bearerEnv,
-		client:    client,
+		url:        url,
+		headers:    headers,
+		bearerEnv:  bearerEnv,
+		client:     client,
+		ownsClient: ownsClient,
 	}
 }
 
@@ -82,9 +89,12 @@ func (t *HTTPTransport) Send(ctx context.Context, method string, params any) (re
 		}
 	}()
 
-	body, err := io.ReadAll(httpResp.Body)
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, maxHTTPResponseSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("read response body for %s: %w", method, err)
+	}
+	if len(body) > maxHTTPResponseSize {
+		return nil, fmt.Errorf("response body for %s exceeds maximum allowed size (%d bytes)", method, maxHTTPResponseSize)
 	}
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
@@ -140,14 +150,17 @@ func (t *HTTPTransport) Notify(ctx context.Context, method string, params any) (
 	}()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		body, _ := io.ReadAll(httpResp.Body)
+		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxHTTPResponseSize+1))
 		return fmt.Errorf("http %d for notification %s: %s", httpResp.StatusCode, method, string(body))
 	}
-	_, _ = io.Copy(io.Discard, httpResp.Body)
+	_, _ = io.Copy(io.Discard, io.LimitReader(httpResp.Body, maxHTTPResponseSize+1))
 	return nil
 }
 
-// Close is a no-op for the HTTP transport.
+// Close closes idle connections if the transport created its own HTTP client.
 func (t *HTTPTransport) Close() error {
+	if t.ownsClient && t.client != nil {
+		t.client.CloseIdleConnections()
+	}
 	return nil
 }

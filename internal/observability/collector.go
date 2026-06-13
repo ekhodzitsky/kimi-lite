@@ -3,7 +3,6 @@
 package observability
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +10,10 @@ import (
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
+
+// maxLatencyObservations caps the number of latency samples retained per
+// metric key to prevent unbounded memory growth in long-running sessions.
+const maxLatencyObservations = 10000
 
 // Collector implements api.MetricsCollector with mutex-protected maps.
 // It is safe for concurrent use.
@@ -35,6 +38,9 @@ func NewCollector() *Collector {
 // Tags are provided as alternating key/value pairs; an odd number of tags is
 // tolerated by treating the final value as empty.
 func (c *Collector) IncCounter(name string, tags ...string) {
+	if !validMetricName(name) {
+		return
+	}
 	key := metricKey(name, tags...)
 	c.mu.Lock()
 	c.counters[key]++
@@ -42,10 +48,18 @@ func (c *Collector) IncCounter(name string, tags ...string) {
 }
 
 // RecordLatency records a latency observation for the named metric and tags.
+// Observations are kept in a sliding window capped at maxLatencyObservations
+// per metric key.
 func (c *Collector) RecordLatency(name string, d time.Duration, tags ...string) {
+	if !validMetricName(name) {
+		return
+	}
 	key := metricKey(name, tags...)
 	c.mu.Lock()
 	c.latencies[key] = append(c.latencies[key], d)
+	if len(c.latencies[key]) > maxLatencyObservations {
+		c.latencies[key] = c.latencies[key][len(c.latencies[key])-maxLatencyObservations:]
+	}
 	c.mu.Unlock()
 }
 
@@ -70,6 +84,15 @@ func (c *Collector) LatencyCount(name string, tags ...string) int64 {
 	return int64(len(c.latencies[key]))
 }
 
+// validMetricName rejects empty names and names that contain characters used
+// by the metric key encoding, which would corrupt lookup keys.
+func validMetricName(name string) bool {
+	if name == "" {
+		return false
+	}
+	return !strings.ContainsAny(name, "{}=")
+}
+
 // metricKey builds a stable key from a metric name and tag pairs. Tags are
 // sorted lexicographically so that equivalent tag sets produce the same key
 // regardless of the order supplied by callers.
@@ -85,9 +108,20 @@ func metricKey(name string, tags ...string) string {
 		if i+1 < len(tags) {
 			value = tags[i+1]
 		}
-		pairs = append(pairs, fmt.Sprintf("%s=%s", key, value))
+		pairs = append(pairs, key+"="+value)
 	}
 
 	sort.Strings(pairs)
-	return fmt.Sprintf("%s{%s}", name, strings.Join(pairs, ","))
+
+	var b strings.Builder
+	b.WriteString(name)
+	b.WriteByte('{')
+	for i, p := range pairs {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(p)
+	}
+	b.WriteByte('}')
+	return b.String()
 }

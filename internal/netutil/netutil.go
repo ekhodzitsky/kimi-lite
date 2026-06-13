@@ -12,10 +12,15 @@ import (
 
 // IsBlockedHost reports whether a hostname or IP should be blocked to prevent
 // SSRF attacks. It covers loopback, unspecified, private, link-local,
-// CGNAT (100.64.0.0/10), and localhost names.
+// CGNAT (100.64.0.0/10), and localhost names. IPv6 zone identifiers are
+// stripped before parsing.
 func IsBlockedHost(hostname string) bool {
 	if strings.EqualFold(hostname, "localhost") {
 		return true
+	}
+	// Strip IPv6 zone identifiers (e.g. "fe80::1%eth0") before parsing.
+	if i := strings.Index(hostname, "%"); i >= 0 {
+		hostname = hostname[:i]
 	}
 	ip := net.ParseIP(hostname)
 	if ip == nil {
@@ -34,8 +39,8 @@ func IsBlockedHost(hostname string) bool {
 }
 
 // SecureTransport returns an *http.Transport with SSRF-hardened dial logic:
-// it resolves the hostname, checks all returned IPs against IsBlockedHost,
-// and dials the first allowed IP.
+// it resolves the hostname, blocks the connection if any resolved IP is
+// disallowed, and dials only the first resolved IP.
 func SecureTransport() *http.Transport {
 	return secureTransport(net.DefaultResolver.LookupHost, defaultDialer().DialContext)
 }
@@ -55,12 +60,12 @@ func secureTransport(
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("split host port: %w", err)
 			}
 
 			ips, err := lookupHost(ctx, host)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("lookup host %q: %w", host, err)
 			}
 			if len(ips) == 0 {
 				return nil, fmt.Errorf("no IPs resolved for host %q", host)
@@ -72,13 +77,18 @@ func secureTransport(
 				}
 			}
 
-			return dialContext(ctx, network, net.JoinHostPort(ips[0], port))
+			conn, err := dialContext(ctx, network, net.JoinHostPort(ips[0], port))
+			if err != nil {
+				return nil, fmt.Errorf("dial %q: %w", ips[0], err)
+			}
+			return conn, nil
 		},
 	}
 }
 
-// SecureHTTPClient returns an *http.Client using SecureTransport with a 30s
-// timeout and redirect guard that re-checks IsBlockedHost on every hop.
+// SecureHTTPClient returns a new *http.Client using SecureTransport with a 30s
+// timeout and a redirect guard that re-checks IsBlockedHost on every hop.
+// The returned client is safe for reuse across multiple concurrent requests.
 // DNS resolution and IP validation happen exactly once per connection in
 // DialContext; CheckRedirect only does the cheap hostname blocklist check
 // to avoid a DNS-rebinding TOCTOU window.

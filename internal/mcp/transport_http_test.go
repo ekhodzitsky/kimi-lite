@@ -200,3 +200,46 @@ func TestHTTPTransport_BearerTokenMissingEnv(t *testing.T) {
 		t.Errorf("Authorization = %q, want empty", gotAuth)
 	}
 }
+
+func TestHTTPTransport_NilClientUsesSecureHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`{}`)})
+	}))
+	defer server.Close()
+
+	tr := NewHTTPTransport(server.URL, nil, "", nil)
+	_, err := tr.Send(context.Background(), "ping", nil)
+	if err == nil {
+		t.Fatal("expected error when using default secure client against loopback server")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked host error, got: %v", err)
+	}
+}
+
+func TestHTTPTransport_ResponseSizeLimit(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Write a JSON body that exceeds the 8 MB limit.
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"x":"`))
+		for i := 0; i < maxHTTPResponseSize/8; i++ {
+			_, _ = w.Write([]byte(strings.Repeat("A", 8)))
+		}
+		_, _ = w.Write([]byte(`"}}`))
+	}))
+	defer server.Close()
+
+	tr := NewHTTPTransport(server.URL, nil, "", server.Client())
+	_, err := tr.Send(context.Background(), "big", nil)
+	if err == nil {
+		t.Fatal("expected error for oversized response")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected size exceeded error, got: %v", err)
+	}
+}

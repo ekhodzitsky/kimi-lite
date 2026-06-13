@@ -69,6 +69,29 @@ func (ac *approvalController) approveCurrent(decision api.ApprovalDecision) (App
 // ApprovalDiff is treated as a non-final request for more information and does
 // not advance the state machine.
 func (ac *approvalController) handleResponse(resp ApprovalResponseMsg) (done bool, approvals map[string]api.ApprovalDecision, alwaysAll bool) {
+	current, ok := ac.currentCall()
+	if !ok {
+		// No active call awaiting input. Accept a decision for a known pending
+		// call only to finalize the batch (e.g., a late response after the
+		// controller was advanced past the end).
+		if resp.Decision == api.ApprovalAlways {
+			approvals = make(map[string]api.ApprovalDecision)
+			for _, call := range ac.calls {
+				approvals[call.ID] = api.ApprovalYes
+			}
+			return true, approvals, true
+		}
+		if resp.Decision == api.ApprovalDiff || !ac.isKnownCall(resp.CallID) {
+			return false, nil, false
+		}
+		ac.decisions[resp.CallID] = resp.Decision
+		return true, ac.buildApprovals(), false
+	}
+	// Reject decisions that do not match the call currently awaiting input.
+	if resp.CallID != current.ID {
+		return false, nil, false
+	}
+
 	if resp.Decision == api.ApprovalAlways {
 		approvals = make(map[string]api.ApprovalDecision)
 		for _, call := range ac.calls {
@@ -85,18 +108,34 @@ func (ac *approvalController) handleResponse(resp ApprovalResponseMsg) (done boo
 	ac.index++
 
 	if ac.index >= len(ac.calls) {
-		approvals = make(map[string]api.ApprovalDecision)
-		for _, call := range ac.calls {
-			if d, ok := ac.decisions[call.ID]; ok {
-				approvals[call.ID] = d
-			} else {
-				approvals[call.ID] = api.ApprovalNo
-			}
-		}
-		return true, approvals, false
+		return true, ac.buildApprovals(), false
 	}
 
 	return false, nil, false
+}
+
+// isKnownCall reports whether callID belongs to the current request.
+func (ac *approvalController) isKnownCall(callID string) bool {
+	for _, call := range ac.calls {
+		if call.ID == callID {
+			return true
+		}
+	}
+	return false
+}
+
+// buildApprovals returns the final approvals map, defaulting missing decisions
+// to ApprovalNo.
+func (ac *approvalController) buildApprovals() map[string]api.ApprovalDecision {
+	approvals := make(map[string]api.ApprovalDecision)
+	for _, call := range ac.calls {
+		if d, ok := ac.decisions[call.ID]; ok {
+			approvals[call.ID] = d
+		} else {
+			approvals[call.ID] = api.ApprovalNo
+		}
+	}
+	return approvals
 }
 
 // clear resets the controller so it no longer reports active.

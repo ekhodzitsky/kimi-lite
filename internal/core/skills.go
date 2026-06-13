@@ -1,7 +1,9 @@
 package core
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,26 +17,51 @@ type Skill struct {
 }
 
 // DiscoverSkills walks dir recursively and loads every *.md file as a skill.
-// A missing directory returns an empty slice and no error.
-func DiscoverSkills(dir string) ([]Skill, error) {
+// A missing directory returns an empty slice and no error. Symlinks are skipped
+// to prevent directory traversal outside dir, and each skill file is capped at
+// 4 MiB. The context is checked before each file is read.
+func DiscoverSkills(ctx context.Context, dir string) ([]Skill, error) {
 	var skills []Skill
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return skills, nil
 	}
 
+	seen := make(map[string]int)
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
 		if d.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".md") {
 			return nil
 		}
-		//nolint:gosec // path is constrained to the user-owned skills directory.
-		data, err := os.ReadFile(path)
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("load skills: %w", err)
+		}
+
+		// #nosec G304 G122 -- skill paths originate from the configured skills directory walk; symlink check is done above.
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("open skill %s: %w", path, err)
+		}
+		// Cap skill files at 4 MiB to avoid unbounded reads.
+		const maxSkillSize = 4 * 1024 * 1024
+		data, err := io.ReadAll(io.LimitReader(f, maxSkillSize))
+		_ = f.Close()
 		if err != nil {
 			return fmt.Errorf("read skill %s: %w", path, err)
 		}
+
 		name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		if count, ok := seen[name]; ok {
+			count++
+			seen[name] = count
+			name = fmt.Sprintf("%s_%d", name, count)
+		} else {
+			seen[name] = 1
+		}
 		skills = append(skills, Skill{
 			Name:    name,
 			Content: string(data),

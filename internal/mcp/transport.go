@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,39 @@ const (
 	maxFrameSize = 8 * 1024 * 1024 // 8 MB
 	stderrCap    = 16 * 1024       // 16 KB
 )
+
+// frameReader reads newline-delimited frames from an io.Reader while
+// enforcing a maximum frame size. It uses a bufio.Reader so data is buffered
+// without losing bytes that follow a frame delimiter, and oversized frames are
+// rejected before they can cause excessive memory allocation.
+type frameReader struct {
+	r       *bufio.Reader
+	maxSize int
+}
+
+func newFrameReader(r io.Reader, maxSize int) *frameReader {
+	return &frameReader{
+		r:       bufio.NewReader(r),
+		maxSize: maxSize,
+	}
+}
+
+func (fr *frameReader) readFrame() ([]byte, error) {
+	var frame []byte
+	for {
+		b, err := fr.r.ReadByte()
+		if err != nil {
+			return frame, fmt.Errorf("read frame byte: %w", err)
+		}
+		frame = append(frame, b)
+		if b == '\n' {
+			return frame, nil
+		}
+		if len(frame) > fr.maxSize {
+			return nil, fmt.Errorf("frame exceeds max size (%d bytes)", fr.maxSize)
+		}
+	}
+}
 
 // Transport defines the interface for MCP JSON-RPC transports.
 type Transport interface {
@@ -134,9 +168,14 @@ func (t *StdioTransport) buildEnv() []string {
 	for k, v := range t.env {
 		m[k] = v
 	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	out := make([]string, 0, len(m))
-	for k, v := range m {
-		out = append(out, k+"="+v)
+	for _, k := range keys {
+		out = append(out, k+"="+m[k])
 	}
 	return out
 }
@@ -154,9 +193,11 @@ func minimalEnv() []string {
 		"SHELL":  {},
 	}
 	secretPatterns := []string{
-		"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL",
-		"API_KEY", "APIKEY", "ACCESS_KEY", "PRIVATE_KEY",
-		"AUTH", "BEARER", "JWT",
+		"TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "CREDENTIAL",
+		"API_KEY", "APIKEY", "ACCESS_KEY", "PRIVATE_KEY", "SECRET_KEY",
+		"AUTH", "BEARER", "JWT", "OAUTH", "SSO",
+		"CERT", "PRIVATE", "SIGNATURE", "COOKIE", "SESSION", "HOOK",
+		"CREDIT", "PAN", "CVV", "PIN",
 	}
 
 	var out []string
@@ -202,6 +243,7 @@ type StdioTransport struct {
 	readErr      error
 	newCmd       func(name string, arg ...string) *exec.Cmd
 	writeMu      sync.Mutex
+	writeWg      sync.WaitGroup
 	stderr       *boundedBuffer
 	cmdWaitCh    chan struct{}
 	cmdErr       error
@@ -218,6 +260,7 @@ func NewStdioTransport(command string, args ...string) *StdioTransport {
 		newCmd:       exec.Command,
 		logger:       slog.Default(),
 		closeTimeout: 5 * time.Second,
+		cmdWaitCh:    make(chan struct{}),
 	}
 }
 
@@ -243,7 +286,7 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 	path, err := exec.LookPath(t.command)
 	if err != nil {
 		t.mu.Unlock()
-		return fmt.Errorf("mcp-guard not found in PATH: %w", err)
+		return fmt.Errorf("mcp command %q not found in PATH: %w", t.command, err)
 	}
 
 	t.pending = make(map[int64]chan *JSONRPCResponse)
@@ -290,6 +333,7 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 	// Start a single goroutine that waits for the process.
 	// cmd.Wait() may only be called once.
 	t.cmdWaitCh = make(chan struct{})
+	t.cmdWaited = sync.Once{}
 	t.cmdWaited.Do(func() {
 		go func() {
 			t.cmdErr = cmd.Wait()
@@ -322,12 +366,28 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 
 func (t *StdioTransport) readLoop(r io.Reader) {
 	defer t.wg.Done()
-	reader := bufio.NewReader(r)
+	fr := newFrameReader(r, maxFrameSize)
 
 	for {
 		// Read line-delimited frames with a size cap.
-		line, err := reader.ReadBytes('\n')
+		line, err := fr.readFrame()
 		if err != nil {
+			if len(line) > 0 {
+				t.mu.Lock()
+				t.readErr = fmt.Errorf("incomplete JSON-RPC frame")
+				for id, ch := range t.pending {
+					ch <- &JSONRPCResponse{
+						ID: id,
+						Error: &JSONRPCError{
+							Code:    -32700,
+							Message: "parse error: incomplete frame",
+						},
+					}
+					delete(t.pending, id)
+				}
+				t.mu.Unlock()
+				return
+			}
 			if isClosedError(err) {
 				t.mu.Lock()
 				t.readErr = fmt.Errorf("mcp transport: subprocess closed connection")
@@ -352,23 +412,6 @@ func (t *StdioTransport) readLoop(r io.Reader) {
 					Error: &JSONRPCError{
 						Code:    -32700,
 						Message: "parse error: " + err.Error(),
-					},
-				}
-				delete(t.pending, id)
-			}
-			t.mu.Unlock()
-			return
-		}
-
-		if len(line) > maxFrameSize {
-			t.mu.Lock()
-			t.readErr = fmt.Errorf("frame exceeds max size (%d bytes)", maxFrameSize)
-			for id, ch := range t.pending {
-				ch <- &JSONRPCResponse{
-					ID: id,
-					Error: &JSONRPCError{
-						Code:    -32700,
-						Message: "frame too large",
 					},
 				}
 				delete(t.pending, id)
@@ -403,7 +446,11 @@ func (t *StdioTransport) readLoop(r io.Reader) {
 		t.mu.Unlock()
 
 		if ok {
-			ch <- &resp
+			// Copy the response before sending so the pointer does not
+			// reference the loop variable, which would race with the next
+			// iteration.
+			respCopy := resp
+			ch <- &respCopy
 		} else if t.logger != nil {
 			t.logger.Debug("dropping unmatched JSON-RPC frame", "id", resp.ID)
 		}
@@ -448,13 +495,17 @@ func (t *StdioTransport) Send(ctx context.Context, method string, params any) (*
 
 	t.writeMu.Lock()
 	writeErrCh := make(chan error, 1)
+	t.writeWg.Add(1)
 	go func() {
+		defer t.writeWg.Done()
 		_, err := fmt.Fprintln(stdin, string(data))
 		writeErrCh <- err
 	}()
 	select {
 	case <-ctx.Done():
 		t.writeMu.Unlock()
+		// The writer goroutine may still be running; Close will wait for it
+		// after closing stdin so we do not race on the pipe lifecycle.
 		t.mu.Lock()
 		delete(t.pending, id)
 		t.mu.Unlock()
@@ -516,12 +567,16 @@ func (t *StdioTransport) Notify(ctx context.Context, method string, params any) 
 	}
 
 	writeErrCh := make(chan error, 1)
+	t.writeWg.Add(1)
 	go func() {
+		defer t.writeWg.Done()
 		_, err := fmt.Fprintln(stdin, string(data))
 		writeErrCh <- err
 	}()
 	select {
 	case <-ctx.Done():
+		// The writer goroutine may still be running; Close will wait for it
+		// after closing stdin so we do not race on the pipe lifecycle.
 		return fmt.Errorf("notification %s cancelled: %w", method, ctx.Err())
 	case err := <-writeErrCh:
 		if err != nil {
@@ -563,6 +618,7 @@ func (t *StdioTransport) Close() error {
 	t.stdin = nil
 	cmd := t.cmd
 	t.cmd = nil
+	waitCh := t.cmdWaitCh
 	t.mu.Unlock()
 
 	t.writeMu.Lock()
@@ -571,12 +627,16 @@ func (t *StdioTransport) Close() error {
 	}
 	t.writeMu.Unlock()
 
-	if cmd != nil && cmd.Process != nil {
+	// Wait for any in-flight stdin writers to finish before reaping the
+	// process so they do not write to a closed pipe.
+	t.writeWg.Wait()
+
+	if cmd != nil && cmd.Process != nil && waitCh != nil {
 		// Ensure the wait goroutine is started (it may have been started in Connect).
 		t.cmdWaited.Do(func() {
 			go func() {
 				t.cmdErr = cmd.Wait()
-				close(t.cmdWaitCh)
+				close(waitCh)
 			}()
 		})
 
@@ -587,7 +647,7 @@ func (t *StdioTransport) Close() error {
 		timer := time.AfterFunc(grace, func() {
 			_ = cmd.Process.Kill() // ignore kill errors on cleanup
 		})
-		<-t.cmdWaitCh
+		<-waitCh
 		timer.Stop()
 	}
 

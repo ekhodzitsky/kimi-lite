@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1313,5 +1315,151 @@ func TestSystemPrompt_IncludesSkills(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Use gofmt.") {
 		t.Error("system prompt missing skill content")
+	}
+}
+
+func TestApp_New_NilConfig(t *testing.T) {
+	t.Parallel()
+
+	app, err := New(nil, false)
+	if err == nil {
+		if app != nil {
+			_ = app.Close()
+		}
+		t.Fatal("expected error for nil config")
+	}
+	if app != nil {
+		t.Fatal("expected nil App on nil config")
+	}
+}
+
+func TestApp_SetAutoApprove(t *testing.T) {
+	t.Parallel()
+
+	app := &App{
+		approvalGate: core.NewApprovalGate(core.ModeAuto, []string{"read_file"}, func(name string) bool {
+			return name == "read_file"
+		}, nil),
+	}
+
+	call := api.ToolCall{Name: "grep"}
+	decision, auto := app.approvalGate.ShouldAutoApprove(call)
+	if auto || decision != api.ApprovalNo {
+		t.Fatal("expected manual approval for grep before SetAutoApprove")
+	}
+
+	app.SetAutoApprove([]string{"grep"})
+	decision, auto = app.approvalGate.ShouldAutoApprove(call)
+	if !auto || decision != api.ApprovalYes {
+		t.Fatalf("expected auto-approval for grep after SetAutoApprove, got decision=%v auto=%v", decision, auto)
+	}
+}
+
+func TestApp_setApprovalMode(t *testing.T) {
+	t.Parallel()
+
+	app := &App{
+		approvalGate: core.NewApprovalGate(core.ModeAuto, nil, nil, nil),
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	app.setApprovalMode(9999)
+	if app.approvalGate.GetMode() != core.ModeAuto {
+		t.Fatalf("expected mode to remain Auto for invalid value, got %v", app.approvalGate.GetMode())
+	}
+
+	app.setApprovalMode(int(core.ModeYolo))
+	if app.approvalGate.GetMode() != core.ModeYolo {
+		t.Fatalf("expected mode Yolo, got %v", app.approvalGate.GetMode())
+	}
+
+	app.setApprovalMode(int(core.ModeManual))
+	if app.approvalGate.GetMode() != core.ModeManual {
+		t.Fatalf("expected mode Manual, got %v", app.approvalGate.GetMode())
+	}
+}
+
+func TestApp_New_ErrorPathCleanup(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Create a file where the DB directory should be so store creation fails.
+	badDir := filepath.Join(tmpDir, "notadir")
+	if err := os.WriteFile(badDir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create blocking file: %v", err)
+	}
+
+	cfg := testAppConfig(filepath.Join(badDir, "sessions.db"))
+	app, err := New(cfg, false)
+	if err == nil {
+		if app != nil {
+			_ = app.Close()
+		}
+		t.Fatal("expected error for blocked db directory")
+	}
+	if app != nil {
+		t.Fatal("expected nil App on error")
+	}
+}
+
+func TestApp_ImportSession_ClearsMessagesOnFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	dbPath := filepath.Join(tmpDir, "sessions.db")
+
+	a, err := New(testAppConfig(dbPath), false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	export := &api.SessionExport{
+		Version: "1.0",
+		Session: api.Session{Path: "/tmp/import-cleanup", CreatedAt: time.Now().UTC()},
+		Messages: []api.Message{
+			{ID: "m1", Role: api.RoleUser, Content: "hello"},
+			{ID: "m2", Role: api.RoleUser, Content: "world"},
+		},
+		Turns: []api.Turn{},
+	}
+
+	// Wrap store to fail on 2nd AppendMessage
+	fs := &failingStore{Store: a.store, failAfter: 1}
+	a.store = fs
+
+	_, err = a.ImportSession(context.Background(), export)
+	if err == nil {
+		t.Fatal("expected error for partial import")
+	}
+
+	sessions, err := fs.ListSessions(context.Background(), "/tmp/import-cleanup", 0)
+	if err != nil {
+		t.Fatalf("ListSessions error: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("expected 0 sessions after failed import, got %d", len(sessions))
+	}
+
+	// Verify no messages remain by scanning all sessions. Since the session is
+	// gone and messages have a foreign-key cascade, this is implied, but we
+	// double-check by trying to retrieve messages for any returned session.
+	for _, s := range sessions {
+		msgs, err := fs.GetMessages(context.Background(), s.ID, 0)
+		if err != nil {
+			t.Fatalf("GetMessages error: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Fatalf("expected 0 messages for session %s, got %d", s.ID, len(msgs))
+		}
+	}
+}
+
+func TestSystemPrompt_NoLeadingTabs(t *testing.T) {
+	t.Parallel()
+
+	prompt := systemPrompt("/tmp/test-dir", "")
+	lines := strings.Split(prompt, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "\t") {
+			t.Fatalf("line %d has leading tab: %q", i, line)
+		}
 	}
 }

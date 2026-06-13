@@ -119,6 +119,14 @@ func (l *Loader) Load() (*api.Config, error) {
 		cfg.Providers[name] = p
 	}
 
+	for name, s := range cfg.MCPServers {
+		for k, v := range s.Env {
+			s.Env[k] = resolveEnvVar(v)
+		}
+		s.CWD = expandPath(s.CWD)
+		cfg.MCPServers[name] = s
+	}
+
 	// Expand paths
 	cfg.Session.DBPath = expandPath(cfg.Session.DBPath)
 	cfg.MCP.GuardConfig = expandPath(cfg.MCP.GuardConfig)
@@ -185,6 +193,9 @@ func Default() (*api.Config, error) {
 	}
 	cfg.Session.DBPath = expandPath(cfg.Session.DBPath)
 	cfg.MCP.GuardConfig = expandPath(cfg.MCP.GuardConfig)
+	if err := Validate(cfg); err != nil {
+		return nil, fmt.Errorf("validate default config: %w", err)
+	}
 	return cfg, nil
 }
 
@@ -194,7 +205,14 @@ func EnsureConfigDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("get config dir: %w", err)
 	}
-	dir := filepath.Join(configDir, "kimi-lite")
+	return EnsureConfigDirAt(configDir)
+}
+
+// EnsureConfigDirAt creates the "kimi-lite" config directory under the
+// provided root if it doesn't exist. It is useful for tests that must not
+// touch the real user config directory.
+func EnsureConfigDirAt(root string) (string, error) {
+	dir := filepath.Join(root, "kimi-lite")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("create config dir: %w", err)
 	}
@@ -207,7 +225,12 @@ func WriteDefaultConfig() error {
 	if err != nil {
 		return err
 	}
+	return WriteDefaultConfigTo(dir)
+}
 
+// WriteDefaultConfigTo writes the default config into dir as "config.toml".
+// It is idempotent and writes atomically to avoid a partial file on crash.
+func WriteDefaultConfigTo(dir string) error {
 	path := filepath.Join(dir, "config.toml")
 	if _, err := os.Stat(path); err == nil {
 		return nil // Already exists
@@ -311,10 +334,23 @@ focus_prev = "shift+tab"
 approve_yes = "y"
 approve_no = "n"
 approve_always = "a"
+approve_diff = "d"
 external_editor = "ctrl+g"
 `
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil // Another writer won the race; treat as idempotent.
+		}
+		return fmt.Errorf("open default config: %w", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
 		return fmt.Errorf("write default config: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close default config: %w", err)
 	}
 	return nil
 }

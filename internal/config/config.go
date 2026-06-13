@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"time"
 
@@ -29,7 +30,10 @@ func validateURL(prefix, value string, allowEmpty bool) error {
 	}
 	if u.Scheme == "http" {
 		host := u.Hostname()
-		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		if host == "localhost" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 			return fmt.Errorf("%s must use https (or explicit localhost opt-in), got %q", prefix, value)
 		}
 	}
@@ -81,7 +85,7 @@ func validateProviders(cfg *api.Config) error {
 		prefix := fmt.Sprintf("providers.%s", name)
 		if p.Type == "" {
 			errs = append(errs, fmt.Errorf("%s.type must not be empty", prefix))
-		} else if !validateProviderType(p.Type) {
+		} else if !validateProviderType(string(p.Type)) {
 			errs = append(errs, fmt.Errorf("%s.type %q is not a supported provider type", prefix, p.Type))
 		}
 		if p.BaseURL == "" {
@@ -233,6 +237,10 @@ func DefaultConfig() *api.Config {
 
 // Validate checks that the configuration is valid.
 func Validate(cfg *api.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config must not be nil")
+	}
+
 	var errs []error
 	if err := validateLLM("llm", cfg.LLM); err != nil {
 		errs = append(errs, err)

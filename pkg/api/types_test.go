@@ -137,6 +137,9 @@ func TestTurnState_UnmarshalJSON(t *testing.T) {
 		{"waiting_approval", `"waiting_approval"`, TurnWaitingApproval, false},
 		{"error", `"error"`, TurnError, false},
 		{"legacy integer", `3`, TurnToolCalls, false},
+		{"legacy integer idle", `0`, TurnIdle, false},
+		{"invalid integer", `99`, TurnIdle, true},
+		{"negative integer", `-1`, TurnIdle, true},
 		{"unknown string", `"bogus"`, TurnIdle, true},
 		{"invalid", `true`, TurnIdle, true},
 	}
@@ -334,5 +337,110 @@ func TestRiskRule_RoundTrip(t *testing.T) {
 	}
 	if got != rule {
 		t.Errorf("round-trip failed: %+v != %+v", got, rule)
+	}
+}
+
+func TestSecretFields_ExcludedFromJSON(t *testing.T) {
+	t.Parallel()
+
+	llm := LLMConfig{
+		Provider: "openai",
+		APIKey:   "secret-key",
+		Model:    "gpt-4",
+	}
+	data, err := json.Marshal(llm)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "secret-key") {
+		t.Errorf("LLMConfig.APIKey with json:\"-\" leaked into JSON: %s", data)
+	}
+
+	provider := ProviderConfig{
+		Type:         ProviderTypeOpenAI,
+		APIKey:       "provider-secret",
+		BaseURL:      "https://api.openai.com/v1",
+		DefaultModel: "gpt-4",
+	}
+	data, err = json.Marshal(provider)
+	if err != nil {
+		t.Fatalf("marshal provider: %v", err)
+	}
+	if strings.Contains(string(data), "provider-secret") {
+		t.Errorf("ProviderConfig.APIKey with json:\"-\" leaked into JSON: %s", data)
+	}
+
+	web := WebSearchConfig{
+		Endpoint: "https://search.example.com",
+		APIKey:   "web-secret",
+	}
+	data, err = json.Marshal(web)
+	if err != nil {
+		t.Fatalf("marshal web search: %v", err)
+	}
+	if strings.Contains(string(data), "web-secret") {
+		t.Errorf("WebSearchConfig.APIKey with json:\"-\" leaked into JSON: %s", data)
+	}
+}
+
+func TestSessionExport_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	export := SessionExport{
+		Version:    SessionExportVersion,
+		ExportedAt: now,
+		Session: Session{
+			ID:        "sess-1",
+			Name:      "test session",
+			Path:      "/tmp",
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		Messages: []Message{
+			{
+				ID:        "msg-1",
+				Role:      RoleUser,
+				Content:   "hello",
+				CreatedAt: now,
+			},
+		},
+		Turns: []Turn{
+			{
+				ID:        "turn-1",
+				State:     TurnThinking,
+				Input:     "hello",
+				Response:  "hi",
+				StartedAt: now,
+			},
+		},
+	}
+
+	data, err := json.Marshal(export)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"version":"1.0"`) {
+		t.Errorf("missing version in export JSON: %s", data)
+	}
+
+	var parsed SessionExport
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if parsed.Version != export.Version {
+		t.Errorf("Version = %q, want %q", parsed.Version, export.Version)
+	}
+	if parsed.Session.ID != export.Session.ID {
+		t.Errorf("Session.ID = %q, want %q", parsed.Session.ID, export.Session.ID)
+	}
+	if len(parsed.Messages) != len(export.Messages) {
+		t.Errorf("len(Messages) = %d, want %d", len(parsed.Messages), len(export.Messages))
+	}
+	if len(parsed.Turns) != len(export.Turns) {
+		t.Errorf("len(Turns) = %d, want %d", len(parsed.Turns), len(export.Turns))
+	}
+	if parsed.Turns[0].State != export.Turns[0].State {
+		t.Errorf("Turns[0].State = %v, want %v", parsed.Turns[0].State, export.Turns[0].State)
 	}
 }

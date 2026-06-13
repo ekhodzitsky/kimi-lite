@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -155,11 +156,7 @@ func ParseTurnState(s string) (TurnState, error) {
 
 // MarshalJSON returns the JSON-quoted string representation of the turn state.
 func (s TurnState) MarshalJSON() ([]byte, error) {
-	b, err := json.Marshal(s.String())
-	if err != nil {
-		return nil, fmt.Errorf("marshal turn state: %w", err)
-	}
-	return b, nil
+	return []byte(strconv.Quote(s.String())), nil
 }
 
 // UnmarshalJSON parses a TurnState from its JSON string representation.
@@ -180,7 +177,11 @@ func (s *TurnState) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &num); err != nil {
 		return fmt.Errorf("invalid turn state: %w", err)
 	}
-	*s = TurnState(num)
+	parsed := TurnState(num)
+	if parsed < TurnIdle || parsed > TurnError {
+		return fmt.Errorf("invalid legacy turn state: %d", num)
+	}
+	*s = parsed
 	return nil
 }
 
@@ -422,7 +423,7 @@ const (
 
 // ProviderConfig holds configuration for a single LLM provider.
 type ProviderConfig struct {
-	Type          string            `mapstructure:"type"`
+	Type          ProviderType      `mapstructure:"type"`
 	APIKey        string            `json:"-" mapstructure:"api_key"`
 	BaseURL       string            `mapstructure:"base_url"`
 	DefaultModel  string            `mapstructure:"default_model"`
@@ -520,23 +521,26 @@ type SessionConfig struct {
 	MaxHistory int    `mapstructure:"max_history"`
 }
 
+// MCPTransport identifies the transport protocol for an MCP server.
+type MCPTransport string
+
 // MCPTransport values.
 const (
 	// MCPTransportStdio uses a local subprocess over stdin/stdout.
-	MCPTransportStdio = "stdio"
+	MCPTransportStdio MCPTransport = "stdio"
 	// MCPTransportHTTP uses JSON-RPC over HTTP POST.
-	MCPTransportHTTP = "http"
+	MCPTransportHTTP MCPTransport = "http"
 )
 
 // MCPServerConfig holds direct configuration for a single MCP server.
 type MCPServerConfig struct {
 	// Common fields.
-	Enabled          bool     `mapstructure:"enabled"`
-	Transport        string   `mapstructure:"transport"`
-	StartupTimeoutMs int      `mapstructure:"startup_timeout_ms"`
-	ToolTimeoutMs    int      `mapstructure:"tool_timeout_ms"`
-	EnabledTools     []string `mapstructure:"enabled_tools"`
-	DisabledTools    []string `mapstructure:"disabled_tools"`
+	Enabled          bool         `mapstructure:"enabled"`
+	Transport        MCPTransport `mapstructure:"transport"`
+	StartupTimeoutMs int          `mapstructure:"startup_timeout_ms"`
+	ToolTimeoutMs    int          `mapstructure:"tool_timeout_ms"`
+	EnabledTools     []string     `mapstructure:"enabled_tools"`
+	DisabledTools    []string     `mapstructure:"disabled_tools"`
 
 	// Stdio transport fields.
 	Command string            `mapstructure:"command"`

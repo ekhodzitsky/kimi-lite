@@ -18,11 +18,19 @@ type ToolExecutor struct {
 	mu         sync.RWMutex
 	cachedDefs []api.ToolDefinition
 	readOnly   map[string]bool // original tool name -> readOnlyHint
+	logger     *slog.Logger
 }
 
 // NewToolExecutor creates a new ToolExecutor.
 func NewToolExecutor(client api.MCPClient) *ToolExecutor {
-	return &ToolExecutor{client: client}
+	return &ToolExecutor{client: client, logger: slog.Default()}
+}
+
+// SetLogger sets the logger used by the executor. It is safe for concurrent use.
+func (m *ToolExecutor) SetLogger(logger *slog.Logger) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.logger = logger
 }
 
 // Definitions returns available MCP tool definitions with names prefixed by "mcp_".
@@ -33,24 +41,29 @@ func (m *ToolExecutor) Definitions(ctx context.Context) []api.ToolDefinition {
 	if err != nil {
 		m.mu.RLock()
 		cached := m.cachedDefs
+		logger := m.logger
 		m.mu.RUnlock()
 		if cached != nil {
-			slog.Warn("mcp ListTools failed, returning cached tool definitions", "error", err)
+			logger.Warn("mcp ListTools failed, returning cached tool definitions", "error", err)
 			return cached
 		}
-		slog.Warn("mcp ListTools failed, no cached definitions available", "error", err)
+		logger.Warn("mcp ListTools failed, no cached definitions available", "error", err)
 		return nil
 	}
-	readOnly := make(map[string]bool, len(tools))
-	for i := range tools {
-		readOnly[tools[i].Name] = tools[i].Annotations.ReadOnlyHint
-		tools[i].Name = "mcp_" + tools[i].Name
+	// Copy before mutating so callers cannot observe or modify the internal
+	// cached slice through the returned value.
+	copied := make([]api.ToolDefinition, len(tools))
+	copy(copied, tools)
+	readOnly := make(map[string]bool, len(copied))
+	for i := range copied {
+		readOnly[copied[i].Name] = copied[i].Annotations.ReadOnlyHint
+		copied[i].Name = "mcp_" + copied[i].Name
 	}
 	m.mu.Lock()
-	m.cachedDefs = tools
+	m.cachedDefs = copied
 	m.readOnly = readOnly
 	m.mu.Unlock()
-	return tools
+	return copied
 }
 
 // IsReadOnly reports whether the named MCP tool is read-only.
@@ -67,6 +80,13 @@ func (m *ToolExecutor) IsReadOnly(name string) bool {
 
 // Execute invokes an MCP tool. The tool name must be prefixed with "mcp_".
 func (m *ToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+	if !strings.HasPrefix(call.Name, "mcp_") {
+		return api.ToolResult{
+			CallID: call.ID,
+			Name:   call.Name,
+			Error:  fmt.Sprintf("mcp tool name must start with mcp_, got %q", call.Name),
+		}, nil
+	}
 	name := strings.TrimPrefix(call.Name, "mcp_")
 	var args map[string]any
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {

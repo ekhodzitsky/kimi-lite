@@ -183,8 +183,8 @@ func (m *Model) SetSize(w, h int) {
 // One row is reserved for the title line.
 func (m *Model) visibleRows() int {
 	rows := m.height - 1
-	if rows < 1 {
-		return 1
+	if rows < 0 {
+		return 0
 	}
 	return rows
 }
@@ -232,7 +232,7 @@ func (m *Model) Width() int {
 }
 
 func (m *Model) refresh() error {
-	node, err := buildTree(m.root, maxTreeDepth)
+	node, err := buildTree(m.root, maxTreeDepth, true)
 	if err != nil {
 		return err
 	}
@@ -277,8 +277,9 @@ func (m *Model) renderNode(node *TreeNode, isCursor bool) string {
 	}
 	name := node.Name
 	maxLen := m.width - len(prefix) - sidebarNameEllipsis
-	if maxLen > 0 && len(name) > maxLen {
-		name = name[:maxLen] + "..."
+	runes := []rune(name)
+	if maxLen > 0 && len(runes) > maxLen {
+		name = string(runes[:maxLen]) + "..."
 	}
 	line := prefix + icon + " " + name
 	if isCursor {
@@ -387,11 +388,24 @@ func (m *Model) handleClick(y int) {
 	m.ensureCursorVisible()
 }
 
-func buildTree(path string, maxDepth int) (*TreeNode, error) {
-	info, err := os.Stat(path)
+func buildTree(path string, maxDepth int, isRoot bool) (*TreeNode, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("stat %q: %w", path, err)
 	}
+
+	// Follow a symlinked root so the sidebar still works, but skip symlinked
+	// child entries to prevent directory traversal outside the project tree.
+	if info.Mode()&os.ModeSymlink != 0 {
+		if !isRoot {
+			return nil, nil
+		}
+		info, err = os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat root symlink %q: %w", path, err)
+		}
+	}
+
 	node := &TreeNode{
 		Name:  info.Name(),
 		Path:  path,
@@ -400,15 +414,25 @@ func buildTree(path string, maxDepth int) (*TreeNode, error) {
 	if info.IsDir() && maxDepth > 0 {
 		entries, err := os.ReadDir(path)
 		if err != nil {
+			if isRoot {
+				return nil, fmt.Errorf("read directory %q: %w", path, err)
+			}
 			return node, nil // partial tree
 		}
 		for _, entry := range entries {
 			if strings.HasPrefix(entry.Name(), ".") {
 				continue
 			}
-			childPath := filepath.Join(path, entry.Name())
-			child, err := buildTree(childPath, maxDepth-1)
+			entryInfo, err := entry.Info()
 			if err != nil {
+				continue
+			}
+			if entryInfo.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+			childPath := filepath.Join(path, entry.Name())
+			child, err := buildTree(childPath, maxDepth-1, false)
+			if err != nil || child == nil {
 				continue
 			}
 			node.Children = append(node.Children, child)

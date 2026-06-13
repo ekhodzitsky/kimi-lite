@@ -93,11 +93,12 @@ func FuzzValidatePath(f *testing.F) {
 		}
 
 		// If validation succeeds, the resolved absolute path must be inside the
-		// sandbox root.
+		// sandbox root. New paths may not exist yet; fall back to the unresolved
+		// absolute path in that case.
 		abs := filepath.Join(exec.sandboxRoot, rel)
 		resolved, err := filepath.EvalSymlinks(abs)
 		if err != nil {
-			t.Fatalf("resolve result %q: %v", abs, err)
+			resolved = abs
 		}
 		if !isUnder(resolved, exec.sandboxRoot) {
 			t.Errorf("resolved path %q escapes sandbox %q (input %q, rel %q)", resolved, exec.sandboxRoot, input, rel)

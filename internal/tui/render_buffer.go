@@ -7,8 +7,12 @@ import "strings"
 // The stable prefix (everything before the currently-streaming assistant
 // message) is kept as an immutable string so that each streaming chunk only
 // re-renders the trailing active block instead of copying the entire prefix.
+// Blocks appended while the active block is empty are stored in a slice and
+// joined lazily in String(), making appendBlock O(1) amortized.
 type renderBuffer struct {
 	prefix                 string
+	prefixHasSep           bool
+	completed              []string
 	active                 strings.Builder
 	lastAssistantRenderPos int
 	dirty                  bool
@@ -18,14 +22,58 @@ func newRenderBuffer() *renderBuffer {
 	return &renderBuffer{}
 }
 
+// String returns the accumulated rendered content.
+func (rb *renderBuffer) String() string {
+	if len(rb.completed) == 0 && rb.active.Len() == 0 {
+		return rb.prefix
+	}
+	var b strings.Builder
+	b.WriteString(rb.prefix)
+	if len(rb.completed) > 0 {
+		if rb.prefix != "" && !rb.prefixHasSep {
+			b.WriteString("\n\n")
+		}
+		for i, block := range rb.completed {
+			if i > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(block)
+		}
+	}
+	b.WriteString(rb.active.String())
+	return b.String()
+}
+
+// len returns the current byte length of the buffer.
+func (rb *renderBuffer) len() int {
+	n := len(rb.prefix)
+	if len(rb.completed) > 0 {
+		if rb.prefix != "" && !rb.prefixHasSep {
+			n += 2
+		}
+		for _, block := range rb.completed {
+			n += len(block)
+		}
+		n += 2 * (len(rb.completed) - 1)
+	}
+	n += rb.active.Len()
+	return n
+}
+
 // appendBlock appends a rendered message block with a separator.
 func (rb *renderBuffer) appendBlock(block string) {
-	if rb.len() == 0 {
-		rb.prefix = block
-	} else {
-		rb.prefix = rb.String() + "\n\n" + block
+	// Finalize the current active content into the last completed block so the
+	// new block is appended after the current render.
+	if rb.active.Len() > 0 {
+		if len(rb.completed) > 0 {
+			rb.completed[len(rb.completed)-1] += rb.active.String()
+		} else {
+			rb.prefix += rb.active.String()
+			rb.prefixHasSep = strings.HasSuffix(rb.prefix, "\n\n")
+		}
+		rb.active.Reset()
 	}
-	rb.active.Reset()
+	rb.completed = append(rb.completed, block)
 	rb.lastAssistantRenderPos = 0
 	rb.dirty = true
 }
@@ -33,6 +81,8 @@ func (rb *renderBuffer) appendBlock(block string) {
 // reset clears the buffer and resets bookkeeping.
 func (rb *renderBuffer) reset() {
 	rb.prefix = ""
+	rb.prefixHasSep = false
+	rb.completed = nil
 	rb.active.Reset()
 	rb.lastAssistantRenderPos = 0
 	rb.dirty = true
@@ -48,6 +98,8 @@ func (rb *renderBuffer) rebuild(blocks []string) {
 		b.WriteString(block)
 	}
 	rb.prefix = b.String()
+	rb.prefixHasSep = false
+	rb.completed = nil
 	rb.active.Reset()
 	rb.lastAssistantRenderPos = 0
 	rb.dirty = true
@@ -67,6 +119,8 @@ func (rb *renderBuffer) setLastBlockStart(pos int) {
 	}
 
 	rb.prefix = full[:pos]
+	rb.prefixHasSep = strings.HasSuffix(rb.prefix, "\n\n")
+	rb.completed = nil
 	rb.active.Reset()
 	if pos < len(full) {
 		rb.active.WriteString(full[pos:])
@@ -74,8 +128,9 @@ func (rb *renderBuffer) setLastBlockStart(pos int) {
 
 	// Starting a brand-new block at the end of the buffer needs a separator
 	// to remain consistent with rebuild().
-	if pos == len(full) && pos > 0 && !strings.HasSuffix(rb.prefix, "\n\n") {
+	if pos == len(full) && pos > 0 && !rb.prefixHasSep {
 		rb.prefix += "\n\n"
+		rb.prefixHasSep = true
 		rb.lastAssistantRenderPos = pos + 2
 	} else {
 		rb.lastAssistantRenderPos = pos
@@ -93,19 +148,6 @@ func (rb *renderBuffer) updateLastBlock(view string) {
 // lastBlockStart returns the recorded byte position of the current assistant block.
 func (rb *renderBuffer) lastBlockStart() int {
 	return rb.lastAssistantRenderPos
-}
-
-// len returns the current byte length of the buffer.
-func (rb *renderBuffer) len() int {
-	return len(rb.prefix) + rb.active.Len()
-}
-
-// String returns the accumulated rendered content.
-func (rb *renderBuffer) String() string {
-	if rb.active.Len() == 0 {
-		return rb.prefix
-	}
-	return rb.prefix + rb.active.String()
 }
 
 // isDirty reports whether the buffer has changed since the last markClean.

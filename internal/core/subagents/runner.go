@@ -29,12 +29,25 @@ func NewRunner(llmClient api.LLMClient, toolExecutor api.ToolExecutor, sandboxRo
 }
 
 // Run executes a subagent request.
+//
+// The Runner's sandbox root is established at construction time. If the
+// request supplies a non-empty SandboxRoot it must match the runner's root;
+// otherwise an error is returned.
 func (r *Runner) Run(ctx context.Context, req api.SubagentRequest) (*api.SubagentResult, error) {
 	if req.Type == "" {
 		return nil, fmt.Errorf("subagent type is required")
 	}
 	if req.Prompt == "" {
 		return nil, fmt.Errorf("prompt is required")
+	}
+	if r.llmClient == nil {
+		return nil, fmt.Errorf("llm client is nil")
+	}
+	if r.toolExecutor == nil {
+		return nil, fmt.Errorf("tool executor is nil")
+	}
+	if req.SandboxRoot != "" && req.SandboxRoot != r.sandboxRoot {
+		return nil, fmt.Errorf("mismatched sandbox root: request %q, runner %q", req.SandboxRoot, r.sandboxRoot)
 	}
 	cfg, err := agentConfigFor(req.Type)
 	if err != nil {

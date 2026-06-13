@@ -3,10 +3,11 @@ package subagents
 import "github.com/ekhodzitsky/kimi-lite/pkg/api"
 
 // filterDefinitions returns the definitions whose names are in allowed.
-// If allowed is empty, all definitions are returned.
+// If allowed is nil, all definitions are returned. An explicitly empty
+// allowlist returns an empty slice.
 func filterDefinitions(all []api.ToolDefinition, allowed []string) []api.ToolDefinition {
-	if len(allowed) == 0 {
-		return all
+	if allowed == nil {
+		return append([]api.ToolDefinition(nil), all...)
 	}
 	want := make(map[string]struct{}, len(allowed))
 	for _, n := range allowed {

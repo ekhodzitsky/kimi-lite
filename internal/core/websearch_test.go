@@ -187,3 +187,37 @@ func TestHTTPWebSearcher_Search_InvalidJSON(t *testing.T) {
 		t.Fatal("expected error for invalid JSON")
 	}
 }
+
+func TestNewHTTPWebSearcher_DoesNotMutateCallerClient(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]api.WebSearchResult{})
+	}))
+	defer server.Close()
+
+	original := &http.Client{Timeout: 1 * time.Second}
+	_, err := NewHTTPWebSearcher("http://example.com", "", original, 5*time.Second)
+	if err != nil {
+		t.Fatalf("NewHTTPWebSearcher: %v", err)
+	}
+	if original.Timeout != 1*time.Second {
+		t.Errorf("caller client timeout was mutated to %v", original.Timeout)
+	}
+}
+
+func TestHTTPWebSearcher_Search_RejectsNull(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, "null")
+	}))
+	defer server.Close()
+
+	searcher, err := NewHTTPWebSearcher("http://example.com", "", testFetchClient(server), 0)
+	if err != nil {
+		t.Fatalf("NewHTTPWebSearcher: %v", err)
+	}
+	_, err = searcher.Search(context.Background(), "test", api.WebSearchOptions{})
+	if err == nil {
+		t.Fatal("expected error for null results")
+	}
+}

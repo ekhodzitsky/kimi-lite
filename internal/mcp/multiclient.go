@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -68,6 +69,7 @@ func (m *MultiClient) ListTools(ctx context.Context) ([]api.ToolDefinition, erro
 	routes := make(map[string]string)
 	origins := make(map[string]string)
 
+	var errs []error
 	for _, name := range names {
 		cli := m.clients[name]
 		cfg := m.configs[name]
@@ -80,7 +82,9 @@ func (m *MultiClient) ListTools(ctx context.Context) ([]api.ToolDefinition, erro
 		tools, err := cli.ListTools(cctx)
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("list tools from mcp server %s: %w", name, err)
+			errs = append(errs, fmt.Errorf("list tools from mcp server %s: %w", name, err))
+			slog.Warn("mcp server ListTools failed, skipping", "server", name, "error", err)
+			continue
 		}
 
 		for _, t := range tools {
@@ -109,6 +113,9 @@ func (m *MultiClient) ListTools(ctx context.Context) ([]api.ToolDefinition, erro
 	m.tools = all
 	m.mu.Unlock()
 
+	if len(all) == 0 && len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
 	return all, nil
 }
 
@@ -130,7 +137,10 @@ func (m *MultiClient) CallTool(ctx context.Context, name string, args map[string
 		return "", fmt.Errorf("tool %s not found in routing map", name)
 	}
 
-	cli := m.clients[server]
+	cli, ok := m.clients[server]
+	if !ok || cli == nil {
+		return "", fmt.Errorf("mcp client for server %q not found", server)
+	}
 	cfg := m.configs[server]
 	original := origins[name]
 

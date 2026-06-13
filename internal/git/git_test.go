@@ -3,8 +3,11 @@ package git
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -14,6 +17,7 @@ type mockRunner struct {
 	stderr []byte
 	err    error
 	delay  time.Duration
+	mu     sync.Mutex
 	calls  []mockCall
 }
 
@@ -24,7 +28,9 @@ type mockCall struct {
 }
 
 func (m *mockRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+	m.mu.Lock()
 	m.calls = append(m.calls, mockCall{dir: dir, name: name, args: args})
+	m.mu.Unlock()
 	if m.delay > 0 {
 		timer := time.NewTimer(m.delay)
 		defer timer.Stop()
@@ -35,6 +41,15 @@ func (m *mockRunner) Output(ctx context.Context, dir, name string, args ...strin
 		}
 	}
 	return m.stdout, m.stderr, m.err
+}
+
+// callsSnapshot returns a copy of recorded calls for assertions.
+func (m *mockRunner) callsSnapshot() []mockCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]mockCall, len(m.calls))
+	copy(out, m.calls)
+	return out
 }
 
 func TestProvider_Status(t *testing.T) {
@@ -106,7 +121,7 @@ func TestProvider_Status(t *testing.T) {
 				if tt.wantErrMsg != "" && !strings.Contains(err.Error(), tt.wantErrMsg) {
 					t.Fatalf("expected error containing %q, got %q", tt.wantErrMsg, err.Error())
 				}
-				assertCalls(t, m.calls, tt.wantCalls)
+				assertCalls(t, m.callsSnapshot(), tt.wantCalls)
 				return
 			}
 			if err != nil {
@@ -115,7 +130,7 @@ func TestProvider_Status(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("expected %q, got %q", tt.want, got)
 			}
-			assertCalls(t, m.calls, tt.wantCalls)
+			assertCalls(t, m.callsSnapshot(), tt.wantCalls)
 		})
 	}
 }
@@ -142,7 +157,7 @@ func TestProvider_Diff(t *testing.T) {
 			stdout: []byte("diff --git a/main.go b/main.go\n+new line\n"),
 			want:   "diff --git a/main.go b/main.go\n+new line\n",
 			wantCalls: []mockCall{
-				{dir: "/project", name: "git", args: []string{"diff", "--", "main.go"}},
+				{dir: "/project", name: "git", args: []string{"diff", "--no-color", "--", "main.go"}},
 			},
 		},
 		{
@@ -152,7 +167,7 @@ func TestProvider_Diff(t *testing.T) {
 			wantErr:    true,
 			wantErrMsg: "git is not installed",
 			wantCalls: []mockCall{
-				{name: "git", args: []string{"diff", "--", "main.go"}},
+				{name: "git", args: []string{"diff", "--no-color", "--", "main.go"}},
 			},
 		},
 		{
@@ -163,7 +178,7 @@ func TestProvider_Diff(t *testing.T) {
 			wantErr:    true,
 			wantErrMsg: "not a git repository",
 			wantCalls: []mockCall{
-				{name: "git", args: []string{"diff", "--", "main.go"}},
+				{name: "git", args: []string{"diff", "--no-color", "--", "main.go"}},
 			},
 		},
 		{
@@ -174,7 +189,7 @@ func TestProvider_Diff(t *testing.T) {
 			wantErr:    true,
 			wantErrMsg: "git diff failed",
 			wantCalls: []mockCall{
-				{name: "git", args: []string{"diff", "--", "main.go"}},
+				{name: "git", args: []string{"diff", "--no-color", "--", "main.go"}},
 			},
 		},
 		{
@@ -201,7 +216,7 @@ func TestProvider_Diff(t *testing.T) {
 				if tt.wantErrMsg != "" && !strings.Contains(err.Error(), tt.wantErrMsg) {
 					t.Fatalf("expected error containing %q, got %q", tt.wantErrMsg, err.Error())
 				}
-				assertCalls(t, m.calls, tt.wantCalls)
+				assertCalls(t, m.callsSnapshot(), tt.wantCalls)
 				return
 			}
 			if err != nil {
@@ -210,7 +225,7 @@ func TestProvider_Diff(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("expected %q, got %q", tt.want, got)
 			}
-			assertCalls(t, m.calls, tt.wantCalls)
+			assertCalls(t, m.callsSnapshot(), tt.wantCalls)
 		})
 	}
 }
@@ -274,7 +289,7 @@ func TestProvider_IsRepo(t *testing.T) {
 				if tt.wantErrMsg != "" && !strings.Contains(err.Error(), tt.wantErrMsg) {
 					t.Fatalf("expected error containing %q, got %q", tt.wantErrMsg, err.Error())
 				}
-				assertCalls(t, m.calls, tt.wantCalls)
+				assertCalls(t, m.callsSnapshot(), tt.wantCalls)
 				return
 			}
 			if err != nil {
@@ -283,7 +298,7 @@ func TestProvider_IsRepo(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("expected %v, got %v", tt.want, got)
 			}
-			assertCalls(t, m.calls, tt.wantCalls)
+			assertCalls(t, m.callsSnapshot(), tt.wantCalls)
 		})
 	}
 }
@@ -458,14 +473,24 @@ func TestProvider_Commit(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(m.calls) != 2 {
-		t.Fatalf("expected 2 calls, got %d", len(m.calls))
+	calls := m.callsSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(calls))
 	}
-	if m.calls[0].name != "git" || len(m.calls[0].args) != 2 || m.calls[0].args[0] != "add" || m.calls[0].args[1] != "-A" {
-		t.Errorf("expected git add -A, got %v", m.calls[0])
+	if calls[0].name != "git" || len(calls[0].args) != 2 || calls[0].args[0] != "add" || calls[0].args[1] != "-A" {
+		t.Errorf("expected git add -A, got %v", calls[0])
 	}
-	if m.calls[1].name != "git" || len(m.calls[1].args) != 3 || m.calls[1].args[0] != "commit" || m.calls[1].args[1] != "-m" || m.calls[1].args[2] != "test checkpoint" {
-		t.Errorf("expected git commit -m test checkpoint, got %v", m.calls[1])
+	if calls[1].name != "git" || len(calls[1].args) != 8 {
+		t.Errorf("expected git commit with identity and --no-verify, got %v", calls[1])
+	}
+	if calls[1].args[0] != "-c" || calls[1].args[1] != "user.name="+defaultCommitName {
+		t.Errorf("expected user.name config, got %v", calls[1].args)
+	}
+	if calls[1].args[2] != "-c" || calls[1].args[3] != "user.email="+defaultCommitEmail {
+		t.Errorf("expected user.email config, got %v", calls[1].args)
+	}
+	if calls[1].args[4] != "commit" || calls[1].args[5] != "-m" || calls[1].args[6] != "test checkpoint" || calls[1].args[7] != "--no-verify" {
+		t.Errorf("expected git commit -m test checkpoint --no-verify, got %v", calls[1].args)
 	}
 }
 
@@ -480,11 +505,12 @@ func TestProvider_Commit_DefaultMessage(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(m.calls) != 2 {
-		t.Fatalf("expected 2 calls, got %d", len(m.calls))
+	calls := m.callsSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(calls))
 	}
-	if m.calls[1].args[2] != "kimi-lite checkpoint" {
-		t.Errorf("expected default message, got %q", m.calls[1].args[2])
+	if calls[1].args[6] != "kimi-lite checkpoint" {
+		t.Errorf("expected default message, got %q", calls[1].args[6])
 	}
 }
 
@@ -506,5 +532,223 @@ func TestProvider_Commit_Timeout(t *testing.T) {
 	}
 	if elapsed > gitTimeout+500*time.Millisecond {
 		t.Fatalf("expected prompt timeout, took %v", elapsed)
+	}
+}
+
+func TestProvider_Diff_PathValidation(t *testing.T) {
+	t.Parallel()
+
+	m := &mockRunner{}
+	p := newProvider(m, "/project")
+
+	tests := []struct {
+		name       string
+		path       string
+		wantErrMsg string
+	}{
+		{
+			name:       "absolute path",
+			path:       "/etc/passwd",
+			wantErrMsg: "absolute path not allowed",
+		},
+		{
+			name:       "escapes root",
+			path:       "../secret.txt",
+			wantErrMsg: "path escapes working directory",
+		},
+		{
+			name:       "dot dot component",
+			path:       "foo/../../secret.txt",
+			wantErrMsg: "path escapes working directory",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := p.Diff(context.Background(), tt.path)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrMsg) {
+				t.Fatalf("expected error containing %q, got %q", tt.wantErrMsg, err.Error())
+			}
+			calls := m.callsSnapshot()
+			if len(calls) != 0 {
+				t.Fatalf("expected no git calls for invalid path, got %d", len(calls))
+			}
+		})
+	}
+}
+
+// commitCleanTreeRunner simulates a clean tree: git add succeeds and git
+// commit exits with the "nothing to commit" message.
+type commitCleanTreeRunner struct {
+	mu    sync.Mutex
+	calls []mockCall
+}
+
+func (r *commitCleanTreeRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, mockCall{dir: dir, name: name, args: args})
+	r.mu.Unlock()
+
+	if len(args) >= 1 && args[0] == "add" {
+		return nil, nil, nil
+	}
+	return []byte("On branch main\nnothing to commit, working tree clean\n"), nil, errors.New("exit status 1")
+}
+
+func TestProvider_Commit_NothingToCommit(t *testing.T) {
+	t.Parallel()
+
+	m := &commitCleanTreeRunner{}
+	p := newProvider(m, "/project")
+
+	err := p.Commit(context.Background(), "clean tree checkpoint")
+	if err != nil {
+		t.Fatalf("expected success for clean tree, got %v", err)
+	}
+
+	if len(m.calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(m.calls))
+	}
+	if m.calls[1].name != "git" || len(m.calls[1].args) < 5 || m.calls[1].args[4] != "commit" {
+		t.Errorf("expected commit call, got %v", m.calls[1])
+	}
+}
+
+func TestProvider_Status_ContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	m := &mockRunner{delay: 10 * time.Second}
+	p := newProvider(m, "/project")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := p.Status(ctx)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("expected canceled error, got %q", err.Error())
+	}
+}
+
+func TestProvider_Integration(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	dir := t.TempDir()
+	p := NewProvider(dir)
+
+	ctx := context.Background()
+
+	if err := exec.CommandContext(ctx, "git", "init", dir).Run(); err != nil {
+		t.Fatalf("git init failed: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "config", "user.email", "test@example.com").Run(); err != nil {
+		t.Fatalf("git config user.email failed: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "config", "user.name", "Test User").Run(); err != nil {
+		t.Fatalf("git config user.name failed: %v", err)
+	}
+
+	// Empty repo: commit should succeed even with nothing staged.
+	if err := p.Commit(ctx, "initial checkpoint"); err != nil {
+		t.Fatalf("initial commit failed: %v", err)
+	}
+
+	// Add and commit a file so that subsequent modifications are tracked.
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+	if err := p.Commit(ctx, "add hello"); err != nil {
+		t.Fatalf("commit hello failed: %v", err)
+	}
+
+	// Modify the tracked file and verify diff/status/commit round-trip.
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello world\n"), 0o644); err != nil {
+		t.Fatalf("modify file failed: %v", err)
+	}
+
+	status, err := p.Status(ctx)
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if !strings.Contains(status, "hello.txt") {
+		t.Fatalf("expected hello.txt in status, got %q", status)
+	}
+
+	diff, err := p.Diff(ctx, "hello.txt")
+	if err != nil {
+		t.Fatalf("diff failed: %v", err)
+	}
+	if !strings.Contains(diff, "hello world") {
+		t.Fatalf("expected diff to contain change, got %q", diff)
+	}
+
+	if err := p.Commit(ctx, "update hello"); err != nil {
+		t.Fatalf("commit failed: %v", err)
+	}
+
+	status, err = p.Status(ctx)
+	if err != nil {
+		t.Fatalf("status after commit failed: %v", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		t.Fatalf("expected clean status, got %q", status)
+	}
+}
+
+func TestProvider_Integration_NoVerify(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	dir := t.TempDir()
+	p := NewProvider(dir)
+	ctx := context.Background()
+
+	if err := exec.CommandContext(ctx, "git", "init", dir).Run(); err != nil {
+		t.Fatalf("git init failed: %v", err)
+	}
+
+	// Install a pre-commit hook that would fail if hooks were not skipped.
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	preCommit := filepath.Join(hooksDir, "pre-commit")
+	script := "#!/bin/sh\necho 'hook should be skipped' >&2\nexit 1\n"
+	if err := os.WriteFile(preCommit, []byte(script), 0o755); err != nil {
+		t.Fatalf("write pre-commit hook failed: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data\n"), 0o644); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+
+	if err := p.Commit(ctx, "commit with --no-verify"); err != nil {
+		t.Fatalf("commit with hook failed: %v", err)
+	}
+}
+
+func TestProvider_Integration_DiffPathValidation(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	dir := t.TempDir()
+	p := NewProvider(dir)
+
+	_, err := p.Diff(context.Background(), "../outside.txt")
+	if err == nil {
+		t.Fatal("expected error for escaping path")
+	}
+	if !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("expected escape error, got %q", err.Error())
 	}
 }

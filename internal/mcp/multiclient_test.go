@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,5 +210,67 @@ func TestMultiClient_Close_ClosesAll(t *testing.T) {
 	}
 	if !alpha.closed || !beta.closed {
 		t.Fatal("expected all clients to be closed")
+	}
+}
+
+func TestMultiClient_ListTools_PartialFailure(t *testing.T) {
+	t.Parallel()
+
+	good := &fakeMCPClient{
+		tools: []api.ToolDefinition{{Name: "ok", Description: "OK"}},
+	}
+	bad := &fakeMCPClient{listErr: errors.New("unavailable")}
+
+	multi := NewMultiClient(
+		map[string]api.MCPClient{"good": good, "bad": bad},
+		map[string]api.MCPServerConfig{"good": {}, "bad": {}},
+	)
+
+	tools, err := multi.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("expected graceful degradation, got error: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name != "ok" {
+		t.Fatalf("expected one tool from good server, got: %+v", tools)
+	}
+}
+
+func TestMultiClient_ListTools_AllFail(t *testing.T) {
+	t.Parallel()
+
+	bad := &fakeMCPClient{listErr: errors.New("unavailable")}
+	multi := NewMultiClient(
+		map[string]api.MCPClient{"bad": bad},
+		map[string]api.MCPServerConfig{"bad": {}},
+	)
+
+	_, err := multi.ListTools(context.Background())
+	if err == nil {
+		t.Fatal("expected error when all servers fail")
+	}
+	if !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("expected unavailable error, got: %v", err)
+	}
+}
+
+func TestMultiClient_CallTool_MissingClient(t *testing.T) {
+	t.Parallel()
+
+	multi := NewMultiClient(
+		map[string]api.MCPClient{},
+		map[string]api.MCPServerConfig{},
+	)
+	// Manually seed the routing map so the missing-client check is exercised.
+	multi.mu.Lock()
+	multi.routes = map[string]string{"missing": "missing"}
+	multi.origins = map[string]string{"missing": "missing"}
+	multi.mu.Unlock()
+
+	_, err := multi.CallTool(context.Background(), "missing", nil)
+	if err == nil {
+		t.Fatal("expected error for missing client")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected missing client error, got: %v", err)
 	}
 }

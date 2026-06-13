@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -35,6 +36,12 @@ func NewClientFromConfig(cfg api.MCPConfig) *Client {
 
 // NewClientFromServerConfig creates a new MCP client from a direct server
 // configuration. It selects stdio or http transport based on cfg.Transport.
+//
+// Trust model: stdio transports execute the configured command with arguments
+// directly. Only configure servers and commands you trust, because arbitrary
+// command execution is possible. HTTP transports use the provided httpClient,
+// or netutil.SecureHTTPClient() when nil, to harden outbound requests against
+// SSRF.
 func NewClientFromServerConfig(cfg api.MCPServerConfig, httpClient *http.Client) (*Client, error) {
 	switch cfg.Transport {
 	case api.MCPTransportStdio:
@@ -66,7 +73,9 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	resp, err := c.transport.Send(ctx, "initialize", initParams)
 	if err != nil {
-		_ = c.transport.Close()
+		if closeErr := c.transport.Close(); closeErr != nil {
+			slog.Warn("failed to close mcp transport after initialize error", "error", closeErr)
+		}
 		return fmt.Errorf("mcp initialize: %w", err)
 	}
 
@@ -74,21 +83,29 @@ func (c *Client) Connect(ctx context.Context) error {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
 	if err := json.Unmarshal(resp.Result, &initResult); err != nil {
-		_ = c.transport.Close()
+		if closeErr := c.transport.Close(); closeErr != nil {
+			slog.Warn("failed to close mcp transport after initialize response decode error", "error", closeErr)
+		}
 		return fmt.Errorf("unmarshal initialize response: %w", err)
 	}
 
 	if initResult.ProtocolVersion == "" {
-		_ = c.transport.Close()
+		if closeErr := c.transport.Close(); closeErr != nil {
+			slog.Warn("failed to close mcp transport after empty protocol version", "error", closeErr)
+		}
 		return fmt.Errorf("mcp initialize: server returned empty protocol version")
 	}
 	if initResult.ProtocolVersion != "2024-11-05" {
-		_ = c.transport.Close()
+		if closeErr := c.transport.Close(); closeErr != nil {
+			slog.Warn("failed to close mcp transport after unsupported protocol version", "error", closeErr)
+		}
 		return fmt.Errorf("mcp initialize: unsupported protocol version %q", initResult.ProtocolVersion)
 	}
 
 	if err := c.transport.Notify(ctx, "notifications/initialized", nil); err != nil {
-		_ = c.transport.Close()
+		if closeErr := c.transport.Close(); closeErr != nil {
+			slog.Warn("failed to close mcp transport after initialized notification error", "error", closeErr)
+		}
 		return fmt.Errorf("mcp initialized notification: %w", err)
 	}
 
@@ -139,6 +156,11 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 			Text string `json:"text"`
 		}
 		if err := json.Unmarshal(raw, &item); err != nil {
+			slog.Warn("mcp tool returned malformed content item", "tool", name, "error", err)
+			if output != "" {
+				output += "\n"
+			}
+			output += "[malformed content item]"
 			continue
 		}
 		switch item.Type {

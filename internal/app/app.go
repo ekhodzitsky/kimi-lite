@@ -34,26 +34,32 @@ type teaProgram interface {
 
 // App is the central DI container and lifecycle manager for kimi-lite.
 type App struct {
-	cfg            *api.Config
-	store          api.Store
-	llmClient      api.LLMClient
-	toolExecutor   api.ToolExecutor
-	builtInExec    *core.BuiltInToolExecutor
-	approvalGate   *core.ApprovalGate
-	sessionManager *core.SessionManager
-	turnManager    *core.TurnManager
-	compressor     *core.ContextCompressor
-	gitProvider    api.GitProvider
-	mcpClient      api.MCPClient
-	tuiModel       *tui.Model
-	logger         *slog.Logger
-	newProgram     func(model tea.Model, opts ...tea.ProgramOption) teaProgram
-	pprofCancel    context.CancelFunc
-	skillsContent  string
+	cfg                   *api.Config
+	store                 api.Store
+	llmClient             api.LLMClient
+	toolExecutor          api.ToolExecutor
+	builtInExec           *core.BuiltInToolExecutor
+	approvalGate          *core.ApprovalGate
+	sessionManager        *core.SessionManager
+	turnManager           *core.TurnManager
+	compressor            *core.ContextCompressor
+	gitProvider           api.GitProvider
+	mcpClient             api.MCPClient
+	tuiModel              *tui.Model
+	logger                *slog.Logger
+	newProgram            func(model tea.Model, opts ...tea.ProgramOption) teaProgram
+	pprofCancel           context.CancelFunc
+	skillsContent         string
+	resolvedModel         string
+	newMCPClientForServer func(api.MCPServerConfig) (api.MCPClient, error)
 }
 
 // New creates a fully wired App from configuration.
 func New(cfg *api.Config, debug bool) (*App, error) {
+	if cfg == nil {
+		return nil, errors.New("config is nil")
+	}
+
 	logLevel := slog.LevelWarn
 	if debug {
 		logLevel = slog.LevelDebug
@@ -61,6 +67,20 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel,
 	}))
+
+	// Create the App early so that any partially-constructed resources can be
+	// cleaned up via Close if an error occurs.
+	a := &App{
+		cfg:                   cfg,
+		logger:                logger,
+		newMCPClientForServer: newMCPClientForServer,
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = a.Close()
+		}
+	}()
 
 	// Create metrics collector.
 	metrics := observability.NewCollector()
@@ -76,6 +96,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
+	a.store = st
 
 	// Create LLM client from provider/model-table configuration.
 	llmClient, err := llm.NewClientFromConfig(cfg, nil)
@@ -85,11 +106,13 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	if mc, ok := llmClient.(interface{ SetMetricsCollector(api.MetricsCollector) }); ok {
 		mc.SetMetricsCollector(metrics)
 	}
+	a.llmClient = llmClient
 
 	resolvedModel, err := llm.ResolveModelFromConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("resolve model: %w", err)
 	}
+	a.resolvedModel = resolvedModel
 
 	// Determine sandbox root (current working directory)
 	sandboxRoot, err := os.Getwd()
@@ -108,9 +131,15 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	}
 
 	// Discover user skills from the config directory.
-	configDir, _ := config.EnsureConfigDir()
+	configDir, err := config.EnsureConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("ensure config dir: %w", err)
+	}
 	skillsDir := filepath.Join(configDir, "skills")
-	allSkills, _ := core.DiscoverSkills(skillsDir)
+	allSkills, err := core.DiscoverSkills(context.Background(), skillsDir)
+	if err != nil {
+		logger.Warn("failed to discover skills", "error", err)
+	}
 	skills := core.FilterSkills(allSkills, cfg.Behavior.Skills)
 	skillsContent := core.LoadSkillContent(skills)
 
@@ -161,7 +190,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 			if !srv.Enabled {
 				continue
 			}
-			cli, err := newMCPClientForServer(srv)
+			cli, err := a.newMCPClientForServer(srv)
 			if err != nil {
 				logger.Warn("failed to create mcp client", "server", name, "error", err)
 				continue
@@ -240,25 +269,19 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	compressor := core.NewContextCompressor(llmClient, modelInfo.ContextWindow, cfg.LLM.Timeout)
 	compressor.SetTokenEstimator(core.NewHeuristicTokenEstimator())
 
-	application := &App{
-		cfg:            cfg,
-		store:          st,
-		llmClient:      llmClient,
-		toolExecutor:   toolExec,
-		builtInExec:    builtInExec,
-		approvalGate:   approval,
-		sessionManager: sessionMgr,
-		turnManager:    turnMgr,
-		compressor:     compressor,
-		mcpClient:      mcpClient,
-		logger:         logger,
-		skillsContent:  skillsContent,
-	}
+	a.toolExecutor = toolExec
+	a.builtInExec = builtInExec
+	a.approvalGate = approval
+	a.sessionManager = sessionMgr
+	a.turnManager = turnMgr
+	a.compressor = compressor
+	a.mcpClient = mcpClient
+	a.skillsContent = skillsContent
 
 	// Start runtime profiling server if requested.
 	if cfg.PprofAddr != "" {
 		pprofCtx, pprofCancel := context.WithCancel(context.Background())
-		application.pprofCancel = pprofCancel
+		a.pprofCancel = pprofCancel
 		go func() {
 			if err := observability.StartPprof(pprofCtx, cfg.PprofAddr); err != nil {
 				logger.Warn("pprof server exited", "addr", cfg.PprofAddr, "error", err)
@@ -266,13 +289,32 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		}()
 	}
 
-	return application, nil
+	cleanup = false
+	return a, nil
 }
 
 // SetYolo sets the approval gate to yolo mode (auto-approve everything).
 func (a *App) SetYolo(yolo bool) {
 	if yolo {
 		a.approvalGate.SetMode(core.ModeYolo)
+	}
+}
+
+// SetAutoApprove adds the named tools to the approval gate's session-scope
+// auto-approve list.
+func (a *App) SetAutoApprove(tools []string) {
+	for _, name := range tools {
+		a.approvalGate.AddAutoApprove(name)
+	}
+}
+
+// setApprovalMode validates and applies an approval mode from the TUI.
+func (a *App) setApprovalMode(mode int) {
+	switch core.ApprovalMode(mode) {
+	case core.ModeManual, core.ModeAuto, core.ModeYolo:
+		a.approvalGate.SetMode(core.ApprovalMode(mode))
+	default:
+		a.logger.Warn("ignoring invalid approval mode", "mode", mode)
 	}
 }
 
@@ -324,19 +366,13 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	model.SetAutoApproveSetter(func(name string) {
 		a.approvalGate.AddAutoApprove(name)
 	})
-	model.SetApprovalModeSetter(func(mode int) {
-		a.approvalGate.SetMode(core.ApprovalMode(mode))
-	})
+	model.SetApprovalModeSetter(a.setApprovalMode)
 	model.SetApprovalMode(int(a.approvalGate.GetMode()))
 
-	// Set context stats from model info
-	resolvedModel, err := llm.ResolveModelFromConfig(a.cfg)
-	if err != nil {
-		return fmt.Errorf("resolve model: %w", err)
-	}
-	modelInfo := llm.LookupModel(resolvedModel)
+	// Set context stats from cached model info.
+	modelInfo := llm.LookupModel(a.resolvedModel)
 	model.SetContextStats(0, modelInfo.ContextWindow)
-	model.SetModelName(resolvedModel)
+	model.SetModelName(a.resolvedModel)
 
 	// Count tools
 	model.SetToolCount(len(a.toolExecutor.Definitions(ctx)))
@@ -420,6 +456,8 @@ func (a *App) ExportSession(ctx context.Context, sessionID string) (*api.Session
 }
 
 // ImportSession imports a session from an export, creating a new session with a new ID.
+// On any error after the session is created, all imported messages and the
+// session itself are removed so the store is left unchanged.
 func (a *App) ImportSession(ctx context.Context, export *api.SessionExport) (*api.Session, error) {
 	if export.Version != "" && export.Version != api.SessionExportVersion {
 		return nil, fmt.Errorf("unsupported export version %q", export.Version)
@@ -428,26 +466,44 @@ func (a *App) ImportSession(ctx context.Context, export *api.SessionExport) (*ap
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
+	cleanup := func() {
+		if err := a.deleteSessionAndData(ctx, created.ID); err != nil {
+			a.logger.Warn("import cleanup failed", "session_id", created.ID, "error", err)
+		}
+	}
 	created.Name = export.Session.Name
 	if err := a.store.UpdateSession(ctx, created); err != nil {
-		cleanupErr := a.store.DeleteSession(ctx, created.ID)
-		return nil, errors.Join(fmt.Errorf("update session name: %w", err), cleanupErr)
+		cleanup()
+		return nil, fmt.Errorf("update session name: %w", err)
 	}
 	// Restore messages
 	for _, msg := range export.Messages {
 		if err := a.store.AppendMessage(ctx, created.ID, msg); err != nil {
-			cleanupErr := a.store.DeleteSession(ctx, created.ID)
-			return nil, errors.Join(fmt.Errorf("append message: %w", err), cleanupErr)
+			cleanup()
+			return nil, fmt.Errorf("append message: %w", err)
 		}
 	}
 	// Restore turns
 	for _, turn := range export.Turns {
 		if err := a.store.SaveTurn(ctx, created.ID, turn); err != nil {
-			cleanupErr := a.store.DeleteSession(ctx, created.ID)
-			return nil, errors.Join(fmt.Errorf("save turn: %w", err), cleanupErr)
+			cleanup()
+			return nil, fmt.Errorf("save turn: %w", err)
 		}
 	}
 	return created, nil
+}
+
+// deleteSessionAndData removes all messages and the session record for
+// sessionID. The turns table is deleted via ON DELETE CASCADE.
+func (a *App) deleteSessionAndData(ctx context.Context, sessionID string) error {
+	var errs []error
+	if err := a.store.ClearMessages(ctx, sessionID); err != nil {
+		errs = append(errs, fmt.Errorf("clear messages: %w", err))
+	}
+	if err := a.store.DeleteSession(ctx, sessionID); err != nil {
+		errs = append(errs, fmt.Errorf("delete session: %w", err))
+	}
+	return errors.Join(errs...)
 }
 
 // newMCPClientForServer creates an api.MCPClient for a single direct server
@@ -481,7 +537,8 @@ func (a *App) Close() error {
 		a.turnManager.CancelAll()
 	}
 
-	// Wait for in-flight turns with timeout.
+	// Wait for in-flight turns with timeout. If turns are still running,
+	// do not close resources they may still be using.
 	if a.turnManager != nil {
 		done := make(chan struct{})
 		go func() {
@@ -491,7 +548,7 @@ func (a *App) Close() error {
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
-			errs = append(errs, fmt.Errorf("turn shutdown timeout"))
+			return errors.Join(append(errs, fmt.Errorf("turn shutdown timeout"))...)
 		}
 	}
 

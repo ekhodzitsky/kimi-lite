@@ -9,14 +9,30 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
+
+var (
+	cachedHome string
+	homeOnce   sync.Once
+)
+
+// userHomeDir returns the user's home directory, caching the result after the
+// first call. The empty string is returned if the home directory cannot be
+// determined.
+func userHomeDir() string {
+	homeOnce.Do(func() {
+		cachedHome, _ = os.UserHomeDir()
+	})
+	return cachedHome
+}
 
 // makePortablePath converts an absolute path to a portable relative path.
 // It replaces the user's home directory with "~" for portability across machines.
 func makePortablePath(absPath string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	home := userHomeDir()
+	if home == "" {
 		return absPath
 	}
 	rel, err := filepath.Rel(home, absPath)
@@ -37,8 +53,8 @@ func resolvePortablePath(portable string) string {
 	if !strings.HasPrefix(portable, "~") {
 		return portable
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+	home := userHomeDir()
+	if home == "" {
 		return portable
 	}
 	if portable == "~" {
@@ -66,15 +82,31 @@ func NewSessionManager(store api.Store) *SessionManager {
 
 // SetHookRunner sets the lifecycle hook runner.
 func (sm *SessionManager) SetHookRunner(r api.HookRunner) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	sm.hookRunner = r
 }
 
 // SetMetricsCollector sets the metrics collector.
 func (sm *SessionManager) SetMetricsCollector(m api.MetricsCollector) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	if m == nil {
 		m = api.NoopMetricsCollector{}
 	}
 	sm.metrics = m
+}
+
+func (sm *SessionManager) getHookRunner() api.HookRunner {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.hookRunner
+}
+
+func (sm *SessionManager) getMetrics() api.MetricsCollector {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.metrics
 }
 
 // Start creates a new session for the given path and sets it as current.
@@ -84,7 +116,7 @@ func (sm *SessionManager) Start(ctx context.Context, path string) (*api.Session,
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 	sm.setCurrent(sess.ID)
-	sm.metrics.IncCounter("session.created")
+	sm.getMetrics().IncCounter("session.created")
 	sm.runHooks(ctx, api.HookSessionStart, sess.ID)
 	return sess, nil
 }
@@ -102,7 +134,7 @@ func (sm *SessionManager) Resume(ctx context.Context, id string) (*api.Session, 
 	}
 	sess.Messages = msgs
 	sm.setCurrent(sess.ID)
-	sm.metrics.IncCounter("session.resumed")
+	sm.getMetrics().IncCounter("session.resumed")
 	sm.runHooks(ctx, api.HookSessionStart, sess.ID)
 	return sess, nil
 }
@@ -120,7 +152,7 @@ func (sm *SessionManager) ContinueLast(ctx context.Context, path string) (*api.S
 	}
 	sess.Messages = msgs
 	sm.setCurrent(sess.ID)
-	sm.metrics.IncCounter("session.resumed")
+	sm.getMetrics().IncCounter("session.resumed")
 	sm.runHooks(ctx, api.HookSessionStart, sess.ID)
 	return sess, nil
 }
@@ -204,7 +236,10 @@ func (sm *SessionManager) Fork(ctx context.Context, sourceID string, name string
 		return nil, fmt.Errorf("update forked session: %w", err)
 	}
 
-	for _, msg := range msgs {
+	forkedMsgs := make([]api.Message, len(msgs))
+	for i, msg := range msgs {
+		msg.ID = idgen.GenerateID()
+		forkedMsgs[i] = msg
 		if err := sm.store.AppendMessage(ctx, forked.ID, msg); err != nil {
 			return nil, fmt.Errorf("append message: %w", err)
 		}
@@ -212,8 +247,8 @@ func (sm *SessionManager) Fork(ctx context.Context, sourceID string, name string
 
 	sm.setCurrent(forked.ID)
 	forked.Path = resolvePortablePath(forked.Path)
-	forked.Messages = msgs
-	sm.metrics.IncCounter("session.created")
+	forked.Messages = forkedMsgs
+	sm.getMetrics().IncCounter("session.created")
 	sm.runHooks(ctx, api.HookSessionStart, forked.ID)
 	return forked, nil
 }
@@ -232,10 +267,11 @@ func (sm *SessionManager) setCurrent(id string) {
 }
 
 func (sm *SessionManager) runHooks(ctx context.Context, event api.HookEvent, sessionID string) {
-	if sm.hookRunner == nil {
+	runner := sm.getHookRunner()
+	if runner == nil {
 		return
 	}
-	if err := sm.hookRunner.Run(ctx, api.HookData{
+	if err := runner.Run(ctx, api.HookData{
 		Event:     event,
 		SessionID: sessionID,
 	}); err != nil {

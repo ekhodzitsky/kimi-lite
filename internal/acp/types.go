@@ -84,6 +84,11 @@ type sessionPromptResult struct {
 	Response string `json:"response"`
 }
 
+// sessionCancelResult is returned by session/cancel.
+type sessionCancelResult struct {
+	Cancelled bool `json:"cancelled"`
+}
+
 // sessionUpdateType identifies the kind of session/update notification.
 type sessionUpdateType string
 
@@ -91,6 +96,7 @@ const (
 	sessionUpdateAgentMessageChunk sessionUpdateType = "agent_message_chunk"
 	sessionUpdateToolResult        sessionUpdateType = "tool_result"
 	sessionUpdateApprovalRequest   sessionUpdateType = "approval_request"
+	sessionUpdateApprovalDiff      sessionUpdateType = "approval_diff"
 )
 
 // sessionUpdateParams is the payload of a session/update notification.
@@ -99,4 +105,6 @@ type sessionUpdateParams struct {
 	Content       string `json:"content,omitempty"`
 	ToolResult    any    `json:"toolResult,omitempty"`
 	Approval      any    `json:"approval,omitempty"`
+	DiffCallID    string `json:"diffCallId,omitempty"`
+	DiffContent   string `json:"diffContent,omitempty"`
 }

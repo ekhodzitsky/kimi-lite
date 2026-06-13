@@ -50,10 +50,24 @@ func parseMigrationVersion(name string) (int, bool) {
 	return n, true
 }
 
+// initialCapacity returns a sensible slice capacity for queries that accept a
+// user-provided LIMIT. When limit is zero (unlimited) we use a small heuristic
+// to avoid repeated reallocations for common result sizes.
+func initialCapacity(limit int) int {
+	if limit > 0 {
+		return limit
+	}
+	return 16
+}
+
 // runMigrations reads numbered *.sql files from fsys/dir, sorts them by their
 // numeric prefix, and applies any migration whose version is greater than the
 // current PRAGMA user_version. Each migration runs inside a transaction and
 // updates user_version in the same connection.
+//
+// NOTE: This helper does not accept a context because its only caller,
+// NewSQLite, has no caller-provided context. Future refactors of the
+// constructor should propagate context here.
 func runMigrations(db *sql.DB, fsys fs.FS, dir string) error {
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
@@ -158,7 +172,7 @@ func migrateTurnsStateColumn(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("inspect turns table: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	needsMigrate := false
 	for rows.Next() {
@@ -201,7 +215,9 @@ func migrateTurnsStateColumn(db *sql.DB) error {
 			PRIMARY KEY (id, session_id),
 			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 		);`,
-		`INSERT INTO turns SELECT * FROM turns_old;`,
+		`INSERT INTO turns (id, session_id, state, input, response, tool_calls, results, error, started_at, ended_at)
+		 SELECT id, session_id, state, input, response, tool_calls, results, error, started_at, ended_at
+		 FROM turns_old;`,
 		`DROP TABLE turns_old;`,
 		`CREATE INDEX idx_turns_session_started ON turns(session_id, started_at);`,
 	}
@@ -224,7 +240,7 @@ func migrateToolCallIDColumn(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("inspect messages table: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var cid, notnull, pk int
@@ -234,17 +250,11 @@ func migrateToolCallIDColumn(db *sql.DB) error {
 			return fmt.Errorf("scan table_info: %w", err)
 		}
 		if name == "tool_call_id" {
-			if err := rows.Close(); err != nil {
-				return fmt.Errorf("close table_info: %w", err)
-			}
 			return nil
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate table_info: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close table_info: %w", err)
 	}
 
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN tool_call_id TEXT`); err != nil {
@@ -295,6 +305,20 @@ func NewSQLite(dbPath string) (*SQLite, error) {
 	if _, err := db.Exec(`UPDATE turns SET state = ?, error = 'process crashed during streaming' WHERE state = ?`, api.TurnError.String(), api.TurnStreaming.String()); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("cleanup orphaned turns: %w", err)
+	}
+
+	// WAL mode may have created companion files during migrations/cleanup.
+	// Restrict their permissions to match the main database file.
+	if dbPath != ":memory:" {
+		for _, suffix := range []string{"-wal", "-shm"} {
+			walPath := dbPath + suffix
+			if _, err := os.Stat(walPath); err == nil {
+				if err := os.Chmod(walPath, 0600); err != nil {
+					_ = db.Close()
+					return nil, fmt.Errorf("set %s permissions: %w", walPath, err)
+				}
+			}
+		}
 	}
 
 	return &SQLite{db: db}, nil
@@ -384,7 +408,7 @@ func (s *SQLite) ListSessions(ctx context.Context, path string, limit int) ([]ap
 	}
 	defer func() { _ = rows.Close() }()
 
-	sessions := make([]api.Session, 0, limit)
+	sessions := make([]api.Session, 0, initialCapacity(limit))
 	for rows.Next() {
 		var sess api.Session
 		if err := rows.Scan(&sess.ID, &sess.Name, &sess.Path, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
@@ -477,7 +501,7 @@ func (s *SQLite) GetMessages(ctx context.Context, sessionID string, limit int) (
 	}
 	defer func() { _ = rows.Close() }()
 
-	msgs := make([]api.Message, 0, limit)
+	msgs := make([]api.Message, 0, initialCapacity(limit))
 	for rows.Next() {
 		var msg api.Message
 		var roleStr string
@@ -543,6 +567,13 @@ func (s *SQLite) ReplaceMessages(ctx context.Context, sessionID string, msgs []a
 		}
 	}
 
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET updated_at = ? WHERE id = ?`,
+		time.Now().UTC(), sessionID,
+	); err != nil {
+		return fmt.Errorf("update session timestamp: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
 	}
@@ -563,7 +594,7 @@ func (s *SQLite) SaveTurn(ctx context.Context, sessionID string, turn api.Turn) 
 		return fmt.Errorf("marshal results: %w", err)
 	}
 
-	var endedAt interface{}
+	var endedAt any
 	if turn.EndedAt != nil {
 		endedAt = turn.EndedAt.UTC()
 	}
@@ -625,7 +656,7 @@ func (s *SQLite) GetTurns(ctx context.Context, sessionID string, limit int) ([]a
 	}
 	defer func() { _ = rows.Close() }()
 
-	turns := make([]api.Turn, 0, limit)
+	turns := make([]api.Turn, 0, initialCapacity(limit))
 	for rows.Next() {
 		var turn api.Turn
 		var stateStr string
@@ -675,6 +706,9 @@ func (s *SQLite) CountTurns(ctx context.Context, sessionID string, state api.Tur
 
 // Close closes the underlying database connection.
 func (s *SQLite) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
 	if err := s.db.Close(); err != nil {
 		return fmt.Errorf("close sqlite: %w", err)
 	}

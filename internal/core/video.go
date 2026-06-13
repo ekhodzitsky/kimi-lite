@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -161,6 +162,7 @@ func (v *VideoExtractor) extractFrames(ctx context.Context, path string, duratio
 	if err != nil {
 		return nil, fmt.Errorf("read frames dir: %w", err)
 	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
 	var frames []Frame
 	for i, e := range entries {
@@ -173,14 +175,17 @@ func (v *VideoExtractor) extractFrames(ctx context.Context, path string, duratio
 			return nil, fmt.Errorf("read frame: %w", err)
 		}
 		var ts float64
-		if duration > 0 {
-			ts = duration * float64(i) / float64(maxFrames)
+		if duration > 0 && maxFrames > 1 {
+			ts = duration * float64(i) / float64(maxFrames-1)
 		}
 		frames = append(frames, Frame{
 			Timestamp:   ts,
 			DataURI:     fmt.Sprintf("data:image/png;base64,%s", base64.StdEncoding.EncodeToString(data)),
 			ContentType: "image/png",
 		})
+	}
+	if len(frames) == 0 {
+		return nil, fmt.Errorf("ffmpeg produced no frames")
 	}
 	return frames, nil
 }
@@ -189,16 +194,16 @@ func (v *VideoExtractor) extractFrames(ctx context.Context, path string, duratio
 func videoResultJSON(info *VideoInfo, maxBytes int) string {
 	data, err := json.Marshal(info)
 	if err != nil {
-		return fmt.Sprintf("{\"error\":%q}", err)
+		return fmt.Sprintf(`{"error":%q}`, err)
 	}
 	if len(data) > maxBytes {
 		info.Frames = nil
 		data, err = json.Marshal(info)
 		if err != nil {
-			return fmt.Sprintf("{\"error\":%q}", err)
+			return fmt.Sprintf(`{"error":%q}`, err)
 		}
 		if len(data) > maxBytes {
-			data = data[:maxBytes]
+			return fmt.Sprintf(`{"error":"video result exceeds maximum size of %d bytes"}`, maxBytes)
 		}
 	}
 	return string(data)

@@ -21,14 +21,16 @@ func UnifiedDiff(filename, oldContent, newContent string) string {
 }
 
 // ComputeFileDiff reads the current file and computes a diff against the proposed content.
-func ComputeFileDiff(path string, proposed []byte, sandboxRoot string) string {
+// protectedPaths is an optional list of additional paths that must be blocked
+// (mirroring BuiltInToolExecutor.protectedPaths).
+func ComputeFileDiff(path string, proposed []byte, sandboxRoot string, protectedPaths []string) string {
 	if path == "" {
 		return ""
 	}
 	if sandboxRoot != "" && !filepath.IsAbs(path) {
 		path = filepath.Join(sandboxRoot, path)
 	}
-	validPath, err := ValidateFilePath(path, sandboxRoot, nil)
+	validPath, err := ValidateFilePath(path, sandboxRoot, protectedPaths)
 	if err != nil {
 		return ""
 	}
@@ -41,7 +43,9 @@ func ComputeFileDiff(path string, proposed []byte, sandboxRoot string) string {
 }
 
 // ToolCallDiff returns a diff preview for pending write_file or str_replace_file calls.
-func ToolCallDiff(call api.ToolCall, sandboxRoot string) string {
+// protectedPaths is an optional list of additional paths that must be blocked
+// (mirroring BuiltInToolExecutor.protectedPaths).
+func ToolCallDiff(call api.ToolCall, sandboxRoot string, protectedPaths []string) string {
 	switch call.Name {
 	case "write_file":
 		var args struct {
@@ -51,12 +55,13 @@ func ToolCallDiff(call api.ToolCall, sandboxRoot string) string {
 		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 			return ""
 		}
-		return ComputeFileDiff(args.Path, []byte(args.Content), sandboxRoot)
+		return ComputeFileDiff(args.Path, []byte(args.Content), sandboxRoot, protectedPaths)
 	case "str_replace_file":
 		var args struct {
-			Path      string `json:"path"`
-			OldString string `json:"old_string"`
-			NewString string `json:"new_string"`
+			Path       string `json:"path"`
+			OldString  string `json:"old_string"`
+			NewString  string `json:"new_string"`
+			ReplaceAll bool   `json:"replace_all"`
 		}
 		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 			return ""
@@ -64,7 +69,7 @@ func ToolCallDiff(call api.ToolCall, sandboxRoot string) string {
 		if sandboxRoot != "" && !filepath.IsAbs(args.Path) {
 			args.Path = filepath.Join(sandboxRoot, args.Path)
 		}
-		validPath, err := ValidateFilePath(args.Path, sandboxRoot, nil)
+		validPath, err := ValidateFilePath(args.Path, sandboxRoot, protectedPaths)
 		if err != nil {
 			return ""
 		}
@@ -73,7 +78,12 @@ func ToolCallDiff(call api.ToolCall, sandboxRoot string) string {
 		if data, err := os.ReadFile(validPath); err == nil {
 			oldContent = string(data)
 		}
-		newContent := strings.ReplaceAll(oldContent, args.OldString, args.NewString)
+		var newContent string
+		if args.ReplaceAll {
+			newContent = strings.ReplaceAll(oldContent, args.OldString, args.NewString)
+		} else {
+			newContent = strings.Replace(oldContent, args.OldString, args.NewString, 1)
+		}
 		return UnifiedDiff(args.Path, oldContent, newContent)
 	}
 	return ""

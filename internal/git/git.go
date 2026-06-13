@@ -14,6 +14,15 @@ import (
 
 const gitTimeout = 5 * time.Second
 
+// gitEnvOverlay contains the environment variables forced for every git
+// command. It is precomputed once to avoid rebuilding the slice per call.
+var gitEnvOverlay = []string{
+	"GIT_TERMINAL_PROMPT=0",
+	"GIT_OPTIONAL_LOCKS=0",
+	"GIT_PAGER=cat",
+	"LC_ALL=C",
+}
+
 // cmdRunner abstracts command execution for testability.
 type cmdRunner interface {
 	// Output runs a command in dir and returns its stdout, stderr, and any error.
@@ -25,6 +34,16 @@ type execRunner struct{}
 
 // Output implements cmdRunner using exec.CommandContext with separate stdout/stderr.
 func (r *execRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+	if dir != "" {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("git provider: invalid directory %q: %w", dir, err)
+		}
+		if !info.IsDir() {
+			return nil, nil, fmt.Errorf("git provider: %q is not a directory", dir)
+		}
+	}
+
 	cmd := r.buildCmd(ctx, dir, name, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -39,13 +58,7 @@ func (r *execRunner) buildCmd(ctx context.Context, dir, name string, args ...str
 		cmd.Dir = dir
 	}
 	cmd.Stdin = nil
-	cmd.Env = append([]string(nil), os.Environ()...)
-	cmd.Env = append(cmd.Env,
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_OPTIONAL_LOCKS=0",
-		"GIT_PAGER=cat",
-		"LC_ALL=C",
-	)
+	cmd.Env = append(append([]string(nil), os.Environ()...), gitEnvOverlay...)
 	return cmd
 }
 
@@ -57,6 +70,9 @@ type Provider struct {
 
 // NewProvider creates a new Git provider that operates in dir.
 // If dir is empty, git commands run in the current working directory.
+// The directory is validated when a command is actually executed; an invalid
+// directory returns an error from the operation rather than from NewProvider,
+// preserving the existing constructor signature.
 func NewProvider(dir string) *Provider {
 	return &Provider{
 		runner: &execRunner{},

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -82,5 +83,43 @@ func TestVideoResultJSON_Cap(t *testing.T) {
 	out := videoResultJSON(info, 500)
 	if len(out) > 500 {
 		t.Errorf("output length %d exceeds cap 500", len(out))
+	}
+}
+
+func TestVideoResultJSON_FallbackIsValidJSON(t *testing.T) {
+	info := &VideoInfo{
+		Path:   strings.Repeat("x", 1000),
+		Width:  320,
+		Height: 240,
+		Frames: []Frame{{DataURI: strings.Repeat("y", 10000)}},
+	}
+	out := videoResultJSON(info, 100)
+	if !strings.HasPrefix(out, `{"error"`) {
+		t.Errorf("expected JSON error object, got %q", out)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Errorf("fallback is not valid JSON: %v\nout=%q", err, out)
+	}
+}
+
+func TestVideoExtractor_FrameTimestampsCoverEnd(t *testing.T) {
+	skipNoFFmpeg(t)
+
+	tmpDir := t.TempDir()
+	videoPath := filepath.Join(tmpDir, "test.mp4")
+	createTestVideo(t, videoPath)
+
+	ext := NewVideoExtractor()
+	info, err := ext.Extract(context.Background(), videoPath, 3)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(info.Frames) != 3 {
+		t.Fatalf("expected 3 frames, got %d", len(info.Frames))
+	}
+	last := info.Frames[len(info.Frames)-1]
+	if last.Timestamp != info.DurationSeconds {
+		t.Errorf("last frame timestamp = %f, want %f", last.Timestamp, info.DurationSeconds)
 	}
 }

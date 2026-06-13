@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ const (
 	maxShellCommandLen      = 4096             // 4 KB
 	maxShellTimeoutOverride = 10 * time.Minute // absolute ceiling for per-command timeout
 	maxFetchBodySize        = 2 * 1024 * 1024  // 2 MB
+	maxGrepPatternLen       = 1024             // 1 KB
 )
 
 var (
@@ -46,6 +48,31 @@ var (
 	errOutputLimitReached = errors.New("output limit reached")
 )
 
+// limitedWriter wraps a bytes.Buffer and stops storing bytes after limit,
+// while still counting the total bytes written.
+type limitedWriter struct {
+	buf     *bytes.Buffer
+	limit   int
+	written int
+}
+
+func newLimitedWriter(limit int) *limitedWriter {
+	return &limitedWriter{buf: &bytes.Buffer{}, limit: limit}
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	w.written += len(p)
+	if w.buf.Len() >= w.limit {
+		return len(p), nil
+	}
+	n := w.limit - w.buf.Len()
+	if n > len(p) {
+		n = len(p)
+	}
+	w.buf.Write(p[:n])
+	return len(p), nil
+}
+
 // BuiltInToolExecutor executes the built-in tool set.
 type BuiltInToolExecutor struct {
 	shellTimeout   time.Duration
@@ -53,6 +80,7 @@ type BuiltInToolExecutor struct {
 	sandboxRoot    string
 	httpClient     *http.Client
 	protectedPaths []string
+	secretPaths    []string
 	allowShell     bool
 	passEnv        bool
 	root           *os.Root
@@ -93,10 +121,19 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 	}
 	sandboxRoot := cfg.SandboxRoot
 	if sandboxRoot != "" {
+		if !filepath.IsAbs(sandboxRoot) {
+			if abs, err := filepath.Abs(sandboxRoot); err == nil {
+				sandboxRoot = abs
+			}
+		}
 		if resolved, err := filepath.EvalSymlinks(sandboxRoot); err == nil {
 			sandboxRoot = resolved
 		}
 	}
+
+	// Precompute secret tree paths once so validatePath does not re-resolve HOME
+	// on every call.
+	secretPaths := secretTreePaths()
 
 	var root *os.Root
 	if sandboxRoot != "" {
@@ -145,6 +182,7 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 		sandboxRoot:    sandboxRoot,
 		httpClient:     httpClient,
 		protectedPaths: resolvedProtected,
+		secretPaths:    secretPaths,
 		allowShell:     true,
 		passEnv:        cfg.PassEnv,
 		root:           root,
@@ -233,6 +271,13 @@ func secretTreePaths() []string {
 // paths and secret trees (only when sandboxRoot is empty), checks protected
 // paths, and optionally enforces sandboxRoot containment.
 func ValidateFilePath(path string, sandboxRoot string, protectedPaths []string) (string, error) {
+	return validateFilePath(path, sandboxRoot, protectedPaths, nil)
+}
+
+// validateFilePath is the internal implementation of ValidateFilePath.
+// precomputedSecrets may be passed by the executor to avoid re-resolving the
+// secret tree paths on every call.
+func validateFilePath(path string, sandboxRoot string, protectedPaths, precomputedSecrets []string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("%w: path is required", ErrPathRequired)
 	}
@@ -243,6 +288,11 @@ func ValidateFilePath(path string, sandboxRoot string, protectedPaths []string) 
 		}
 	}
 	path = expandTilde(path)
+	if sandboxRoot != "" && !filepath.IsAbs(path) {
+		// Resolve relative paths against the sandbox root so validation is not
+		// accidentally relative to the process working directory.
+		path = filepath.Join(sandboxRoot, path)
+	}
 	cleaned := filepath.Clean(path)
 	absPath, err := filepath.Abs(cleaned)
 	if err != nil {
@@ -259,8 +309,12 @@ func ValidateFilePath(path string, sandboxRoot string, protectedPaths []string) 
 		}
 	}
 
+	secrets := precomputedSecrets
+	if secrets == nil {
+		secrets = secretTreePaths()
+	}
 	if sandboxRoot == "" {
-		for _, s := range secretTreePaths() {
+		for _, s := range secrets {
 			if isUnder(absPath, s) {
 				return "", fmt.Errorf("%w: access to %q is blocked", ErrSandboxViolation, originalPath)
 			}
@@ -311,7 +365,7 @@ func ValidateFilePath(path string, sandboxRoot string, protectedPaths []string) 
 	// Re-check secret trees on the resolved path to block symlinks that point
 	// into sensitive directories (e.g. /tmp/link -> ~/.ssh/id_rsa).
 	if sandboxRoot == "" {
-		for _, s := range secretTreePaths() {
+		for _, s := range secrets {
 			if isUnder(absPath, s) {
 				return "", fmt.Errorf("%w: access to %q is blocked", ErrSandboxViolation, originalPath)
 			}
@@ -328,14 +382,14 @@ func ValidateFilePath(path string, sandboxRoot string, protectedPaths []string) 
 }
 
 func (e *BuiltInToolExecutor) validatePath(path string) (string, error) {
-	absPath, err := ValidateFilePath(path, e.sandboxRoot, e.protectedPaths)
+	absPath, err := validateFilePath(path, e.sandboxRoot, e.protectedPaths, e.secretPaths)
 	if err != nil {
 		return "", err
 	}
 	if e.root == nil {
 		return absPath, nil
 	}
-	// ValidateFilePath already verified sandbox containment, and os.Root enforces
+	// validateFilePath already verified sandbox containment, and os.Root enforces
 	// it at operation time. Convert to a root-relative path for os.Root.
 	rel, err := filepath.Rel(e.sandboxRoot, absPath)
 	if err != nil {
@@ -895,6 +949,12 @@ func (e *BuiltInToolExecutor) execReadFile(ctx context.Context, args readFileArg
 		if err != nil {
 			return "", fmt.Errorf("read file: %w", err)
 		}
+		if len(e.protectedPaths) > 0 {
+			if hErr := checkFileHardlinkEscape(f); hErr != nil {
+				_ = f.Close()
+				return "", fmt.Errorf("read file: %w", hErr)
+			}
+		}
 	}
 	defer func() { _ = f.Close() }()
 
@@ -920,28 +980,49 @@ func extractLineRange(data []byte, offset, n int) (string, error) {
 	if offset == 0 && n == 0 {
 		return string(data), nil
 	}
-	s := string(data)
-	endsWithNewline := len(s) > 0 && s[len(s)-1] == '\n'
-	lines := strings.Split(s, "\n")
-	if endsWithNewline {
-		lines = lines[:len(lines)-1]
+	if offset < 0 {
+		return "", fmt.Errorf("line_offset must be non-negative")
+	}
+	if n < 0 {
+		return "", fmt.Errorf("n_lines must be non-negative")
 	}
 	start := offset
 	if start == 0 {
 		start = 1
 	}
-	if start > len(lines) {
+
+	// Locate the byte offset of the first requested line (1-based).
+	startIdx := 0
+	for line := 1; line < start; line++ {
+		idx := bytes.IndexByte(data[startIdx:], '\n')
+		if idx == -1 {
+			return "", nil
+		}
+		startIdx += idx + 1
+	}
+	if startIdx > len(data) {
 		return "", nil
 	}
-	end := len(lines)
+
+	// Locate the byte offset just past the last requested line.
+	endIdx := len(data)
 	if n > 0 {
-		end = start - 1 + n
-		if end > len(lines) {
-			end = len(lines)
+		endIdx = startIdx
+		for i := 0; i < n; i++ {
+			idx := bytes.IndexByte(data[endIdx:], '\n')
+			if idx == -1 {
+				endIdx = len(data)
+				break
+			}
+			endIdx += idx + 1
 		}
 	}
-	out := strings.Join(lines[start-1:end], "\n")
-	return out, nil
+
+	// Remove a single trailing newline that belongs to the last included line.
+	if endIdx > startIdx && data[endIdx-1] == '\n' {
+		endIdx--
+	}
+	return string(data[startIdx:endIdx]), nil
 }
 
 // isRootEscapeErr reports whether err is an os.Root "path escapes from parent"
@@ -953,7 +1034,29 @@ func isRootEscapeErr(err error) bool {
 		// documented text. This will need updating if Go changes the message.
 		return pe.Err != nil && strings.Contains(pe.Err.Error(), "path escapes from parent")
 	}
-	return false
+	// Fallback: earlier validation may already have wrapped the error with
+	// ErrSandboxViolation and an "escapes" message.
+	return errors.Is(err, ErrSandboxViolation) && strings.Contains(err.Error(), "escapes")
+}
+
+// compileRegexpWithContext compiles pattern in a goroutine so that a
+// context cancellation can abort catastrophically slow (ReDoS) patterns.
+func compileRegexpWithContext(ctx context.Context, pattern string) (*regexp.Regexp, error) {
+	type result struct {
+		re  *regexp.Regexp
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		re, err := regexp.Compile(pattern)
+		done <- result{re: re, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("compile grep pattern: %w", ctx.Err())
+	case r := <-done:
+		return r.re, r.err
+	}
 }
 
 // isBlockedHost reports whether a hostname or IP should be blocked to prevent
@@ -1142,9 +1245,6 @@ func (e *BuiltInToolExecutor) execWriteFile(ctx context.Context, args writeFileA
 	if args.Path == "" {
 		return "", ErrPathRequired
 	}
-	if args.Content == "" {
-		return "", fmt.Errorf("content is required")
-	}
 	if len(args.Content) > maxFileWriteSize {
 		return "", fmt.Errorf("content exceeds max size of %d bytes", maxFileWriteSize)
 	}
@@ -1199,33 +1299,36 @@ func (e *BuiltInToolExecutor) replaceInFile(ctx context.Context, path, oldString
 	return fmt.Sprintf("replaced in %s", path), nil
 }
 
-// replaceInFileRoot opens the target file once with O_RDWR and performs the
-// read-modify-write through the single *os.File handle. os.Root enforces that
-// the path stays within the sandbox, and checkFileHardlinkEscape blocks
-// hardlink aliases to outside files.
+// replaceInFileRoot reads the target file, computes the replacement, and writes
+// the result atomically via a temporary file and rename. os.Root enforces
+// sandbox containment, and checkFileHardlinkEscape blocks hardlink aliases to
+// outside files.
 func (e *BuiltInToolExecutor) replaceInFileRoot(relPath, oldString, newString string, replaceAll bool, tool string) error {
-	f, err := e.root.OpenFile(relPath, os.O_RDWR, 0)
+	f, err := e.root.OpenFile(relPath, os.O_RDONLY, 0)
 	if err != nil {
 		if isRootEscapeErr(err) {
 			return fmt.Errorf("%s: %w: path escapes sandbox", tool, ErrSandboxViolation)
 		}
 		return fmt.Errorf("%s: %w", tool, err)
 	}
-	defer func() { _ = f.Close() }()
 
 	if err := checkFileHardlinkEscape(f); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("%s: %w", tool, err)
 	}
 
 	info, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
 		return fmt.Errorf("%s: %w", tool, err)
 	}
 	if info.Size() > maxFileReadSize {
+		_ = f.Close()
 		return fmt.Errorf("%s: file exceeds max read size of %d bytes", tool, maxFileReadSize)
 	}
 
 	data, err := io.ReadAll(f)
+	_ = f.Close()
 	if err != nil {
 		return fmt.Errorf("%s: %w", tool, err)
 	}
@@ -1243,16 +1346,9 @@ func (e *BuiltInToolExecutor) replaceInFileRoot(relPath, oldString, newString st
 		return fmt.Errorf("%s: result exceeds max size of %d bytes", tool, maxFileWriteSize)
 	}
 
-	if err := f.Truncate(0); err != nil {
-		return fmt.Errorf("%s: %w", tool, err)
-	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("%s: %w", tool, err)
-	}
-	if _, err := f.Write([]byte(content)); err != nil {
-		return fmt.Errorf("%s: %w", tool, err)
-	}
-	if err := f.Sync(); err != nil {
+	// The hardlink check above already verified the existing target; skip the
+	// redundant check inside atomicWriteFileRoot.
+	if err := e.atomicWriteFileRoot(relPath, []byte(content), true); err != nil {
 		return fmt.Errorf("%s: %w", tool, err)
 	}
 	return nil
@@ -1264,6 +1360,12 @@ func (e *BuiltInToolExecutor) replaceInFileNoRoot(absPath, oldString, newString 
 		return fmt.Errorf("read file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
+
+	if len(e.protectedPaths) > 0 {
+		if hErr := checkFileHardlinkEscape(f); hErr != nil {
+			return fmt.Errorf("%s: %w", tool, hErr)
+		}
+	}
 
 	info, err := f.Stat()
 	if err != nil {
@@ -1359,9 +1461,12 @@ func (e *BuiltInToolExecutor) execGlob(ctx context.Context, args globArgs) (stri
 	return strings.Join(valid, "\n"), nil
 }
 
-func (e *BuiltInToolExecutor) execGrep(_ context.Context, args grepArgs) (string, error) {
+func (e *BuiltInToolExecutor) execGrep(ctx context.Context, args grepArgs) (string, error) {
 	if args.Pattern == "" {
 		return "", fmt.Errorf("pattern is required")
+	}
+	if len(args.Pattern) > maxGrepPatternLen {
+		return "", fmt.Errorf("grep: pattern exceeds max length of %d bytes", maxGrepPatternLen)
 	}
 	if args.Path == "" {
 		return "", ErrPathRequired
@@ -1371,7 +1476,7 @@ func (e *BuiltInToolExecutor) execGrep(_ context.Context, args grepArgs) (string
 		return "", fmt.Errorf("grep: %w", err)
 	}
 
-	re, err := regexp.Compile(args.Pattern)
+	re, err := compileRegexpWithContext(ctx, args.Pattern)
 	if err != nil {
 		return "", fmt.Errorf("invalid pattern: %w", err)
 	}
@@ -1416,6 +1521,12 @@ func (e *BuiltInToolExecutor) execGrep(_ context.Context, args grepArgs) (string
 			return nil
 		}
 		defer func() { _ = f.Close() }()
+
+		if len(e.protectedPaths) > 0 {
+			if hErr := checkFileHardlinkEscape(f); hErr != nil {
+				return nil
+			}
+		}
 
 		scanner := bufio.NewScanner(f)
 		scanner.Buffer(make([]byte, 4096), maxFileReadSize)
@@ -1540,24 +1651,34 @@ func (e *BuiltInToolExecutor) execGrepRoot(relPath string, re *regexp.Regexp) (s
 	return strings.Join(results, "\n"), nil
 }
 
+// shellCommandContext returns an exec.Cmd that runs command through the
+// platform shell: cmd.exe /C on Windows and sh -c elsewhere.
+func shellCommandContext(ctx context.Context, command string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd.exe", "/C", command)
+	}
+	return exec.CommandContext(ctx, "sh", "-c", command)
+}
+
 // runCommandWithContext runs cmd and kills its whole process group when ctx is
 // cancelled or reaches its deadline. This ensures child processes spawned by a
 // shell (e.g. "sleep 5") are terminated along with the parent.
-func runCommandWithContext(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+func runCommandWithContext(ctx context.Context, cmd *exec.Cmd) (*limitedWriter, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("context cancelled: %w", err)
 	}
 	setProcessGroup(cmd)
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	out := newLimitedWriter(maxShellOutputSize)
+	cmd.Stdout = out
+	cmd.Stderr = out
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start command: %w", err)
 	}
 
 	done := make(chan struct{})
+	killed := make(chan struct{})
 	go func(pid int) {
 		select {
 		case <-done:
@@ -1566,14 +1687,19 @@ func runCommandWithContext(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
 		}
 		select {
 		case <-done:
+		case <-killed:
 		default:
+			close(killed)
 			_ = killProcessGroupPID(pid)
 		}
 	}(cmd.Process.Pid)
 
 	err := cmd.Wait()
 	close(done)
-	return out.Bytes(), err
+	if err != nil {
+		return out, fmt.Errorf("wait shell command: %w", err)
+	}
+	return out, nil
 }
 
 func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (string, error) {
@@ -1588,12 +1714,17 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (st
 	}
 
 	timeout := e.shellTimeout
-	if args.Timeout > 0 {
+	if args.Timeout != 0 {
 		requested := time.Duration(args.Timeout) * time.Second
+		if requested < 0 {
+			requested = 0
+		}
 		if requested > maxShellTimeoutOverride {
 			requested = maxShellTimeoutOverride
 		}
-		timeout = requested
+		if requested > 0 {
+			timeout = requested
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -1602,18 +1733,18 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (st
 	// NOTE: shell is NOT path-sandboxed; cmd.Dir is a working directory, not a
 	// chroot. The only guard is the approval gate, which never auto-approves
 	// the shell tool regardless of configuration.
-	cmd := exec.CommandContext(ctx, "sh", "-c", args.Command)
-	if e.passEnv {
-		cmd.Env = os.Environ()
-	} else {
-		cmd.Env = curatedEnv()
-	}
+	cmd := shellCommandContext(ctx, args.Command)
 	cmd.Dir = e.sandboxRoot
-	output, err := runCommandWithContext(ctx, cmd)
-	outStr := string(output)
-	if len(outStr) > maxShellOutputSize {
-		outStr = strings.ToValidUTF8(outStr[:maxShellOutputSize], "")
-		outStr += fmt.Sprintf("\n... truncated (%d bytes total)", len(output))
+	if e.passEnv {
+		cmd.Env = append(os.Environ(), "PWD="+e.sandboxRoot)
+	} else {
+		cmd.Env = append(curatedEnv(), "PWD="+e.sandboxRoot)
+	}
+	out, err := runCommandWithContext(ctx, cmd)
+	outStr := out.buf.String()
+	if out.written > maxShellOutputSize {
+		outStr = strings.ToValidUTF8(outStr, "")
+		outStr += fmt.Sprintf("\n... truncated (%d bytes total)", out.written)
 	}
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -1860,6 +1991,10 @@ func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args fetchURLArg
 		return "", fmt.Errorf("fetch url: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("fetch url: HTTP status %d", resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBodySize))
 	if err != nil {

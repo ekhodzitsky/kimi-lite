@@ -2524,3 +2524,256 @@ func (f *fakeHookRunner) Run(ctx context.Context, data api.HookData) error {
 	}
 	return nil
 }
+
+func TestBuiltInToolExecutor_Execute_ReadFile_RelativePathInSandbox(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	path := filepath.Join(tmp, "subdir", "test.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("create dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("hello"), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_file",
+		Arguments: `{"path":"subdir/test.txt"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if result.Output != "hello" {
+		t.Errorf("output = %q, want %q", result.Output, "hello")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WriteFile_RelativePathInSandbox(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "write_file",
+		Arguments: `{"path":"subdir/out.txt","content":"hello"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmp, "subdir", "out.txt"))
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Errorf("content = %q, want %q", string(data), "hello")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WriteFile_EmptyContent(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	path := filepath.Join(tmp, "empty.txt")
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "write_file",
+		Arguments: fmt.Sprintf(`{"path":"%s","content":""}`, path),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("expected empty file, got %q", string(data))
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_StrReplaceFile_Root_AtomicOnError(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	path := filepath.Join(tmp, "edit.txt")
+	if err := os.WriteFile(path, []byte("original content"), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "str_replace_file",
+		Arguments: fmt.Sprintf(`{"path":"%s","old_string":"notfound","new_string":"x"}`, path),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for missing old_string")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(data) != "original content" {
+		t.Errorf("file changed on error: got %q", string(data))
+	}
+
+	entries, _ := os.ReadDir(tmp)
+	if len(entries) != 1 {
+		t.Errorf("expected 1 file, got %d", len(entries))
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ReadFile_HardlinkEscapeWithoutRoot(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("hardlink semantics differ on Windows")
+	}
+
+	tmp := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("SECRET"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	linkFile := filepath.Join(tmp, "link.txt")
+	if err := os.Link(outsideFile, linkFile); err != nil {
+		t.Skipf("hardlinks not supported in test environment: %v", err)
+	}
+
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, ProtectedPaths: []string{linkFile}})
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_file",
+		Arguments: fmt.Sprintf(`{"path":"%s"}`, linkFile),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for hardlink to outside file")
+	}
+	if !strings.Contains(result.Error, "sandbox") && !strings.Contains(result.Error, "blocked") {
+		t.Errorf("expected sandbox/blocked error, got: %s", result.Error)
+	}
+	if strings.Contains(result.Output, "SECRET") {
+		t.Errorf("should not read outside data; output: %q", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_NegativeTimeoutClipped(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell semantics")
+	}
+
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	start := time.Now()
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: `{"command":"sleep 0.1","timeout":-1}`,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("negative timeout should use default; took %v", elapsed)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Grep_PatternLengthLimit(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:   "call_1",
+		Name: "grep",
+		Arguments: fmt.Sprintf(`{"pattern":"%s","path":"%s"}`,
+			strings.Repeat("a", maxGrepPatternLen+1), tmp),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for pattern exceeding max length")
+	}
+	if !strings.Contains(result.Error, "max length") {
+		t.Errorf("expected max length error, got: %s", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Grep_ContextCancellationDuringCompile(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := exec.Execute(ctx, api.ToolCall{
+		ID:        "call_1",
+		Name:      "grep",
+		Arguments: fmt.Sprintf(`{"pattern":"a","path":"%s"}`, tmp),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected context cancellation error")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_FetchURL_Non2xxStatus(t *testing.T) {
+	t.Parallel()
+	for _, code := range []int{404, 500} {
+		t.Run(fmt.Sprintf("status%d", code), func(t *testing.T) {
+			t.Parallel()
+			code := code
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "boom", code)
+			}))
+			defer server.Close()
+
+			exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, HTTPClient: testFetchClient(server)})
+			result, err := exec.Execute(context.Background(), api.ToolCall{
+				ID:        "call_1",
+				Name:      "fetch_url",
+				Arguments: `{"url":"http://example.com"}`,
+			})
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if result.Error == "" {
+				t.Fatalf("expected error for HTTP %d", code)
+			}
+			if !strings.Contains(result.Error, fmt.Sprintf("%d", code)) {
+				t.Errorf("expected status code in error, got: %s", result.Error)
+			}
+		})
+	}
+}

@@ -15,6 +15,10 @@ import (
 var (
 	compactTimeout       = 30 * time.Second
 	clearMessagesTimeout = 10 * time.Second
+	commandTimeout       = 30 * time.Second
+	sessionsTimeout      = 10 * time.Second
+	checkpointTimeout    = 10 * time.Second
+	approvalTimeout      = 60 * time.Second
 )
 
 // StreamChunkMsg carries a chunk from the LLM stream.
@@ -79,8 +83,19 @@ type ClearMsg struct{}
 // SessionsMsg signals the app to list sessions.
 type SessionsMsg struct{}
 
+// SessionsResultMsg carries the result of listing sessions.
+type SessionsResultMsg struct {
+	Sessions []api.Session
+	Err      error
+}
+
 // CheckpointMsg signals the app to create a checkpoint.
 type CheckpointMsg struct{}
+
+// CheckpointResultMsg carries the result of a checkpoint operation.
+type CheckpointResultMsg struct {
+	Err error
+}
 
 // MCPListMsg carries the result of listing MCP tools.
 type MCPListMsg struct {
@@ -112,18 +127,33 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 	switch cmd {
 	case "/compact":
 		m.addMessage(msgcomp.NewUserMessage("Compacting session...", m.styles))
+
+		// Capture the fields needed by the async command while holding the lock.
+		m.mu.RLock()
+		comp := m.compressor
+		store := m.store
+		var sessionID string
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		keepRecent := m.config.Behavior.CompactKeepRecent
+		contextMax := m.contextMax
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+
+		if keepRecent <= 0 {
+			keepRecent = 2
+		}
+		if contextMax > 0 {
+			keepRecent = max(keepRecent, min(8, contextMax/64000))
+		}
+
+		timeout := compactTimeout
 		return func() tea.Msg {
-			if m.compressor != nil && m.store != nil && m.session != nil {
-				keepRecent := m.config.Behavior.CompactKeepRecent
-				if keepRecent <= 0 {
-					keepRecent = 2
-				}
-				if m.contextMax > 0 {
-					keepRecent = max(keepRecent, min(8, m.contextMax/64000))
-				}
-				ctx, cancel := context.WithTimeout(m.appCtx, compactTimeout)
+			if comp != nil && store != nil && sessionID != "" {
+				ctx, cancel := context.WithTimeout(appCtx, timeout)
 				defer cancel()
-				summarized, err := m.compressor.Compact(ctx, m.store, m.session.ID, keepRecent)
+				summarized, err := comp.Compact(ctx, store, sessionID, keepRecent)
 				if err != nil {
 					return ErrorMsg{Err: err}
 				}
@@ -136,28 +166,48 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 			return nil
 		}
 		m.clearMessages()
+
+		m.mu.RLock()
+		sm := m.sessionManager
+		var sessionID string
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+
+		timeout := clearMessagesTimeout
 		return func() tea.Msg {
-			if m.sessionManager != nil && m.session != nil {
-				ctx, cancel := context.WithTimeout(m.appCtx, clearMessagesTimeout)
+			if sm != nil && sessionID != "" {
+				ctx, cancel := context.WithTimeout(appCtx, timeout)
 				defer cancel()
-				_ = m.sessionManager.ClearMessages(ctx, m.session.ID)
+				_ = sm.ClearMessages(ctx, sessionID)
 			}
 			return ClearMsg{}
 		}
 	case "/sessions":
 		m.addMessage(msgcomp.NewUserMessage("Listing sessions...", m.styles))
-		return func() tea.Msg { return SessionsMsg{} }
+		return m.listSessionsCmd()
 
 	case "/checkpoint":
 		m.addMessage(msgcomp.NewUserMessage("Creating checkpoint...", m.styles))
-		return func() tea.Msg { return CheckpointMsg{} }
+		return m.checkpointCmd()
 	case "/diff":
 		args := strings.TrimSpace(strings.TrimPrefix(content, cmd))
+
+		m.mu.RLock()
+		gp := m.gitProvider
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+
+		timeout := commandTimeout
 		return func() tea.Msg {
-			if m.gitProvider == nil {
+			if gp == nil {
 				return ErrorMsg{Err: fmt.Errorf("no git provider available")}
 			}
-			diff, err := m.gitProvider.Diff(context.Background(), args)
+			ctx, cancel := context.WithTimeout(appCtx, timeout)
+			defer cancel()
+			diff, err := gp.Diff(ctx, args)
 			if err != nil {
 				return ErrorMsg{Err: fmt.Errorf("git diff: %w", err)}
 			}
@@ -167,16 +217,24 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 			return StreamChunkMsg{Chunk: api.StreamChunk{Content: diff}}
 		}
 	case "/mcp":
-		if m.mcpClient == nil {
+		m.mu.RLock()
+		mc := m.mcpClient
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+
+		if mc == nil {
 			m.addMessage(msgcomp.NewUserMessage("No MCP tools connected.", m.styles))
 		} else {
 			m.addMessage(msgcomp.NewUserMessage("Listing MCP tools...", m.styles))
 		}
+		timeout := commandTimeout
 		return func() tea.Msg {
-			if m.mcpClient == nil {
+			if mc == nil {
 				return MCPListMsg{Tools: nil}
 			}
-			tools, err := m.mcpClient.ListTools(context.Background())
+			ctx, cancel := context.WithTimeout(appCtx, timeout)
+			defer cancel()
+			tools, err := mc.ListTools(ctx)
 			if err != nil {
 				return ErrorMsg{Err: fmt.Errorf("list mcp tools: %w", err)}
 			}
@@ -189,11 +247,24 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 			return nil
 		}
 		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Renaming session to %q...", name), m.styles))
+
+		m.mu.RLock()
+		sm := m.sessionManager
+		var sessionID string
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+
+		timeout := commandTimeout
 		return func() tea.Msg {
-			if m.sessionManager == nil || m.session == nil {
+			if sm == nil || sessionID == "" {
 				return ErrorMsg{Err: fmt.Errorf("no session to rename")}
 			}
-			if err := m.sessionManager.Rename(context.Background(), m.session.ID, name); err != nil {
+			ctx, cancel := context.WithTimeout(appCtx, timeout)
+			defer cancel()
+			if err := sm.Rename(ctx, sessionID, name); err != nil {
 				return ErrorMsg{Err: fmt.Errorf("rename session: %w", err)}
 			}
 			return SetTitleMsg{Name: name}
@@ -201,11 +272,24 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 	case "/fork":
 		name := strings.TrimSpace(strings.TrimPrefix(content, cmd))
 		m.addMessage(msgcomp.NewUserMessage("Forking session...", m.styles))
+
+		m.mu.RLock()
+		sm := m.sessionManager
+		var sessionID string
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+
+		timeout := commandTimeout
 		return func() tea.Msg {
-			if m.sessionManager == nil || m.session == nil {
+			if sm == nil || sessionID == "" {
 				return ErrorMsg{Err: fmt.Errorf("no session to fork")}
 			}
-			sess, err := m.sessionManager.Fork(context.Background(), m.session.ID, name)
+			ctx, cancel := context.WithTimeout(appCtx, timeout)
+			defer cancel()
+			sess, err := sm.Fork(ctx, sessionID, name)
 			if err != nil {
 				return ErrorMsg{Err: fmt.Errorf("fork session: %w", err)}
 			}

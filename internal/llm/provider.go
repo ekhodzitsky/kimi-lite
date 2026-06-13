@@ -17,7 +17,7 @@ func NewClientFromConfig(cfg *api.Config, httpClient *http.Client) (api.LLMClien
 	}
 
 	switch provider.Type {
-	case string(api.ProviderTypeAnthropic), string(api.ProviderTypeGoogleGenAI):
+	case api.ProviderTypeAnthropic, api.ProviderTypeGoogleGenAI, api.ProviderTypeVertexAI:
 		return nil, fmt.Errorf("provider %q is not yet supported", provider.Type)
 	}
 
@@ -63,8 +63,11 @@ func ResolveModelFromConfig(cfg *api.Config) (string, error) {
 
 func resolveDefaultProvider(cfg *api.Config) (string, api.ProviderConfig, error) {
 	if len(cfg.Providers) == 0 {
+		if cfg.LLM.BaseURL == "" {
+			return "", api.ProviderConfig{}, fmt.Errorf("base_url must be set for provider %q", cfg.LLM.Provider)
+		}
 		return cfg.LLM.Provider, api.ProviderConfig{
-			Type:         cfg.LLM.Provider,
+			Type:         api.ProviderType(cfg.LLM.Provider),
 			APIKey:       cfg.LLM.APIKey,
 			BaseURL:      cfg.LLM.BaseURL,
 			DefaultModel: cfg.LLM.Model,
@@ -77,6 +80,9 @@ func resolveDefaultProvider(cfg *api.Config) (string, api.ProviderConfig, error)
 	provider, ok := cfg.Providers[cfg.DefaultProvider]
 	if !ok {
 		return "", api.ProviderConfig{}, fmt.Errorf("default_provider %q not found in providers", cfg.DefaultProvider)
+	}
+	if provider.BaseURL == "" {
+		return "", api.ProviderConfig{}, fmt.Errorf("base_url must be set for provider %q", cfg.DefaultProvider)
 	}
 	return cfg.DefaultProvider, provider, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
@@ -262,5 +263,78 @@ func TestFallbackClient_Chat_NilFallback_ErrorPropagates(t *testing.T) {
 	_, err := client.Chat(context.Background(), nil, nil)
 	if err != wantErr {
 		t.Fatalf("expected %v, got %v", wantErr, err)
+	}
+}
+
+func TestFallbackClient_Chat_PrimaryClientError_NoFailover(t *testing.T) {
+	t.Parallel()
+
+	wantErr := &api.APIError{StatusCode: 400, Message: "bad request"}
+	primary := &mockLLM{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			return nil, wantErr
+		},
+	}
+	fallback := &mockLLM{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			t.Error("fallback Chat should not be called for 4xx")
+			return &api.Message{Role: api.RoleAssistant, Content: "fallback"}, nil
+		},
+	}
+
+	client := NewFallbackClient(primary, fallback)
+	_, err := client.Chat(context.Background(), nil, nil)
+	if err != wantErr {
+		t.Fatalf("expected %v, got %v", wantErr, err)
+	}
+}
+
+func TestFallbackClient_ChatStream_CancelsPrimaryOnFallback(t *testing.T) {
+	t.Parallel()
+
+	primaryCtxCanceled := make(chan struct{})
+	primary := &mockLLM{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			ch := make(chan api.StreamChunk, 1)
+			ch <- api.StreamChunk{Error: errors.New("primary pre-content error")}
+			close(ch)
+			go func() {
+				<-ctx.Done()
+				close(primaryCtxCanceled)
+			}()
+			return ch, nil
+		},
+	}
+	fallback := &mockLLM{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			ch := make(chan api.StreamChunk, 2)
+			ch <- api.StreamChunk{Content: "fallback"}
+			ch <- api.StreamChunk{Done: true}
+			close(ch)
+			return ch, nil
+		},
+	}
+
+	client := NewFallbackClient(primary, fallback)
+	ch, err := client.ChatStream(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got string
+	for chunk := range ch {
+		if chunk.Done {
+			break
+		}
+		got = chunk.Content
+	}
+	if got != "fallback" {
+		t.Fatalf("expected fallback content, got %q", got)
+	}
+
+	select {
+	case <-primaryCtxCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("primary context was not canceled after fallback")
 	}
 }

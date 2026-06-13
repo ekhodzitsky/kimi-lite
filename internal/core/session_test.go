@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -294,6 +295,41 @@ func TestSessionManager_Fork(t *testing.T) {
 	}
 }
 
+func TestSessionManager_Fork_RegeneratesMessageIDs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	sess, err := sm.Start(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m1", Role: api.RoleUser, Content: "hello", CreatedAt: sess.CreatedAt})
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m2", Role: api.RoleAssistant, Content: "hi", CreatedAt: sess.CreatedAt})
+
+	forked, err := sm.Fork(ctx, sess.ID, "Forked")
+	if err != nil {
+		t.Fatalf("fork session: %v", err)
+	}
+
+	storedMsgs, err := store.GetMessages(ctx, forked.ID, 0)
+	if err != nil {
+		t.Fatalf("get forked messages: %v", err)
+	}
+	if len(storedMsgs) != 2 {
+		t.Fatalf("expected 2 stored messages, got %d", len(storedMsgs))
+	}
+	for _, m := range storedMsgs {
+		if m.ID == "m1" || m.ID == "m2" {
+			t.Errorf("forked message reused source ID %q", m.ID)
+		}
+		if m.ID == "" {
+			t.Error("forked message has empty ID")
+		}
+	}
+}
+
 func TestSessionManager_Fork_DefaultName(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -334,11 +370,48 @@ func TestSessionManager_Metrics(t *testing.T) {
 	}
 }
 
+func TestSessionManager_Setters_Synchronized(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	metrics := &recordingMetrics{}
+	hook := &recordingHookRunner{}
+	sm.SetMetricsCollector(metrics)
+	sm.SetHookRunner(hook)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sm.SetMetricsCollector(metrics)
+			sm.SetHookRunner(hook)
+		}()
+	}
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = sm.Start(ctx, "/tmp/proj")
+		}()
+	}
+	wg.Wait()
+}
+
+type recordingHookRunner struct{}
+
+func (r *recordingHookRunner) Run(_ context.Context, _ api.HookData) error { return nil }
+
 type recordingMetrics struct {
+	mu          sync.Mutex
 	counterName string
 }
 
 func (r *recordingMetrics) IncCounter(name string, _ ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.counterName = name
 }
 

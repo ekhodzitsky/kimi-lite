@@ -22,6 +22,7 @@ var ErrWebSearchNotConfigured = errors.New("web search provider is not configure
 // HTTPWebSearcher performs web searches against a configurable HTTP JSON API.
 type HTTPWebSearcher struct {
 	endpoint string
+	u        *url.URL
 	apiKey   string
 	client   *http.Client
 }
@@ -41,12 +42,17 @@ func NewHTTPWebSearcher(endpoint, apiKey string, client *http.Client, timeout ti
 	}
 	if client == nil {
 		client = netutil.SecureHTTPClient()
+	} else {
+		// Clone to avoid mutating the caller's client.
+		clientCopy := *client
+		client = &clientCopy
 	}
 	if timeout > 0 {
 		client.Timeout = timeout
 	}
 	return &HTTPWebSearcher{
 		endpoint: endpoint,
+		u:        u,
 		apiKey:   apiKey,
 		client:   client,
 	}, nil
@@ -68,9 +74,9 @@ func (s *HTTPWebSearcher) Search(ctx context.Context, query string, opts api.Web
 		opts.Limit = 20
 	}
 
-	u, err := url.Parse(s.endpoint)
+	u, err := url.Parse(s.u.String())
 	if err != nil {
-		return nil, fmt.Errorf("parse endpoint: %w", err)
+		return nil, fmt.Errorf("clone endpoint URL: %w", err)
 	}
 	q := u.Query()
 	q.Set("q", query)
@@ -103,6 +109,9 @@ func (s *HTTPWebSearcher) Search(ctx context.Context, query string, opts api.Web
 	var results []api.WebSearchResult
 	if err := json.Unmarshal(body, &results); err != nil {
 		return nil, fmt.Errorf("decode web search response: %w", err)
+	}
+	if results == nil {
+		return nil, fmt.Errorf("web search returned null results")
 	}
 	return results, nil
 }

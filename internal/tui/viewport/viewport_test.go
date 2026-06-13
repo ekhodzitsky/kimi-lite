@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 )
@@ -21,8 +22,8 @@ func TestNew(t *testing.T) {
 	if !m.autoScroll {
 		t.Error("autoScroll should be true by default")
 	}
-	if m.vp.MouseWheelEnabled != true {
-		t.Error("MouseWheelEnabled should be true")
+	if m.vp.MouseWheelEnabled != false {
+		t.Error("MouseWheelEnabled should be false so the wrapper handles wheel events")
 	}
 }
 
@@ -208,4 +209,44 @@ func TestScrollIndicatorVisible(t *testing.T) {
 	// When at bottom, the indicator logic may still show it depending on viewport internals
 	// We just verify View() doesn't panic
 	_ = view.Content
+}
+
+func TestScrollIndicatorPreservesLastLine(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80, 5)
+	// With height 5, GotoTop shows the first 5 lines; "VISIBLE_BOTTOM" is the
+	// last rendered line and must not be overwritten by the scroll indicator.
+	m.SetContent("line1\nline2\nline3\nline4\nVISIBLE_BOTTOM\nline6\nline7\nline8")
+	m.GotoTop()
+
+	rendered := ansi.Strip(m.View().Content)
+	if !strings.Contains(rendered, "VISIBLE_BOTTOM") {
+		t.Error("View should preserve the last rendered content line alongside the indicator")
+	}
+	if !strings.Contains(rendered, "▼") {
+		t.Error("View should contain scroll indicator when not at bottom")
+	}
+}
+
+func TestMouseWheelSingleScrollDistance(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80, 5)
+	m.SetContent("1\n2\n3\n4\n5\n6\n7\n8\n9\n10")
+	m.GotoBottom()
+
+	before := m.vp.YOffset()
+	updated, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	vm := updated.(*Model)
+	after := vm.vp.YOffset()
+
+	want := before - mouseWheelScrollLines
+	if after != want {
+		t.Errorf("YOffset = %d, want %d (scrolled %d lines)", after, want, before-after)
+	}
 }

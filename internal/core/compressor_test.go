@@ -571,6 +571,70 @@ func TestContextCompressor_Compact_PairAwareBoundary_MultipleToolCalls(t *testin
 	}
 }
 
+func TestContextCompressor_Compact_SummaryTimestampCollisions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	shared := time.Now().UTC().Add(-time.Hour)
+	systemMsg := api.Message{
+		ID:        "sys1",
+		Role:      api.RoleSystem,
+		Content:   "You are a helpful coding assistant.",
+		CreatedAt: shared,
+	}
+	_ = store.AppendMessage(ctx, sess.ID, systemMsg)
+
+	// Seed recent messages that all collide at or before the summary timestamp.
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{
+		ID:        "m0",
+		Role:      api.RoleUser,
+		Content:   "zeroth",
+		CreatedAt: shared,
+	})
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{
+		ID:        "m1",
+		Role:      api.RoleUser,
+		Content:   "first",
+		CreatedAt: shared,
+	})
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{
+		ID:        "m2",
+		Role:      api.RoleUser,
+		Content:   "second",
+		CreatedAt: shared,
+	})
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{
+		ID:        "m3",
+		Role:      api.RoleAssistant,
+		Content:   "third",
+		CreatedAt: shared,
+	})
+
+	llm := &mockLLMClient{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			return &api.Message{Content: "summary"}, nil
+		},
+	}
+
+	compressor := NewContextCompressor(llm, 0, 0)
+	_, err := compressor.Compact(ctx, store, sess.ID, 2)
+	if err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	if len(msgs) != 4 { // 1 leading system + 1 summary + 2 recent
+		t.Fatalf("expected 4 messages after compact, got %d", len(msgs))
+	}
+	for i := 1; i < len(msgs); i++ {
+		if !msgs[i-1].CreatedAt.Before(msgs[i].CreatedAt) {
+			t.Errorf("msgs[%d].CreatedAt (%v) not before msgs[%d].CreatedAt (%v)", i-1, msgs[i-1].CreatedAt, i, msgs[i].CreatedAt)
+		}
+	}
+}
+
 func TestContextCompressor_Compact_SummaryTimestampBetweenLeadingAndRecent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -699,6 +763,19 @@ type scalingEstimator struct {
 }
 
 func (s *scalingEstimator) Estimate(msgs []api.Message) int { return len(msgs) * s.factor }
+
+func TestContextCompressor_Compact_NilLLM(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	compressor := NewContextCompressor(nil, 1000, 0)
+	_, err := compressor.Compact(ctx, store, sess.ID, 2)
+	if err == nil {
+		t.Fatal("expected error for nil LLM")
+	}
+}
 
 func TestContextCompressor_SetTokenEstimator(t *testing.T) {
 	t.Parallel()

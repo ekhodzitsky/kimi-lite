@@ -11,10 +11,19 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
+	msg := fmt.Sprintf("API error %d", e.StatusCode)
 	if e.Message != "" {
-		return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
+		msg = fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
 	}
-	return fmt.Sprintf("API error %d", e.StatusCode)
+	if e.Body != "" {
+		body := e.Body
+		const maxBody = 256
+		if len(body) > maxBody {
+			body = body[:maxBody] + "..."
+		}
+		msg = msg + ": " + body
+	}
+	return msg
 }
 
 // IsClientError reports whether the error is a 4xx status code.

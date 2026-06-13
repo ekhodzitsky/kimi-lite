@@ -22,6 +22,10 @@ func NewCompositeToolExecutor(executors ...api.ToolExecutor) *CompositeToolExecu
 		toolMap:   make(map[string]api.ToolExecutor),
 	}
 	for _, exec := range executors {
+		if exec == nil {
+			slog.Warn("nil executor skipped")
+			continue
+		}
 		for _, def := range exec.Definitions(context.Background()) {
 			if _, exists := c.toolMap[def.Name]; exists {
 				slog.Warn("tool definition collision detected, keeping first registration", "tool", def.Name)

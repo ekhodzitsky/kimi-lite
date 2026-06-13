@@ -24,7 +24,7 @@ func NewFallbackClient(primary, fallback api.LLMClient) *FallbackClient {
 // Chat delegates to primary, then fallback on failure.
 func (c *FallbackClient) Chat(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
 	msg, err := c.primary.Chat(ctx, messages, tools)
-	if err != nil && c.fallback != nil {
+	if err != nil && c.fallback != nil && !isClientError(err) {
 		slog.Warn("primary LLM failed, trying fallback", "error", err)
 		return c.fallback.Chat(ctx, messages, tools)
 	}
@@ -48,8 +48,10 @@ func isClientError(err error) bool {
 // Once content has been delivered, subsequent errors pass through unchanged.
 // This provides an at-most-once-content failover guarantee.
 func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
-	stream, err := c.primary.ChatStream(ctx, messages, tools)
+	primaryCtx, cancelPrimary := context.WithCancel(ctx)
+	stream, err := c.primary.ChatStream(primaryCtx, messages, tools)
 	if err != nil {
+		cancelPrimary()
 		if c.fallback != nil && !isClientError(err) {
 			slog.Warn("primary LLM stream failed, trying fallback", "error", err)
 			return c.fallback.ChatStream(ctx, messages, tools)
@@ -63,6 +65,7 @@ func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message,
 		select {
 		case chunk, ok := <-stream:
 			if !ok {
+				cancelPrimary()
 				if c.fallback != nil {
 					slog.Warn("primary LLM stream closed without chunks, trying fallback")
 					return c.fallback.ChatStream(ctx, messages, tools)
@@ -70,6 +73,7 @@ func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message,
 				return nil, fmt.Errorf("primary LLM stream closed without data")
 			}
 			if chunk.Error != nil {
+				cancelPrimary()
 				if c.fallback != nil && !isClientError(chunk.Error) {
 					slog.Warn("primary LLM stream returned pre-content error, trying fallback", "error", chunk.Error)
 					return c.fallback.ChatStream(ctx, messages, tools)
@@ -81,6 +85,7 @@ func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message,
 				out := make(chan api.StreamChunk, 64)
 				go func(first api.StreamChunk) {
 					defer close(out)
+					defer cancelPrimary()
 					select {
 					case out <- first:
 					case <-ctx.Done():
@@ -106,12 +111,14 @@ func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message,
 			}
 			// Empty chunk (no content, no error) — keep reading.
 		case <-time.After(5 * time.Second):
+			cancelPrimary()
 			if c.fallback != nil {
 				slog.Warn("primary LLM stream idle on first chunk, trying fallback")
 				return c.fallback.ChatStream(ctx, messages, tools)
 			}
 			return nil, fmt.Errorf("primary LLM stream idle timeout waiting for first chunk")
 		case <-ctx.Done():
+			cancelPrimary()
 			return nil, ctx.Err()
 		}
 	}

@@ -554,3 +554,30 @@ func TestMentionViewContainsPopup(t *testing.T) {
 		t.Error("expected View() to contain the completion candidate")
 	}
 }
+
+func TestMentionMultiByte(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{"docs/日本語.go"})
+
+	m.SetValue("prefix @日本語")
+	m.detectMention()
+
+	if !m.Completing() {
+		t.Fatal("expected completion for multi-byte @ mention")
+	}
+	if len(m.mention.candidates) != 1 || m.mention.candidates[0] != "docs/日本語.go" {
+		t.Errorf("candidates = %v, want [docs/日本語.go]", m.mention.candidates)
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	inp := updated.(*Model)
+	want := "prefix @docs/日本語.go"
+	if inp.Value() != want {
+		t.Errorf("value = %q, want %q", inp.Value(), want)
+	}
+}

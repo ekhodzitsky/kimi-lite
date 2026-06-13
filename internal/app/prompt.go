@@ -1,6 +1,20 @@
 package app
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+// stripLeadingTabs removes leading tab characters from every line in s.
+// It is used to strip Go source indentation from raw string literals so
+// that the rendered prompt does not contain spurious leading tabs.
+func stripLeadingTabs(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimLeft(line, "\t")
+	}
+	return strings.Join(lines, "\n")
+}
 
 // systemPromptVersion identifies the current system prompt revision.
 const systemPromptVersion = "v1"
@@ -10,7 +24,7 @@ const systemPromptVersion = "v1"
 // expectations, and sandbox/approval safety rules. skillsContent is appended
 // verbatim when non-empty.
 func systemPrompt(workingDir, skillsContent string) string {
-	prompt := fmt.Sprintf(`You are kimi-lite, a helpful AI coding assistant (prompt %s).
+	prompt := strings.TrimSpace(stripLeadingTabs(fmt.Sprintf(`You are kimi-lite, a helpful AI coding assistant (prompt %s).
 
 Your goal is to help the user write, read, debug, and understand code.
 You operate in a plan-then-act loop: before making changes, briefly explain
@@ -54,7 +68,7 @@ Safety & sandbox rules:
 - Destructive tools (write_file, str_replace_file, shell) may require user
   approval before execution, depending on the current approval mode.
 - Do not attempt to bypass the sandbox or approval mechanism.
-`, systemPromptVersion, workingDir)
+`, systemPromptVersion, workingDir)))
 	if skillsContent != "" {
 		prompt += "\n\nAdditional skills context:\n\n" + skillsContent
 	}

@@ -80,6 +80,27 @@ func TestNewErrorMessage(t *testing.T) {
 	}
 }
 
+func TestNewErrorMessage_Nil(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewErrorMessage(nil, st)
+
+	if m.Type != TypeError {
+		t.Errorf("Type = %d, want %d", m.Type, TypeError)
+	}
+	if m.Err != nil {
+		t.Error("Err should be nil")
+	}
+	if m.Content != "" {
+		t.Errorf("Content = %q, want empty", m.Content)
+	}
+
+	// Rendering should not panic.
+	m.SetWidth(80)
+	_ = m.View()
+}
+
 func TestMessageInit(t *testing.T) {
 	t.Parallel()
 

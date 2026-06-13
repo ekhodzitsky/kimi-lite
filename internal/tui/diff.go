@@ -12,10 +12,10 @@ func unifiedDiff(filename, oldContent, newContent string) string {
 
 // computeFileDiff reads the current file and computes a diff against the proposed content.
 func computeFileDiff(path string, proposed []byte, sandboxRoot string) string {
-	return core.ComputeFileDiff(path, proposed, sandboxRoot)
+	return core.ComputeFileDiff(path, proposed, sandboxRoot, nil)
 }
 
 // toolCallDiff returns a diff preview for pending write_file or str_replace_file calls.
 func toolCallDiff(call api.ToolCall, sandboxRoot string) string {
-	return core.ToolCallDiff(call, sandboxRoot)
+	return core.ToolCallDiff(call, sandboxRoot, nil)
 }

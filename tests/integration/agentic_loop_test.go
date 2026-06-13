@@ -50,10 +50,6 @@ func TestAgenticLoop(t *testing.T) {
 		t.Fatalf("write test file: %v", err)
 	}
 
-	// The executor interprets relative paths against the current working
-	// directory, so run the test from inside the sandbox.
-	t.Chdir(tmpDir)
-
 	// SQLite store on disk so the full persistence path is exercised.
 	dbPath := filepath.Join(tmpDir, "sessions.db")
 	st, err := store.NewSQLite(dbPath)
@@ -70,12 +66,13 @@ func TestAgenticLoop(t *testing.T) {
 	// LLM server that first requests a read_file tool call, then returns a
 	// final answer once it sees the tool result message.
 	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
 		var req chatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		_ = r.Body.Close()
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -91,7 +88,7 @@ func TestAgenticLoop(t *testing.T) {
 			writeSSE(w, `{"choices":[{"delta":{"content":"Done reading."},"finish_reason":""}]}`)
 			writeSSE(w, `{"choices":[{"delta":{},"finish_reason":"stop"}]}`)
 		} else {
-			writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"test.txt\"}"}}]},"finish_reason":"tool_calls"}]}`)
+			writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"%s\"}"}}]},"finish_reason":"tool_calls"}]}`, testFile))
 		}
 		writeSSE(w, "[DONE]")
 	}))
@@ -104,7 +101,10 @@ func TestAgenticLoop(t *testing.T) {
 		BaseURL:  llmServer.URL,
 		Timeout:  10 * time.Second,
 	}
-	llmClient := llm.NewClient(llmCfg, &http.Client{Timeout: 10 * time.Second})
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	t.Cleanup(httpClient.CloseIdleConnections)
+	llmClient := llm.NewClient(llmCfg, httpClient)
 
 	// Built-in tool executor sandboxed to the temp directory.
 	executor, err := core.NewBuiltInToolExecutor(core.ToolExecutorConfig{
@@ -188,7 +188,7 @@ func TestAgenticLoop(t *testing.T) {
 	if msgs[1].ToolCalls[0].Name != "read_file" {
 		t.Errorf("tool call name = %q, want read_file", msgs[1].ToolCalls[0].Name)
 	}
-	wantArgs := `{"path":"test.txt"}`
+	wantArgs := fmt.Sprintf(`{"path":"%s"}`, testFile)
 	if msgs[1].ToolCalls[0].Arguments != wantArgs {
 		t.Errorf("tool call arguments = %q, want %q (SQLite round-trip)", msgs[1].ToolCalls[0].Arguments, wantArgs)
 	}

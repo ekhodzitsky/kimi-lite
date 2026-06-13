@@ -90,6 +90,8 @@ type Message struct {
 	cachedView    string
 	cacheWidth    int
 	cacheExpanded bool
+
+	mu sync.RWMutex
 }
 
 // NewUserMessage creates a new user message.
@@ -125,8 +127,19 @@ func NewToolCallMessage(call api.ToolCall, st *styles.Styles) *Message {
 	}
 }
 
-// NewErrorMessage creates a new error display message.
+// NewErrorMessage creates a new error display message. A nil error is treated
+// as an empty error message rather than panicking.
 func NewErrorMessage(err error, st *styles.Styles) *Message {
+	if err == nil {
+		return &Message{
+			Type:    TypeError,
+			Content: "",
+			Err:     nil,
+			Role:    api.RoleSystem,
+			Styles:  st,
+			KeyMap:  DefaultKeyMap(),
+		}
+	}
 	return &Message{
 		Type:    TypeError,
 		Content: err.Error(),
@@ -150,6 +163,9 @@ func (m *Message) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // UpdateMsg processes a message and returns the resulting command.
 func (m *Message) UpdateMsg(msg tea.Msg) tea.Cmd {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		if key.Matches(msg, m.KeyMap.ToggleExpand) && m.Type == TypeToolCall {
@@ -157,7 +173,7 @@ func (m *Message) UpdateMsg(msg tea.Msg) tea.Cmd {
 			m.cacheWidth = -1
 		}
 		if key.Matches(msg, m.KeyMap.ToggleRawMode) && m.Type == TypeAssistant {
-			m.ToggleRawMode()
+			m.toggleRawModeLocked()
 			return func() tea.Msg { return RenderInvalidateMsg{} }
 		}
 	case tea.MouseReleaseMsg:
@@ -171,6 +187,9 @@ func (m *Message) UpdateMsg(msg tea.Msg) tea.Cmd {
 
 // View implements tea.Model.
 func (m *Message) View() tea.View {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	switch m.Type {
 	case TypeUser:
 		return tea.NewView(m.viewUser())
@@ -187,6 +206,8 @@ func (m *Message) View() tea.View {
 
 // SetWidth sets the rendering width.
 func (m *Message) SetWidth(w int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.Width != w {
 		m.cacheWidth = -1
 	}
@@ -195,6 +216,8 @@ func (m *Message) SetWidth(w int) {
 
 // AppendContent appends content to the message (for streaming).
 func (m *Message) AppendContent(s string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.Type != TypeAssistant {
 		return
 	}
@@ -204,15 +227,15 @@ func (m *Message) AppendContent(s string) {
 
 // SetStreaming marks whether the message is currently being streamed.
 func (m *Message) SetStreaming(streaming bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Streaming = streaming
 	if !m.Streaming {
 		m.needsRender = true
 	}
 }
 
-// SetRawMode toggles raw markdown rendering for assistant messages.
-// It clears the render cache so the next View() reflects the new mode.
-func (m *Message) SetRawMode(raw bool) {
+func (m *Message) setRawModeLocked(raw bool) {
 	if m.RawMode == raw {
 		return
 	}
@@ -222,9 +245,23 @@ func (m *Message) SetRawMode(raw bool) {
 	m.needsRender = true
 }
 
+func (m *Message) toggleRawModeLocked() {
+	m.setRawModeLocked(!m.RawMode)
+}
+
+// SetRawMode toggles raw markdown rendering for assistant messages.
+// It clears the render cache so the next View() reflects the new mode.
+func (m *Message) SetRawMode(raw bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setRawModeLocked(raw)
+}
+
 // ToggleRawMode flips the current raw-mode state.
 func (m *Message) ToggleRawMode() {
-	m.SetRawMode(!m.RawMode)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.toggleRawModeLocked()
 }
 
 // RenderInvalidateMsg signals that the transcript render cache needs to be rebuilt.
@@ -232,6 +269,8 @@ type RenderInvalidateMsg struct{}
 
 // SetToolResult sets the result for a tool call message.
 func (m *Message) SetToolResult(r api.ToolResult) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.ToolResult = &r
 	m.cacheWidth = -1
 }
@@ -348,7 +387,10 @@ func safeGlamourRender(content, theme string) (rendered string) {
 	}()
 
 	cr, _ := rendererCache.LoadOrStore(theme, &cachedRenderer{})
-	c := cr.(*cachedRenderer)
+	c, ok := cr.(*cachedRenderer)
+	if !ok {
+		return content
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

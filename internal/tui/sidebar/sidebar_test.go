@@ -330,7 +330,7 @@ func TestBuildTree(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("hello"), 0644)
 	_ = os.WriteFile(filepath.Join(tmpDir, "subdir", "nested.txt"), []byte("world"), 0644)
 
-	node, err := buildTree(tmpDir, 2)
+	node, err := buildTree(tmpDir, 2, true)
 	if err != nil {
 		t.Fatalf("buildTree() error = %v", err)
 	}
@@ -349,7 +349,7 @@ func TestBuildTreeSkipsHidden(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tmpDir, ".hidden"), []byte("secret"), 0644)
 	_ = os.WriteFile(filepath.Join(tmpDir, "visible"), []byte("hello"), 0644)
 
-	node, err := buildTree(tmpDir, 1)
+	node, err := buildTree(tmpDir, 1, true)
 	if err != nil {
 		t.Fatalf("buildTree() error = %v", err)
 	}
@@ -358,6 +358,34 @@ func TestBuildTreeSkipsHidden(t *testing.T) {
 		if child.Name == ".hidden" {
 			t.Error("buildTree should skip hidden files")
 		}
+	}
+}
+
+func TestBuildTreeSkipsSymlinks(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	realPath := filepath.Join(tmpDir, "real.txt")
+	linkPath := filepath.Join(tmpDir, "link.txt")
+	_ = os.WriteFile(realPath, []byte("hello"), 0644)
+	_ = os.Symlink(realPath, linkPath)
+
+	node, err := buildTree(tmpDir, 1, true)
+	if err != nil {
+		t.Fatalf("buildTree() error = %v", err)
+	}
+
+	hasReal := false
+	for _, child := range node.Children {
+		if child.Name == "link.txt" {
+			t.Error("buildTree should skip symlinked entries")
+		}
+		if child.Name == "real.txt" {
+			hasReal = true
+		}
+	}
+	if !hasReal {
+		t.Error("buildTree should still include real files")
 	}
 }
 

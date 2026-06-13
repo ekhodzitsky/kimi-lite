@@ -138,7 +138,7 @@ func newExportCmd(f *flags) *cobra.Command {
 		Use:   "export",
 		Short: "Export a session to a JSON file",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runExport(cmd.Context(), sessionID, outPath, f.configPath)
+			return runExport(cmd.Context(), sessionID, outPath, *f)
 		},
 	}
 	cmd.Flags().StringVarP(&sessionID, "session", "s", "", "session ID to export (required)")
@@ -154,7 +154,7 @@ func newImportCmd(f *flags) *cobra.Command {
 		Use:   "import",
 		Short: "Import a session from a JSON file",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runImport(cmd.Context(), inPath, f.configPath)
+			return runImport(cmd.Context(), inPath, *f)
 		},
 	}
 	cmd.Flags().StringVarP(&inPath, "input", "i", "", "input file path (required)")
@@ -179,18 +179,9 @@ func run(ctx context.Context, f flags) error {
 	}
 
 	// Load configuration
-	loader := config.NewLoader()
-	if f.configPath != "" {
-		loader.SetConfigFile(f.configPath)
-	}
-	cfg, err := loader.Load()
+	cfg, err := loadConfig(f.configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load config (%v), using defaults\n", err)
-		var err2 error
-		cfg, err2 = config.Default()
-		if err2 != nil {
-			return fmt.Errorf("load default config: %w", err2)
-		}
+		return err
 	}
 
 	// Apply CLI overrides
@@ -232,6 +223,10 @@ func run(ctx context.Context, f flags) error {
 	}
 
 	// Resolve session
+	if f.sessionID != "" && f.continueLast {
+		return fmt.Errorf("--session and --continue are mutually exclusive")
+	}
+
 	var session *api.Session
 	switch {
 	case f.sessionID != "":
@@ -262,7 +257,11 @@ func run(ctx context.Context, f flags) error {
 	}
 
 	// Print startup banner
-	resolvedModel, _ := llm.ResolveModelFromConfig(cfg)
+	resolvedModel, err := llm.ResolveModelFromConfig(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not resolve model (%v), using configured model\n", err)
+		resolvedModel = cfg.LLM.Model
+	}
 	fmt.Printf("[%s] v%s | model: %s\n", binaryName, version, resolvedModel)
 	if f.continueLast || f.sessionID != "" {
 		fmt.Printf("[Resuming session %s (%s)]\n", session.ID, session.Path)
@@ -270,6 +269,28 @@ func run(ctx context.Context, f flags) error {
 
 	// Run the TUI
 	return application.Run(ctx, session)
+}
+
+// loadConfig loads configuration from the given explicit path, or from the
+// default locations. Fallback to the built-in default config is only allowed
+// when no explicit path was provided.
+func loadConfig(configPath string) (*api.Config, error) {
+	loader := config.NewLoader()
+	if configPath != "" {
+		loader.SetConfigFile(configPath)
+	}
+	cfg, err := loader.Load()
+	if err != nil {
+		if configPath != "" {
+			return nil, fmt.Errorf("load config: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Warning: failed to load config (%v), using defaults\n", err)
+		cfg, err = config.Default()
+		if err != nil {
+			return nil, fmt.Errorf("load default config: %w", err)
+		}
+	}
+	return cfg, nil
 }
 
 // runACP starts the ACP server over stdin/stdout.
@@ -280,18 +301,13 @@ func runACP(ctx context.Context, f flags) error {
 	}
 
 	// Load configuration
-	loader := config.NewLoader()
-	if f.configPath != "" {
-		loader.SetConfigFile(f.configPath)
-	}
-	cfg, err := loader.Load()
+	cfg, err := loadConfig(f.configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load config (%v), using defaults\n", err)
-		var err2 error
-		cfg, err2 = config.Default()
-		if err2 != nil {
-			return fmt.Errorf("load default config: %w", err2)
-		}
+		return err
+	}
+
+	if f.pprofAddr != "" {
+		cfg.PprofAddr = f.pprofAddr
 	}
 
 	// Resolve the effective provider and validate its API key.
@@ -360,7 +376,11 @@ func runPrompt(ctx context.Context, application appRunner, session *api.Session,
 			}
 
 		case api.TurnEventApprovalRequest:
-			return fmt.Errorf("tool call %q requires approval; run with --yolo or use interactive mode", event.ToolCalls[0].Name)
+			toolName := "unknown"
+			if len(event.ToolCalls) > 0 {
+				toolName = event.ToolCalls[0].Name
+			}
+			return fmt.Errorf("tool call %q requires approval; run with --yolo or use interactive mode", toolName)
 
 		case api.TurnEventError:
 			if event.Error == nil {
@@ -402,21 +422,20 @@ type promptEventJSON struct {
 	Result  api.ToolResult `json:"result,omitempty"`
 }
 
-func runExport(ctx context.Context, sessionID, outPath, configPath string) error {
-	loader := config.NewLoader()
-	if configPath != "" {
-		loader.SetConfigFile(configPath)
+func runExport(ctx context.Context, sessionID, outPath string, f flags) error {
+	if err := writeDefaultConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write default config: %v\n", err)
 	}
-	cfg, err := loader.Load()
+
+	cfg, err := loadConfig(f.configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load config (%v), using defaults\n", err)
-		var err2 error
-		cfg, err2 = config.Default()
-		if err2 != nil {
-			return fmt.Errorf("load default config: %w", err2)
-		}
+		return err
 	}
-	application, err := newApp(cfg, false)
+	if f.pprofAddr != "" {
+		cfg.PprofAddr = f.pprofAddr
+	}
+
+	application, err := newApp(cfg, f.debug)
 	if err != nil {
 		return fmt.Errorf("initialize app: %w", err)
 	}
@@ -441,21 +460,20 @@ func runExport(ctx context.Context, sessionID, outPath, configPath string) error
 	return nil
 }
 
-func runImport(ctx context.Context, inPath, configPath string) error {
-	loader := config.NewLoader()
-	if configPath != "" {
-		loader.SetConfigFile(configPath)
+func runImport(ctx context.Context, inPath string, f flags) error {
+	if err := writeDefaultConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write default config: %v\n", err)
 	}
-	cfg, err := loader.Load()
+
+	cfg, err := loadConfig(f.configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load config (%v), using defaults\n", err)
-		var err2 error
-		cfg, err2 = config.Default()
-		if err2 != nil {
-			return fmt.Errorf("load default config: %w", err2)
-		}
+		return err
 	}
-	application, err := newApp(cfg, false)
+	if f.pprofAddr != "" {
+		cfg.PprofAddr = f.pprofAddr
+	}
+
+	application, err := newApp(cfg, f.debug)
 	if err != nil {
 		return fmt.Errorf("initialize app: %w", err)
 	}
@@ -491,6 +509,9 @@ func runDoctor(ctx context.Context, configPath string) error {
 	}
 	cfg, err := loader.Load()
 	if err != nil {
+		if configPath != "" {
+			return fmt.Errorf("load config: %w", err)
+		}
 		fmt.Printf("[FAIL] Config: %v\n", err)
 		issues = append(issues, "config")
 		var err2 error
@@ -562,14 +583,32 @@ func runDoctor(ctx context.Context, configPath string) error {
 	}
 
 	// MCP check (non-fatal)
-	mcpClient := mcp.NewClientFromConfig(cfg.MCP)
+	var mcpClient api.MCPClient
+	if len(cfg.MCPServers) > 0 {
+		clients := make(map[string]api.MCPClient, len(cfg.MCPServers))
+		for name, serverCfg := range cfg.MCPServers {
+			if !serverCfg.Enabled {
+				continue
+			}
+			cli, err := mcp.NewClientFromServerConfig(serverCfg, nil)
+			if err != nil {
+				fmt.Printf("[WARN] MCP server %s: invalid config: %v\n", name, err)
+				continue
+			}
+			clients[name] = cli
+		}
+		mcpClient = mcp.NewMultiClient(clients, cfg.MCPServers)
+	} else {
+		mcpClient = mcp.NewClientFromConfig(cfg.MCP)
+	}
+	defer func() { _ = mcpClient.Close() }()
+
 	mcpCtx, mcpCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer mcpCancel()
 	if err := mcpClient.Connect(mcpCtx); err != nil {
 		fmt.Printf("[WARN] MCP: %v\n", err)
 	} else {
 		fmt.Println("[OK]   MCP connected")
-		_ = mcpClient.Close()
 	}
 
 	if len(issues) > 0 {

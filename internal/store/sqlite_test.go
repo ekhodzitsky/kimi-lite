@@ -1298,3 +1298,138 @@ func TestSQLite_MigrationRunner(t *testing.T) {
 		}
 	})
 }
+
+func TestSQLite_WALSHMPermissions(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	s, err := NewSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("new sqlite: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	if _, err := s.CreateSession(ctx, "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		p := dbPath + suffix
+		info, err := os.Stat(p)
+		if err != nil {
+			if suffix == "" {
+				t.Fatalf("stat db file: %v", err)
+			}
+			continue
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Errorf("%s permissions = %o, want %o", p, info.Mode().Perm(), 0600)
+		}
+	}
+}
+
+func TestSQLite_ReplaceMessages_BumpsUpdatedAt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, err := s.CreateSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Wait a hair so the replacement timestamp is strictly later.
+	time.Sleep(10 * time.Millisecond)
+
+	newMsgs := []api.Message{
+		{ID: "n1", Role: api.RoleSystem, Content: "system", CreatedAt: time.Now().UTC()},
+		{ID: "n2", Role: api.RoleUser, Content: "user", CreatedAt: time.Now().UTC().Add(time.Millisecond)},
+	}
+	if err := s.ReplaceMessages(ctx, sess.ID, newMsgs); err != nil {
+		t.Fatalf("replace messages: %v", err)
+	}
+
+	got, err := s.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if !got.UpdatedAt.After(sess.UpdatedAt) {
+		t.Errorf("updated_at did not advance: %v -> %v", sess.UpdatedAt, got.UpdatedAt)
+	}
+}
+
+func TestSQLite_MigrateTurnsStateColumn(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "migrate.db")
+
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping sqlite: %v", err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE sessions (id TEXT PRIMARY KEY);`,
+		`CREATE TABLE turns (
+			id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			state INTEGER NOT NULL,
+			input TEXT NOT NULL DEFAULT '',
+			response TEXT NOT NULL DEFAULT '',
+			tool_calls TEXT,
+			results TEXT,
+			error TEXT,
+			started_at DATETIME NOT NULL,
+			ended_at DATETIME,
+			PRIMARY KEY (id, session_id),
+			FOREIGN KEY (session_id) REFERENCES sessions(id)
+		);`,
+		`INSERT INTO sessions (id) VALUES ('s1');`,
+		`INSERT INTO turns (id, session_id, state, input, started_at)
+		 VALUES ('t1', 's1', 1, 'hello', '2024-01-01 00:00:00');`,
+	}
+	for i, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("exec stmt %d: %v", i, err)
+		}
+	}
+
+	if err := migrateTurnsStateColumn(db); err != nil {
+		t.Fatalf("migrate turns state column: %v", err)
+	}
+
+	var typ string
+	if err := db.QueryRow(`SELECT type FROM pragma_table_info('turns') WHERE name = 'state'`).Scan(&typ); err != nil {
+		t.Fatalf("read state column type: %v", err)
+	}
+	if typ != "TEXT" {
+		t.Errorf("state column type = %q, want TEXT", typ)
+	}
+
+	var stateStr string
+	if err := db.QueryRow(`SELECT state FROM turns WHERE id = 't1'`).Scan(&stateStr); err != nil {
+		t.Fatalf("read migrated state: %v", err)
+	}
+	if stateStr != "1" {
+		t.Errorf("state value = %q, want %q", stateStr, "1")
+	}
+}
+
+func TestSQLite_Close_NilSafe(t *testing.T) {
+	t.Parallel()
+
+	var s *SQLite
+	if err := s.Close(); err != nil {
+		t.Errorf("nil receiver Close returned error: %v", err)
+	}
+
+	s2 := &SQLite{}
+	if err := s2.Close(); err != nil {
+		t.Errorf("nil db Close returned error: %v", err)
+	}
+}

@@ -15,6 +15,7 @@ import (
 // but not mapped through the RawConfig decode path.
 func TestDecodePopulatesEveryConfigField(t *testing.T) {
 	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
 	configPath := filepath.Join(tmpDir, "config.toml")
 	content := `
 [llm]
@@ -57,6 +58,9 @@ startup_timeout_ms = 10000
 tool_timeout_ms = 30000
 enabled_tools = ["read_file"]
 disabled_tools = ["write_file"]
+cwd = "~/mcp"
+[mcp_servers.test.env]
+SECRET = "$MCP_SECRET"
 
 [web_search]
 endpoint = "https://search.example.com"
@@ -79,7 +83,9 @@ focus_prev = "shift+tab"
 approve_yes = "y"
 approve_no = "n"
 approve_always = "a"
+approve_diff = "d"
 `
+	t.Setenv("MCP_SECRET", "mcp-secret-value")
 	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +212,15 @@ approve_always = "a"
 	assertNotEmpty("keybindings.approve_no", cfg.Keybindings.ApproveNo)
 	assertNotEmpty("keybindings.approve_always", cfg.Keybindings.ApproveAlways)
 	assertNotEmpty("keybindings.approve_diff", cfg.Keybindings.ApproveDiff)
+
+	// MCPServer env/cwd. Viper lower-cases map keys.
+	if got := srv.Env["secret"]; got != "mcp-secret-value" {
+		t.Errorf("expected mcp_servers.test.env.SECRET = %q, got %q", "mcp-secret-value", got)
+	}
+	wantCWD := filepath.Join(tmpDir, "mcp")
+	if srv.CWD != wantCWD {
+		t.Errorf("expected mcp_servers.test.cwd = %q, got %q", wantCWD, srv.CWD)
+	}
 
 	// Spot-check exact values for fields that previously drifted out of the
 	// RawConfig mirror.

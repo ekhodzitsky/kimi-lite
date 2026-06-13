@@ -207,11 +207,11 @@ func TestCommandSessions(t *testing.T) {
 	model := updated.(*Model)
 
 	if cmd == nil {
-		t.Fatal("expected command for SessionsMsg")
+		t.Fatal("expected command for sessions")
 	}
 	msg := cmd()
-	if _, ok := msg.(SessionsMsg); !ok {
-		t.Errorf("expected SessionsMsg, got %T", msg)
+	if _, ok := msg.(SessionsResultMsg); !ok {
+		t.Errorf("expected SessionsResultMsg, got %T", msg)
 	}
 	if len(model.messages) != 1 {
 		t.Errorf("messages length = %d, want 1", len(model.messages))
@@ -232,11 +232,11 @@ func TestCommandCheckpoint(t *testing.T) {
 	_ = updated.(*Model)
 
 	if cmd == nil {
-		t.Fatal("expected command for CheckpointMsg")
+		t.Fatal("expected command for checkpoint")
 	}
 	msg := cmd()
-	if _, ok := msg.(CheckpointMsg); !ok {
-		t.Errorf("expected CheckpointMsg, got %T", msg)
+	if _, ok := msg.(CheckpointResultMsg); !ok {
+		t.Errorf("expected CheckpointResultMsg, got %T", msg)
 	}
 }
 
@@ -1494,8 +1494,15 @@ func TestCheckpointMsg_Success(t *testing.T) {
 	gp := &fakeGitProvider{}
 	m.SetGitProvider(gp)
 
-	updated, _ := m.Update(CheckpointMsg{})
+	updated, cmd := m.Update(CheckpointMsg{})
 	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for checkpoint")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
 
 	if !gp.commitCalled {
 		t.Error("expected Commit to be called on git provider")
@@ -1503,18 +1510,18 @@ func TestCheckpointMsg_Success(t *testing.T) {
 	if gp.commitMsg != "" {
 		t.Errorf("commit message = %q, want empty (default)", gp.commitMsg)
 	}
-	if model.state != api.TurnIdle {
-		t.Errorf("state = %d, want TurnIdle", model.state)
+	if model2.state != api.TurnIdle {
+		t.Errorf("state = %d, want TurnIdle", model2.state)
 	}
 	found := false
-	for _, msg := range model.messages {
+	for _, msg := range model2.messages {
 		if strings.Contains(msg.Content, "Checkpoint created") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected success message, got messages: %v", model.messages)
+		t.Errorf("expected success message, got messages: %v", model2.messages)
 	}
 }
 
@@ -1531,21 +1538,28 @@ func TestCheckpointMsg_Error(t *testing.T) {
 	gp := &fakeGitProvider{err: errors.New("git failed")}
 	m.SetGitProvider(gp)
 
-	updated, _ := m.Update(CheckpointMsg{})
+	updated, cmd := m.Update(CheckpointMsg{})
 	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for checkpoint")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
 
 	if !gp.commitCalled {
 		t.Error("expected Commit to be called on git provider")
 	}
 	found := false
-	for _, msg := range model.messages {
+	for _, msg := range model2.messages {
 		if strings.Contains(msg.Content, "checkpoint failed") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected error message, got messages: %v", model.messages)
+		t.Errorf("expected error message, got messages: %v", model2.messages)
 	}
 }
 
@@ -1559,18 +1573,25 @@ func TestCheckpointMsg_NoGitProvider(t *testing.T) {
 	m.height = 40
 	m.updateLayout()
 
-	updated, _ := m.Update(CheckpointMsg{})
+	updated, cmd := m.Update(CheckpointMsg{})
 	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for checkpoint")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
 
 	found := false
-	for _, msg := range model.messages {
-		if strings.Contains(msg.Content, "No git provider available") {
+	for _, msg := range model2.messages {
+		if strings.Contains(msg.Content, "no git provider available") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected no-provider message, got messages: %v", model.messages)
+		t.Errorf("expected no-provider message, got messages: %v", model2.messages)
 	}
 }
 
@@ -1593,20 +1614,27 @@ func TestSessionsMsg_WithSessions(t *testing.T) {
 	}
 	m.SetStore(store)
 
-	updated, _ := m.Update(SessionsMsg{})
+	updated, cmd := m.Update(SessionsMsg{})
 	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for sessions")
+	}
 
-	if model.state != api.TurnIdle {
-		t.Errorf("state = %d, want TurnIdle", model.state)
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
+
+	if model2.state != api.TurnIdle {
+		t.Errorf("state = %d, want TurnIdle", model2.state)
 	}
-	if len(model.messages) != 2 {
-		t.Fatalf("messages length = %d, want 2", len(model.messages))
+	if len(model2.messages) != 2 {
+		t.Fatalf("messages length = %d, want 2", len(model2.messages))
 	}
-	if !strings.Contains(model.messages[0].Content, "s1") {
-		t.Errorf("first message should contain s1, got %q", model.messages[0].Content)
+	if !strings.Contains(model2.messages[0].Content, "s1") {
+		t.Errorf("first message should contain s1, got %q", model2.messages[0].Content)
 	}
-	if !strings.Contains(model.messages[1].Content, "s2") {
-		t.Errorf("second message should contain s2, got %q", model.messages[1].Content)
+	if !strings.Contains(model2.messages[1].Content, "s2") {
+		t.Errorf("second message should contain s2, got %q", model2.messages[1].Content)
 	}
 }
 
@@ -1623,18 +1651,25 @@ func TestSessionsMsg_Error(t *testing.T) {
 	store := &fakeStoreWithSessions{err: errors.New("db error")}
 	m.SetStore(store)
 
-	updated, _ := m.Update(SessionsMsg{})
+	updated, cmd := m.Update(SessionsMsg{})
 	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for sessions")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
 
 	found := false
-	for _, msg := range model.messages {
+	for _, msg := range model2.messages {
 		if strings.Contains(msg.Content, "list sessions") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected error message, got messages: %v", model.messages)
+		t.Errorf("expected error message, got messages: %v", model2.messages)
 	}
 }
 
@@ -1651,18 +1686,25 @@ func TestSessionsMsg_Empty(t *testing.T) {
 	store := &fakeStoreWithSessions{sessions: []api.Session{}}
 	m.SetStore(store)
 
-	updated, _ := m.Update(SessionsMsg{})
+	updated, cmd := m.Update(SessionsMsg{})
 	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for sessions")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
 
 	found := false
-	for _, msg := range model.messages {
+	for _, msg := range model2.messages {
 		if strings.Contains(msg.Content, "No sessions found") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected no-sessions message, got messages: %v", model.messages)
+		t.Errorf("expected no-sessions message, got messages: %v", model2.messages)
 	}
 }
 
@@ -1676,27 +1718,30 @@ func TestSessionsMsg_NoStore(t *testing.T) {
 	m.height = 40
 	m.updateLayout()
 
-	updated, _ := m.Update(SessionsMsg{})
+	updated, cmd := m.Update(SessionsMsg{})
 	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for sessions")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
 
 	found := false
-	for _, msg := range model.messages {
-		if strings.Contains(msg.Content, "No sessions available") {
+	for _, msg := range model2.messages {
+		if strings.Contains(msg.Content, "no sessions available") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected no-store message, got messages: %v", model.messages)
+		t.Errorf("expected no-store message, got messages: %v", model2.messages)
 	}
 }
 
 func TestCompactTimeout(t *testing.T) {
 	t.Parallel()
-
-	oldTimeout := compactTimeout
-	compactTimeout = 50 * time.Millisecond
-	defer func() { compactTimeout = oldTimeout }()
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
@@ -1704,6 +1749,10 @@ func TestCompactTimeout(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
+
+	appCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	m.appCtx = appCtx
 
 	m.SetCompressor(&slowCompressor{})
 	m.SetStore(&mockStore{})
@@ -1730,16 +1779,16 @@ func TestCompactTimeout(t *testing.T) {
 func TestClearMessagesTimeout(t *testing.T) {
 	t.Parallel()
 
-	oldTimeout := clearMessagesTimeout
-	clearMessagesTimeout = 50 * time.Millisecond
-	defer func() { clearMessagesTimeout = oldTimeout }()
-
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
 	m, _ := New(cfg, session, context.Background())
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
+
+	appCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	m.appCtx = appCtx
 
 	m.SetSessionManager(&slowSessionManager{})
 
@@ -2089,4 +2138,191 @@ func TestGoldenViewWaitingApproval(t *testing.T) {
 	})
 	m = updated.(*Model)
 	compareGolden(t, "view_waiting_approval", m.View().Content)
+}
+
+// capturingErrorTurnManager records the context passed to RunTurn and returns an error.
+type capturingErrorTurnManager struct {
+	capturedCtx context.Context
+}
+
+func (c *capturingErrorTurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	c.capturedCtx = ctx
+	return nil, errors.New("run turn failed")
+}
+
+func (c *capturingErrorTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+	return nil
+}
+
+func TestRunTurnError_CancelsContext(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	tm := &capturingErrorTurnManager{}
+	m.SetTurnManager(tm)
+
+	m.Update(input.SendMsg{Content: "hello"})
+
+	if tm.capturedCtx == nil {
+		t.Fatal("RunTurn was not called")
+	}
+	if !errors.Is(tm.capturedCtx.Err(), context.Canceled) {
+		t.Errorf("expected canceled context after RunTurn error, got %v", tm.capturedCtx.Err())
+	}
+}
+
+// errorResumeTurnManager returns an error from ResumeWithApproval.
+type errorResumeTurnManager struct {
+	resumeErr error
+}
+
+func (e *errorResumeTurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (e *errorResumeTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+	return e.resumeErr
+}
+
+func TestApprovalResponse_ResumeWithApprovalErrorReturnsErrorMsg(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	tm := &errorResumeTurnManager{resumeErr: errors.New("resume failed")}
+	m.SetTurnManager(tm)
+
+	calls := []api.ToolCall{{ID: "1", Name: "edit_file", Arguments: `{}`}}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 7})
+
+	updated, cmd := m.Update(ApprovalResponseMsg{Decision: api.ApprovalYes, CallID: "1"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected command after approval response")
+	}
+
+	// The response produces a batch with the resume command and a stream poll.
+	var errMsg ErrorMsg
+	batch := cmd()
+	if bm, ok := batch.(tea.BatchMsg); ok {
+		found := false
+		for _, c := range bm {
+			if c == nil {
+				continue
+			}
+			if msg, ok := c().(ErrorMsg); ok {
+				errMsg = msg
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected ErrorMsg in batch, got %T", batch)
+		}
+	} else if em, ok := batch.(ErrorMsg); ok {
+		errMsg = em
+	} else {
+		t.Fatalf("expected ErrorMsg, got %T", batch)
+	}
+
+	if !strings.Contains(errMsg.Err.Error(), "resume failed") {
+		t.Errorf("expected error to contain 'resume failed', got %v", errMsg.Err)
+	}
+
+	updated2, _ := model.Update(errMsg)
+	model2 := updated2.(*Model)
+	if model2.state != api.TurnError {
+		t.Errorf("state = %d, want TurnError", model2.state)
+	}
+}
+
+func TestReadStreamChunk_IgnoresStaleEventsAfterCancel(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+
+	ch := make(chan api.TurnEvent, 1)
+	ch <- api.TurnEvent{Type: api.TurnEventContent, Content: "stale"}
+
+	m.mu.Lock()
+	m.streamCh = ch
+	m.streamCanceled = true
+	m.mu.Unlock()
+
+	cmd := m.readStreamChunk()
+	if cmd == nil {
+		t.Fatal("expected command")
+	}
+	msg := cmd()
+	if msg != nil {
+		t.Errorf("expected stale event to be ignored, got %T", msg)
+	}
+}
+
+func TestRenderApprovalDialog_NilSession(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: t.TempDir()}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	calls := []api.ToolCall{{ID: "1", Name: "write_file", Arguments: `{}`}}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+
+	// Simulate a session being cleared while the dialog is active.
+	m.session = nil
+
+	background := "background"
+	view := m.renderApprovalDialog(background)
+	if view != background {
+		t.Errorf("expected background unchanged when session is nil, got %q", view)
+	}
+}
+
+func TestApprovalResponse_DedupesAlwaysAllNames(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	var setNames []string
+	m.SetAutoApproveSetter(func(name string) {
+		setNames = append(setNames, name)
+	})
+
+	calls := []api.ToolCall{
+		{ID: "1", Name: "write_file", Arguments: `{}`},
+		{ID: "2", Name: "write_file", Arguments: `{}`},
+	}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+
+	m.Update(ApprovalResponseMsg{Decision: api.ApprovalAlways, CallID: "1"})
+
+	if len(setNames) != 1 {
+		t.Errorf("autoApproveSetter called %d times, want 1", len(setNames))
+	}
+	if len(setNames) > 0 && setNames[0] != "write_file" {
+		t.Errorf("autoApproveSetter name = %q, want write_file", setNames[0])
+	}
 }

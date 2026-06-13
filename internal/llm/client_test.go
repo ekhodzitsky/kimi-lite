@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -1344,4 +1345,198 @@ func TestBuildChatRequest_MaxTokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClientChatStream_TerminalContentNotDropped(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Single payload with both content and finish_reason.
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"final"},"finish_reason":"stop"}]}
+
+`))
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "test-model",
+		Timeout: 5 * time.Second,
+	}, server.Client())
+
+	stream, err := client.ChatStream(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat stream: %v", err)
+	}
+
+	var contents []string
+	var done bool
+	for chunk := range stream {
+		if chunk.Error != nil {
+			t.Fatalf("stream error: %v", chunk.Error)
+		}
+		if chunk.Content != "" {
+			contents = append(contents, chunk.Content)
+		}
+		if chunk.Done {
+			done = true
+		}
+	}
+
+	if !done {
+		t.Fatal("expected done")
+	}
+	if len(contents) != 1 || contents[0] != "final" {
+		t.Fatalf("contents = %v, want [final]", contents)
+	}
+}
+
+func TestClientChat_EmptyRoleNormalized(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "", Content: "OK"},
+				FinishReason: "stop",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "test-model",
+		Timeout: 5 * time.Second,
+	}, server.Client())
+
+	msg, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if msg.Role != api.RoleAssistant {
+		t.Errorf("role = %q, want assistant", msg.Role)
+	}
+	if msg.Content != "OK" {
+		t.Errorf("content = %q, want OK", msg.Content)
+	}
+}
+
+func TestBackoff_NoShiftOverflow(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(api.LLMConfig{}, nil)
+
+	for _, attempt := range []int{32, 100, 1000} {
+		attempt := attempt
+		t.Run(fmt.Sprintf("attempt_%d", attempt), func(t *testing.T) {
+			t.Parallel()
+			delay := client.backoff(attempt)
+			if delay > maxBackoffDelay {
+				t.Errorf("backoff(%d) = %v, want <= %v", attempt, delay, maxBackoffDelay)
+			}
+			if delay < 0 {
+				t.Errorf("backoff(%d) = %v, want >= 0", attempt, delay)
+			}
+		})
+	}
+}
+
+func TestParseRetryAfter_NegativeClipped(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{"empty", "", 0},
+		{"negative integer", "-5", 0},
+		{"past http date", time.Now().UTC().Add(-5 * time.Minute).Format(http.TimeFormat), 0},
+		{"future http date", time.Now().UTC().Add(2 * time.Second).Format(http.TimeFormat), 2 * time.Second},
+		{"positive integer", "3", 3 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseRetryAfter(tt.value)
+			if tt.name == "future http date" {
+				// Allow small timing jitter.
+				if got < time.Second || got > 3*time.Second {
+					t.Errorf("parseRetryAfter(%q) = %v, want ~2s", tt.value, got)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("parseRetryAfter(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientChat_ClientErrorWrapped(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid request"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "test-model",
+		Timeout: 5 * time.Second,
+	}, server.Client())
+
+	_, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var apiErr *api.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *api.APIError in error chain, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", apiErr.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestClient_SetHeadersAndMetricsConcurrent(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(api.LLMConfig{BaseURL: "https://example.com", APIKey: "key", Model: "m"}, nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			client.SetHeaders(map[string]string{"X-Key": "value"})
+		}()
+		go func() {
+			defer wg.Done()
+			client.SetMetricsCollector(api.NoopMetricsCollector{})
+		}()
+	}
+	wg.Wait()
 }

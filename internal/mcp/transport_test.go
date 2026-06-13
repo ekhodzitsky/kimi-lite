@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -271,22 +272,40 @@ exit 1
 func TestStdioTransport_OversizedFrame(t *testing.T) {
 	t.Parallel()
 
-	// Script that prints a frame larger than maxFrameSize (8 MB).
-	script := `#!/bin/sh
-read line
-# Print a JSON object with a huge string value.
-printf '{"jsonrpc":"2.0","id":1,"result":{"x":"'
-python3 -c "print('A' * 9000000, end='')"
-printf '"}}\n'
-`
-
-	tmpDir := t.TempDir()
-	scriptPath := filepath.Join(tmpDir, "huge.sh")
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
-		t.Fatalf("write helper script: %v", err)
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available, cannot build oversized-frame helper")
 	}
 
-	tr := NewStdioTransport("/bin/sh", scriptPath)
+	helperSrc := `package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"time"
+)
+
+func main() {
+	var buf [1024]byte
+	_, _ = os.Stdin.Read(buf[:])
+	payload := strings.Repeat("A", 9*1024*1024)
+	fmt.Printf("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"x\":\"%s\"}}\n", payload)
+	time.Sleep(30 * time.Second)
+}
+`
+	tmpDir := t.TempDir()
+	helperSrcPath := filepath.Join(tmpDir, "hugeframe.go")
+	helperBinPath := filepath.Join(tmpDir, "hugeframe")
+	if err := os.WriteFile(helperSrcPath, []byte(helperSrc), 0644); err != nil {
+		t.Fatalf("write helper source: %v", err)
+	}
+	buildCmd := exec.Command("go", "build", "-o", helperBinPath, helperSrcPath)
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build helper: %v\n%s", err, out)
+	}
+
+	tr := NewStdioTransport(helperBinPath)
+	tr.closeTimeout = 100 * time.Millisecond
 	ctx := context.Background()
 
 	if err := tr.Connect(ctx); err != nil {
@@ -750,6 +769,76 @@ func TestStdioTransport_StartFailureCleanup(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "already connected") {
 		t.Fatalf("expected not 'already connected', got: %v", err)
+	}
+}
+
+func TestStdioTransport_CommandNotFound_MentionsCommand(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("definitely-missing-command-12345")
+	err := tr.Connect(context.Background())
+	if err == nil {
+		t.Fatal("expected error for missing command")
+	}
+	if !strings.Contains(err.Error(), "definitely-missing-command-12345") {
+		t.Fatalf("expected error to mention command name, got: %v", err)
+	}
+}
+
+func TestMinimalEnv_ExpandedSecretPatterns(t *testing.T) {
+	// Cannot run in parallel because it modifies process environment.
+	t.Setenv("MY_APP_TOKEN", "secret")
+	t.Setenv("MY_PRIVATE_KEY", "secret")
+	t.Setenv("MY_SESSION_COOKIE", "secret")
+	t.Setenv("MY_OAUTH_CLIENT_SECRET", "secret")
+	t.Setenv("PATH", "/usr/bin")
+
+	out := minimalEnv()
+	for _, e := range out {
+		key, _, _ := strings.Cut(e, "=")
+		upper := strings.ToUpper(key)
+		if strings.Contains(upper, "TOKEN") || strings.Contains(upper, "PRIVATE_KEY") ||
+			strings.Contains(upper, "COOKIE") || strings.Contains(upper, "OAUTH") {
+			t.Fatalf("minimalEnv should exclude secret-like key %q", key)
+		}
+	}
+
+	hasPath := false
+	for _, e := range out {
+		if strings.HasPrefix(e, "PATH=") {
+			hasPath = true
+			break
+		}
+	}
+	if !hasPath {
+		t.Fatal("minimalEnv should preserve PATH")
+	}
+}
+
+func TestStdioTransport_EnvOrderIsStable(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("/bin/sh")
+	tr.SetEnv(map[string]string{
+		"Z_VAR": "z",
+		"A_VAR": "a",
+		"M_VAR": "m",
+	})
+
+	env := tr.buildEnv()
+	var keys []string
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			keys = append(keys, k)
+		}
+	}
+	for i := 1; i < len(keys); i++ {
+		if keys[i] < keys[i-1] {
+			t.Fatalf("environment is not sorted: %v", keys)
+		}
+	}
+	if !slices.Contains(keys, "A_VAR") || !slices.Contains(keys, "M_VAR") || !slices.Contains(keys, "Z_VAR") {
+		t.Fatalf("expected custom env keys, got: %v", keys)
 	}
 }
 

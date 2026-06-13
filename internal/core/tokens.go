@@ -52,11 +52,21 @@ func (e *HeuristicTokenEstimator) Estimate(messages []api.Message) int {
 func (e *HeuristicTokenEstimator) estimateString(s string) int {
 	asciiBytes := 0
 	nonASCIIRunes := 0
-	for _, r := range s {
-		if r <= 127 {
-			asciiBytes += utf8.RuneLen(r)
-		} else {
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b < utf8.RuneSelf {
+			asciiBytes++
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r != utf8.RuneError {
 			nonASCIIRunes++
+			i += size
+		} else {
+			// Invalid UTF-8 byte: count as one non-ASCII token and advance.
+			nonASCIIRunes++
+			i++
 		}
 	}
 	return asciiBytes/4 + nonASCIIRunes

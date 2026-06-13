@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,16 +19,26 @@ import (
 // cyclicFakeLLM alternates between a tool-call response and a final content
 // response on successive calls.
 type cyclicFakeLLM struct {
+	mu    sync.Mutex
 	calls int
 }
 
 func (f *cyclicFakeLLM) Chat(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return &api.Message{Role: api.RoleAssistant, Content: "fake"}, nil
 }
 
 func (f *cyclicFakeLLM) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	ch := make(chan api.StreamChunk, 1)
-	defer close(ch)
 
 	call := f.calls
 	f.calls++
@@ -44,12 +55,15 @@ func (f *cyclicFakeLLM) ChatStream(ctx context.Context, messages []api.Message, 
 	} else {
 		ch <- api.StreamChunk{Content: "done", Done: true}
 	}
+	close(ch)
 	return ch, nil
 }
 
 func (f *cyclicFakeLLM) Models() []api.ModelInfo { return nil }
 
 func TestLongRunningTurns_NoLeaks(t *testing.T) {
+	t.Cleanup(func() { goleak.VerifyNone(t) })
+
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "long.db")
 
@@ -57,6 +71,7 @@ func TestLongRunningTurns_NoLeaks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 
 	session, err := st.CreateSession(context.Background(), tmpDir)
 	if err != nil {
@@ -90,10 +105,15 @@ func TestLongRunningTurns_NoLeaks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create tool executor: %v", err)
 	}
+	t.Cleanup(func() { _ = tools.Close() })
 
 	metrics := observability.NewCollector()
 	tm := core.NewTurnManager(llm, tools, approval, st, &staticConfig{cfg: cfg})
 	tm.SetMetricsCollector(metrics)
+	t.Cleanup(func() {
+		tm.CancelAll()
+		tm.Wait()
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -134,16 +154,4 @@ func TestLongRunningTurns_NoLeaks(t *testing.T) {
 	if metrics.CounterValue("turn.completed") != int64(turns) {
 		t.Errorf("turn.completed = %d, want %d", metrics.CounterValue("turn.completed"), turns)
 	}
-
-	// Tear down resources before leak check.
-	tm.CancelAll()
-	tm.Wait()
-	if err := tools.Close(); err != nil {
-		t.Errorf("close tools: %v", err)
-	}
-	if err := st.Close(); err != nil {
-		t.Errorf("close store: %v", err)
-	}
-
-	goleak.VerifyNone(t)
 }

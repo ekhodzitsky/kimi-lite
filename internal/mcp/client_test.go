@@ -488,6 +488,35 @@ func TestClient_CallTool_EmptyError(t *testing.T) {
 	}
 }
 
+func TestClient_CallTool_MalformedContent(t *testing.T) {
+	t.Parallel()
+
+	transport := &mockTransport{
+		sendFunc: func(ctx context.Context, method string, params any) (*JSONRPCResponse, error) {
+			return &JSONRPCResponse{
+				Result: mustMarshal(t, map[string]any{
+					"content": []map[string]any{
+						{"type": "text", "text": "valid"},
+						{"type": "text", "text": 123},
+						{"type": "text", "text": "after"},
+					},
+					"isError": false,
+				}),
+			}, nil
+		},
+	}
+
+	client := NewClient(transport)
+	got, err := client.CallTool(context.Background(), "test", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "valid\n[malformed content item]\nafter"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
 func TestClient_Connect_ProtocolVersion(t *testing.T) {
 	t.Parallel()
 

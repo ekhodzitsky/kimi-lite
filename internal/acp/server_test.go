@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +35,14 @@ type fakeAppRunner struct {
 	runTurnReturn    <-chan api.TurnEvent
 	runTurnErr       error
 
-	closeErr error
+	// runTurnBlock, when non-nil, blocks RunTurn until it is closed.
+	runTurnBlock <-chan struct{}
+	// runTurnStarted is closed by RunTurn once it has begun; useful for
+	// synchronizing overlapping prompt tests.
+	runTurnStarted chan struct{}
+
+	closeCalled bool
+	closeErr    error
 }
 
 func (f *fakeAppRunner) SetYolo(v bool) {
@@ -60,6 +69,19 @@ func (f *fakeAppRunner) RunTurn(ctx context.Context, sessionID, input string) (<
 	defer f.mu.Unlock()
 	f.runTurnSessionID = sessionID
 	f.runTurnInput = input
+
+	if f.runTurnStarted != nil {
+		close(f.runTurnStarted)
+		f.runTurnStarted = nil
+	}
+
+	if f.runTurnBlock != nil {
+		select {
+		case <-f.runTurnBlock:
+		case <-ctx.Done():
+		}
+	}
+
 	if f.runTurnReturn == nil {
 		ch := make(chan api.TurnEvent)
 		close(ch)
@@ -90,7 +112,16 @@ func (f *fakeAppRunner) RunTurn(ctx context.Context, sessionID, input string) (<
 }
 
 func (f *fakeAppRunner) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closeCalled = true
 	return f.closeErr
+}
+
+func (f *fakeAppRunner) wasClosed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closeCalled
 }
 
 // parseLine extracts a JSON-RPC response from a JSON line.
@@ -156,6 +187,16 @@ func TestServer_Initialize(t *testing.T) {
 }
 
 func TestServer_SessionNewAndLoad(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	}()
+
 	tmpDir := t.TempDir()
 	app := &fakeAppRunner{
 		startSessionReturn:  &api.Session{ID: "sess-new", Path: tmpDir},
@@ -432,5 +473,289 @@ func TestServer_PromptWithoutSession(t *testing.T) {
 	resp := parseLine(t, strings.TrimSpace(stdout.String()))
 	if resp.Error == nil || resp.Error.Code != -32603 {
 		t.Fatalf("expected no active session error, got %v", resp.Error)
+	}
+}
+
+func TestServer_AppCloseCalled(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if !app.wasClosed() {
+		t.Fatal("expected app.Close to be called")
+	}
+}
+
+func TestServer_OverlappingPromptsRejected(t *testing.T) {
+	ch := make(chan api.TurnEvent)
+	block := make(chan struct{})
+	started := make(chan struct{})
+	app := &fakeAppRunner{
+		startSessionReturn: &api.Session{ID: "sess-overlap", Path: "/tmp"},
+		runTurnReturn:      ch,
+		runTurnBlock:       block,
+		runTurnStarted:     started,
+	}
+	srv := NewServer(app, slog.Default())
+
+	rStdin, wStdin := io.Pipe()
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var runErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runErr = srv.Run(ctx, rStdin, &stdout)
+	}()
+
+	send(t, wStdin, "session/new", 1, map[string]any{})
+	time.Sleep(50 * time.Millisecond)
+	send(t, wStdin, "session/prompt", 2, map[string]any{"prompt": "first"})
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("prompt did not start")
+	}
+
+	send(t, wStdin, "session/prompt", 3, map[string]any{"prompt": "second"})
+	time.Sleep(50 * time.Millisecond)
+	close(block)
+	close(ch)
+	time.Sleep(50 * time.Millisecond)
+	wStdin.Close()
+
+	wg.Wait()
+
+	if runErr != nil && !errors.Is(runErr, context.Canceled) && !strings.Contains(runErr.Error(), "context canceled") {
+		t.Fatalf("unexpected run error: %v", runErr)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected at least 3 lines, got %d: %s", len(lines), stdout.String())
+	}
+
+	// Find the response for the second prompt (id 3); it must be an error.
+	var found bool
+	for _, line := range lines {
+		resp := parseLine(t, line)
+		if resp.ID == float64(3) {
+			found = true
+			if resp.Error == nil || resp.Error.Code != -32603 {
+				t.Fatalf("expected overlapping prompt error, got %v", resp.Error)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("did not find response for second prompt in %s", stdout.String())
+	}
+}
+
+func TestServer_LargeFrameAccepted(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+
+	// Build a frame larger than the 64 KB bufio.Scanner limit but smaller
+	// than the 8 MB max frame size to exercise the new reader path.
+	large := make([]byte, 128*1024)
+	for i := range large {
+		large[i] = 'x'
+	}
+	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"padding":"` + string(large) + `"}}` + "\n"
+
+	stdin := strings.NewReader(req)
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error != nil {
+		t.Fatalf("expected success for large frame, got %v", resp.Error)
+	}
+	if resp.ID != float64(1) {
+		t.Fatalf("expected id 1, got %v", resp.ID)
+	}
+}
+
+func TestServer_OversizedFrameRejected(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+
+	// Build a frame larger than the 8 MB max frame size.
+	large := make([]byte, maxFrameSize+1)
+	for i := range large {
+		large[i] = 'x'
+	}
+	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"padding":"` + string(large) + `"}}` + "\n"
+
+	stdin := strings.NewReader(req)
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32700 {
+		t.Fatalf("expected parse error for oversized frame, got %v", resp.Error)
+	}
+}
+
+func TestServer_InvalidWorkingDirRejected(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"workingDir":"/does/not/exist"}}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("expected invalid working directory error, got %v", resp.Error)
+	}
+}
+
+func TestServer_SessionNewRestoresCwdOnError(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	}()
+
+	tmpDir := t.TempDir()
+	app := &fakeAppRunner{
+		startSessionErr: errors.New("session failure"),
+	}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"workingDir":"` + tmpDir + `"}}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd after run: %v", err)
+	}
+	resolvedCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatalf("eval symlinks cwd: %v", err)
+	}
+	resolvedOrig, err := filepath.EvalSymlinks(origDir)
+	if err != nil {
+		t.Fatalf("eval symlinks orig: %v", err)
+	}
+	if resolvedCwd != resolvedOrig {
+		t.Fatalf("cwd not restored: got %q want %q", resolvedCwd, resolvedOrig)
+	}
+}
+
+func TestServer_LoadSessionChangesCwd(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	}()
+
+	tmpDir := t.TempDir()
+	app := &fakeAppRunner{
+		resumeSessionReturn: &api.Session{ID: "sess-load", Path: tmpDir},
+	}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"sess-load"}}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error != nil {
+		t.Fatalf("unexpected load error: %v", resp.Error)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd after run: %v", err)
+	}
+	resolvedCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatalf("eval symlinks cwd: %v", err)
+	}
+	resolvedTmp, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatalf("eval symlinks tmp: %v", err)
+	}
+	if resolvedCwd != resolvedTmp {
+		t.Fatalf("cwd not changed to session path: got %q want %q", resolvedCwd, resolvedTmp)
+	}
+}
+
+func TestServer_ApprovalDiffForwarded(t *testing.T) {
+	ch := make(chan api.TurnEvent, 2)
+	ch <- api.TurnEvent{Type: api.TurnEventApprovalDiff, DiffCallID: "call-1", DiffContent: "diff-data"}
+	ch <- api.TurnEvent{Type: api.TurnEventDone, Content: "done"}
+	close(ch)
+
+	app := &fakeAppRunner{
+		startSessionReturn: &api.Session{ID: "sess-diff", Path: "/tmp"},
+		runTurnReturn:      ch,
+	}
+	srv := NewServer(app, slog.Default())
+
+	stdin := strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":"diff"}}` + "\n",
+	)
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %s", len(lines), stdout.String())
+	}
+
+	var update jsonRPCNotification
+	if err := json.Unmarshal([]byte(lines[1]), &update); err != nil {
+		t.Fatalf("unmarshal update: %v", err)
+	}
+	if update.Method != "session/update" {
+		t.Fatalf("expected session/update, got %s", update.Method)
+	}
+	params, _ := update.Params.(map[string]any)
+	if params["sessionUpdate"] != "approval_diff" {
+		t.Fatalf("unexpected update type: %v", params["sessionUpdate"])
+	}
+	if params["diffCallId"] != "call-1" {
+		t.Fatalf("unexpected diff call id: %v", params["diffCallId"])
+	}
+	if params["diffContent"] != "diff-data" {
+		t.Fatalf("unexpected diff content: %v", params["diffContent"])
 	}
 }

@@ -3,6 +3,7 @@ package hooks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -116,12 +117,16 @@ func TestRunner_PropagatesExecError(t *testing.T) {
 	r.execCommand = func(ctx context.Context, cfg api.HookConfig, data api.HookData) error {
 		return errors.New("boom")
 	}
-	if err := r.Run(context.Background(), api.HookData{Event: api.HookToolCall}); err == nil || err.Error() != "boom" {
-		t.Fatalf("unexpected error: %v", err)
+	err := r.Run(context.Background(), api.HookData{Event: api.HookToolCall})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected error to contain 'boom', got: %v", err)
 	}
 }
 
-func TestRunner_ContinueOnErrorSkipsError(t *testing.T) {
+func TestRunner_ContinueOnErrorAggregatesErrors(t *testing.T) {
 	t.Parallel()
 	calls := 0
 	r := NewRunner([]api.HookConfig{
@@ -132,23 +137,25 @@ func TestRunner_ContinueOnErrorSkipsError(t *testing.T) {
 			ContinueOnError: true,
 		},
 		{
-			Event:   api.HookToolCall,
-			Command: "sh",
-			Args:    []string{"-c", "exit 0"},
+			Event:           api.HookToolCall,
+			Command:         "sh",
+			Args:            []string{"-c", "exit 0"},
+			ContinueOnError: true,
 		},
 	})
 	r.execCommand = func(ctx context.Context, cfg api.HookConfig, data api.HookData) error {
 		calls++
-		if calls == 1 {
-			return errors.New("boom")
-		}
-		return nil
+		return fmt.Errorf("boom %d", calls)
 	}
-	if err := r.Run(context.Background(), api.HookData{Event: api.HookToolCall}); err != nil {
-		t.Fatal(err)
+	err := r.Run(context.Background(), api.HookData{Event: api.HookToolCall})
+	if err == nil {
+		t.Fatal("expected aggregated error")
 	}
 	if calls != 2 {
 		t.Fatalf("calls = %d, want 2", calls)
+	}
+	if !strings.Contains(err.Error(), "boom 1") || !strings.Contains(err.Error(), "boom 2") {
+		t.Fatalf("expected aggregated errors, got: %v", err)
 	}
 }
 
@@ -342,6 +349,97 @@ func captureExec(cfg api.HookConfig, data api.HookData) (string, error) {
 	cmd.Env = buildEnv(cfg.Env, data)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+func TestRunner_MissingTemplateKeyReturnsError(t *testing.T) {
+	t.Parallel()
+	r := NewRunner([]api.HookConfig{{
+		Event:   api.HookToolCall,
+		Command: "sh",
+		Args:    []string{"-c", "echo {{.MissingField}}"},
+	}})
+	if err := r.Run(context.Background(), api.HookData{Event: api.HookToolCall}); err == nil {
+		t.Fatal("expected missing template key error")
+	}
+}
+
+func TestRunner_DeepCopiesConfig(t *testing.T) {
+	t.Parallel()
+	cfg := []api.HookConfig{{
+		Event:   api.HookToolCall,
+		Command: "sh",
+		Args:    []string{"-c", "echo {{.ToolName}}"},
+		Env:     map[string]string{"KEEP": "original"},
+	}}
+	r := NewRunner(cfg)
+	// Mutate the original slice and map after construction.
+	cfg[0].Args[0] = "echo changed"
+	cfg[0].Env["KEEP"] = "mutated"
+	cfg[0].Env["NEW"] = "new"
+
+	var got api.HookConfig
+	r.execCommand = func(ctx context.Context, cfg api.HookConfig, data api.HookData) error {
+		got = cfg
+		return nil
+	}
+	if err := r.Run(context.Background(), api.HookData{Event: api.HookToolCall, ToolName: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if got.Args[0] != "-c" {
+		t.Fatalf("args mutated: %v", got.Args)
+	}
+	if got.Env["KEEP"] != "original" {
+		t.Fatalf("env mutated: %v", got.Env)
+	}
+	if _, ok := got.Env["NEW"]; ok {
+		t.Fatal("env should not contain NEW")
+	}
+}
+
+func TestExecHook_TruncatesLargeOutput(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	cfg := api.HookConfig{
+		Event:   api.HookToolCall,
+		Command: "sh",
+		Args:    []string{"-c", `head -c 2097152 /dev/zero | tr '\0' 'x'; exit 1`},
+	}
+	err := execHook(context.Background(), cfg, api.HookData{Event: api.HookToolCall})
+	if err == nil {
+		t.Fatal("expected error for non-zero exit")
+	}
+	if !strings.Contains(err.Error(), "[truncated]") {
+		t.Fatalf("expected truncation marker, got: %v", err)
+	}
+}
+
+func TestExecHook_ParentDeadlineDistinguishesFromHookTimeout(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	cfg := api.HookConfig{
+		Event:   api.HookToolCall,
+		Command: "sh",
+		Args:    []string{"-c", "sleep 10"},
+		Timeout: time.Minute,
+	}
+	parentCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(50*time.Millisecond))
+	defer cancel()
+	start := time.Now()
+	err := execHook(parentCtx, cfg, api.HookData{Event: api.HookToolCall})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected parent deadline error")
+	}
+	if !strings.Contains(err.Error(), "parent context") {
+		t.Fatalf("expected parent context error, got: %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("parent deadline took too long to propagate: %v", elapsed)
+	}
 }
 
 func envMap(env []string) map[string]string {

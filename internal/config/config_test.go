@@ -191,7 +191,7 @@ model = "kimi-k2.5"
 }
 
 func TestEnvVarResolution_MissingVar(t *testing.T) {
-	os.Unsetenv("TEST_API_KEY_MISSING")
+	t.Setenv("TEST_API_KEY_MISSING", "")
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
@@ -201,7 +201,9 @@ api_key = "$TEST_API_KEY_MISSING"
 model = "kimi-k2.5"
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
-	os.WriteFile(configPath, []byte(content), 0644)
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(tmpDir)
 
 	loader := NewLoader()
@@ -210,8 +212,8 @@ model = "kimi-k2.5"
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	if cfg.LLM.APIKey != "$TEST_API_KEY_MISSING" {
-		t.Errorf("expected API key %q, got %q", "$TEST_API_KEY_MISSING", cfg.LLM.APIKey)
+	if cfg.LLM.APIKey != "" {
+		t.Errorf("expected empty API key when env var is set to empty, got %q", cfg.LLM.APIKey)
 	}
 }
 
@@ -239,11 +241,10 @@ func TestExpandPath(t *testing.T) {
 
 func TestEnsureConfigDir_Permissions(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 
-	dir, err := EnsureConfigDir()
+	dir, err := EnsureConfigDirAt(tmpDir)
 	if err != nil {
-		t.Fatalf("EnsureConfigDir() error: %v", err)
+		t.Fatalf("EnsureConfigDirAt() error: %v", err)
 	}
 
 	info, err := os.Stat(dir)
@@ -257,16 +258,12 @@ func TestEnsureConfigDir_Permissions(t *testing.T) {
 
 func TestWriteDefaultConfig_Permissions(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 
-	configDir, _ := os.UserConfigDir()
-	os.RemoveAll(filepath.Join(configDir, "kimi-lite"))
-
-	if err := WriteDefaultConfig(); err != nil {
-		t.Fatalf("WriteDefaultConfig() error: %v", err)
+	if err := WriteDefaultConfigTo(tmpDir); err != nil {
+		t.Fatalf("WriteDefaultConfigTo() error: %v", err)
 	}
 
-	configPath := filepath.Join(configDir, "kimi-lite", "config.toml")
+	configPath := filepath.Join(tmpDir, "config.toml")
 	info, err := os.Stat(configPath)
 	if err != nil {
 		t.Fatalf("stat config file: %v", err)
@@ -278,20 +275,10 @@ func TestWriteDefaultConfig_Permissions(t *testing.T) {
 
 func TestWriteDefaultConfig(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	expectedPath := filepath.Join(tmpDir, "config.toml")
 
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		t.Fatalf("UserConfigDir error: %v", err)
-	}
-	expectedPath := filepath.Join(configDir, "kimi-lite", "config.toml")
-
-	// Remove if exists from previous test run
-	os.RemoveAll(filepath.Join(configDir, "kimi-lite"))
-
-	err = WriteDefaultConfig()
-	if err != nil {
-		t.Fatalf("WriteDefaultConfig() error: %v", err)
+	if err := WriteDefaultConfigTo(tmpDir); err != nil {
+		t.Fatalf("WriteDefaultConfigTo() error: %v", err)
 	}
 
 	if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
@@ -299,9 +286,8 @@ func TestWriteDefaultConfig(t *testing.T) {
 	}
 
 	// Verify it's idempotent
-	err = WriteDefaultConfig()
-	if err != nil {
-		t.Fatalf("WriteDefaultConfig() second call error: %v", err)
+	if err := WriteDefaultConfigTo(tmpDir); err != nil {
+		t.Fatalf("WriteDefaultConfigTo() second call error: %v", err)
 	}
 
 	content, err := os.ReadFile(expectedPath)
@@ -318,17 +304,11 @@ func TestWriteDefaultConfig(t *testing.T) {
 
 func TestWriteDefaultConfig_RoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	t.Setenv("MOONSHOT_API_KEY", "")
+	configPath := filepath.Join(tmpDir, "config.toml")
 
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		t.Fatalf("UserConfigDir error: %v", err)
-	}
-	configPath := filepath.Join(configDir, "kimi-lite", "config.toml")
-	os.RemoveAll(filepath.Join(configDir, "kimi-lite"))
-
-	if err := WriteDefaultConfig(); err != nil {
-		t.Fatalf("WriteDefaultConfig() error: %v", err)
+	if err := WriteDefaultConfigTo(tmpDir); err != nil {
+		t.Fatalf("WriteDefaultConfigTo() error: %v", err)
 	}
 
 	loader := NewLoader()
@@ -801,5 +781,94 @@ func TestValidate_Hooks(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("expected error to contain %q, got: %s", want, msg)
 		}
+	}
+}
+
+func TestValidate_Nil(t *testing.T) {
+	err := Validate(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil") {
+		t.Fatalf("expected nil config error, got: %v", err)
+	}
+}
+
+func TestLoader_MCPServerEnvAndCWD(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("MCP_SECRET", "super-secret")
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := `
+[llm]
+provider = "moonshot"
+api_key = "key"
+model = "kimi-k2.5"
+
+[mcp_servers.fs]
+transport = "stdio"
+command = "npx"
+enabled = true
+cwd = "~/mcp"
+[mcp_servers.fs.env]
+SECRET = "$MCP_SECRET"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader()
+	loader.SetConfigFile(configPath)
+	cfg, err := loader.Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	srv, ok := cfg.MCPServers["fs"]
+	if !ok {
+		t.Fatal("expected mcp_servers.fs")
+	}
+	if got := srv.Env["secret"]; got != "super-secret" {
+		t.Errorf("expected env SECRET resolved to %q, got %q", "super-secret", got)
+	}
+	wantCWD := filepath.Join(tmpDir, "mcp")
+	if srv.CWD != wantCWD {
+		t.Errorf("expected cwd %q, got %q", wantCWD, srv.CWD)
+	}
+}
+
+func TestLoader_ExplicitConfigError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("not valid toml [[["), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader()
+	loader.SetConfigFile(configPath)
+	if _, err := loader.Load(); err == nil {
+		t.Fatal("expected error for invalid explicit config")
+	}
+}
+
+func TestLoader_MissingDefaultConfigFallsBack(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("MOONSHOT_API_KEY", "default-key")
+	t.Chdir(tmpDir)
+
+	loader := NewLoader()
+	cfg, err := loader.Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.LLM.APIKey != "default-key" {
+		t.Errorf("expected API key resolved from env, got %q", cfg.LLM.APIKey)
+	}
+}
+
+func TestLoader_ExplicitMissingConfigReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	loader := NewLoader()
+	loader.SetConfigFile(filepath.Join(tmpDir, "does-not-exist.toml"))
+	if _, err := loader.Load(); err == nil {
+		t.Fatal("expected error for missing explicit config")
 	}
 }

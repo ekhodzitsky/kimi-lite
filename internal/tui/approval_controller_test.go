@@ -229,3 +229,31 @@ func TestApprovalController_CurrentCall(t *testing.T) {
 		t.Errorf("currentCall() = (%+v, %v), want (a, true)", call, ok)
 	}
 }
+
+func TestApprovalController_HandleResponse_MismatchedCallID(t *testing.T) {
+	t.Parallel()
+
+	ac := newApprovalController()
+	ac.startRequest([]api.ToolCall{
+		{ID: "a", Name: "read_file"},
+		{ID: "b", Name: "write_file"},
+	}, 1)
+
+	// A decision for a non-current call must be ignored and must not advance.
+	done, _, _ := ac.handleResponse(ApprovalResponseMsg{Decision: api.ApprovalYes, CallID: "b"})
+	if done {
+		t.Fatal("expected not done for mismatched CallID")
+	}
+	if ac.currentIndex() != 0 {
+		t.Errorf("currentIndex = %d, want 0", ac.currentIndex())
+	}
+	if _, ok := ac.decisions["b"]; ok {
+		t.Error("decision for non-current call should not be recorded")
+	}
+
+	// An unknown CallID is also ignored.
+	done, _, _ = ac.handleResponse(ApprovalResponseMsg{Decision: api.ApprovalYes, CallID: "unknown"})
+	if done {
+		t.Fatal("expected not done for unknown CallID")
+	}
+}

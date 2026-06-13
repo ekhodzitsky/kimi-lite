@@ -29,7 +29,9 @@ type Model struct {
 // New creates a new viewport model.
 func New(st *styles.Styles) *Model {
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
-	vp.MouseWheelEnabled = true
+	// Mouse wheel events are handled explicitly below; disable the underlying
+	// viewport handler to avoid double-scrolling.
+	vp.MouseWheelEnabled = false
 	return &Model{
 		vp:         vp,
 		styles:     st,
@@ -109,10 +111,11 @@ func (m *Model) View() tea.View {
 	if m.scrollIndicatorVisible() {
 		indicator := m.scrollIndicator()
 		lines := strings.Split(content, "\n")
-		for i := range lines {
-			if i == len(lines)-1 {
-				lines[i] = indicator
-			}
+		if len(lines) > 0 {
+			last := len(lines) - 1
+			// Append the indicator to the last line instead of replacing it,
+			// so the final line of content remains visible.
+			lines[last] = lines[last] + " " + indicator
 		}
 		content = strings.Join(lines, "\n")
 	}

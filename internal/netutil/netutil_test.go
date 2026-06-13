@@ -2,12 +2,28 @@ package netutil
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// nopConn is a minimal net.Conn implementation used by tests to avoid leaking
+// net.Pipe ends.
+type nopConn struct{ closed atomic.Bool }
+
+func (c *nopConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c *nopConn) Write(b []byte) (int, error)      { return len(b), nil }
+func (c *nopConn) Close() error                     { c.closed.Store(true); return nil }
+func (c *nopConn) LocalAddr() net.Addr              { return nil }
+func (c *nopConn) RemoteAddr() net.Addr             { return nil }
+func (c *nopConn) SetDeadline(time.Time) error      { return nil }
+func (c *nopConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *nopConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestIsBlockedHost(t *testing.T) {
 	t.Parallel()
@@ -58,8 +74,7 @@ func TestSecureTransport_DialContext_ResolvesOnce(t *testing.T) {
 	}
 
 	fakeDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		c1, _ := net.Pipe()
-		return c1, nil
+		return &nopConn{}, nil
 	}
 
 	transport := secureTransport(mockLookup, fakeDial)
@@ -85,8 +100,7 @@ func TestSecureTransport_DialContext_DialsValidatedIP(t *testing.T) {
 
 	fakeDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialedAddr = addr
-		c1, _ := net.Pipe()
-		return c1, nil
+		return &nopConn{}, nil
 	}
 
 	transport := secureTransport(mockLookup, fakeDial)
@@ -203,5 +217,90 @@ func TestSecureTransport_DialContext_BlocksLocalhost(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "blocked host") {
 		t.Fatalf("expected blocked host error, got: %v", err)
+	}
+}
+
+func TestIsBlockedHost_IPv6ZoneIdentifier(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"fe80::1%eth0", true},               // link-local with zone
+		{"::1%lo0", true},                    // loopback with zone
+		{"fd12:3456::1%en0", true},           // private with zone
+		{"8.8.8.8%eth0", false},              // IPv4 with zone should not panic
+		{"2001:4860:4860::8888%eth0", false}, // public with zone
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			t.Parallel()
+			if got := IsBlockedHost(tt.host); got != tt.want {
+				t.Errorf("IsBlockedHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSecureTransport_DialContext_BlocksMixedPublicPrivate(t *testing.T) {
+	t.Parallel()
+
+	mockLookup := func(ctx context.Context, host string) ([]string, error) {
+		return []string{"93.184.216.34", "127.0.0.1"}, nil
+	}
+	fakeDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return &nopConn{}, nil
+	}
+
+	transport := secureTransport(mockLookup, fakeDial)
+	_, err := transport.DialContext(context.Background(), "tcp", "example.com:80")
+	if err == nil {
+		t.Fatal("expected mixed public/private IPs to be blocked")
+	}
+	if !strings.Contains(err.Error(), "blocked host") {
+		t.Fatalf("expected blocked host error, got: %v", err)
+	}
+}
+
+func TestSecureTransport_DialContext_LookupError(t *testing.T) {
+	t.Parallel()
+
+	lookupErr := errors.New("dns failure")
+	mockLookup := func(ctx context.Context, host string) ([]string, error) {
+		return nil, lookupErr
+	}
+	fakeDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return &nopConn{}, nil
+	}
+
+	transport := secureTransport(mockLookup, fakeDial)
+	_, err := transport.DialContext(context.Background(), "tcp", "example.com:80")
+	if err == nil {
+		t.Fatal("expected lookup error")
+	}
+	if !errors.Is(err, lookupErr) {
+		t.Fatalf("expected wrapped lookup error, got: %v", err)
+	}
+}
+
+func TestSecureTransport_DialContext_EmptyIPList(t *testing.T) {
+	t.Parallel()
+
+	mockLookup := func(ctx context.Context, host string) ([]string, error) {
+		return []string{}, nil
+	}
+	fakeDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return &nopConn{}, nil
+	}
+
+	transport := secureTransport(mockLookup, fakeDial)
+	_, err := transport.DialContext(context.Background(), "tcp", "example.com:80")
+	if err == nil {
+		t.Fatal("expected error for empty IP list")
+	}
+	if !strings.Contains(err.Error(), "no IPs resolved") {
+		t.Fatalf("expected no IPs resolved error, got: %v", err)
 	}
 }
