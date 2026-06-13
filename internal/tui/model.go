@@ -948,44 +948,65 @@ func (m *Model) renderApprovalDialog(background string) string {
 	return overlayDialog(background, dialog, m.width, m.height)
 }
 
+// overlayDialog composites a dialog box over a background, centering it both
+// horizontally and vertically. The background is normalized to exactly width x
+// height cells before the dialog is painted on top, so the rendered output is
+// stable even on narrow terminals or when the dialog is larger than the
+// background. Wide runes (CJK/emoji) are handled via ansi.Cut.
 func overlayDialog(background string, dialog string, width int, height int) string {
 	bgLines := strings.Split(background, "\n")
+
+	// Normalize the background to exactly height lines.
+	if len(bgLines) < height {
+		bgLines = append(bgLines, make([]string, height-len(bgLines))...)
+	}
+	bgLines = bgLines[:height]
+
+	// Normalize each line to exactly width cells.
+	for i, line := range bgLines {
+		lineWidth := ansi.StringWidth(line)
+		switch {
+		case lineWidth > width:
+			bgLines[i] = ansi.Cut(line, 0, width)
+		case lineWidth < width:
+			bgLines[i] = line + strings.Repeat(" ", width-lineWidth)
+		}
+	}
+
 	dialogHeight := lipgloss.Height(dialog)
 	dialogWidth := lipgloss.Width(dialog)
 
 	startY := (height - dialogHeight) / 2
+	if startY < 0 {
+		startY = 0
+	}
 	startX := (width - dialogWidth) / 2
 	if startX < 0 {
 		startX = 0
 	}
-	if startY < 0 {
-		startY = 0
-	}
-
 	endX := startX + dialogWidth
 
-	dialogLines := strings.Split(dialog, "\n")
-	for i, dLine := range dialogLines {
+	for i, dLine := range strings.Split(dialog, "\n") {
 		y := startY + i
-		if y < 0 || y >= len(bgLines) {
+		if y < 0 || y >= height {
 			continue
 		}
 
-		bLine := bgLines[y]
-		bWidth := ansi.StringWidth(bLine)
-
-		var leftPart string
-		if startX > 0 {
-			if startX >= bWidth {
-				leftPart = bLine + strings.Repeat(" ", startX-bWidth)
-			} else {
-				leftPart = ansi.Cut(bLine, 0, startX)
-			}
+		// Clamp the dialog line so the rendered output never exceeds the
+		// requested width, even on very narrow terminals.
+		maxDialogWidth := width - startX
+		if ansi.StringWidth(dLine) > maxDialogWidth {
+			dLine = ansi.Cut(dLine, 0, maxDialogWidth)
 		}
 
-		var rightPart string
-		if endX < bWidth {
-			rightPart = ansi.Cut(bLine, endX, bWidth)
+		bgLine := bgLines[y]
+
+		var leftPart, rightPart string
+		if startX > 0 {
+			leftPart = ansi.Cut(bgLine, 0, startX)
+		}
+		if endX < width {
+			rightPart = ansi.Cut(bgLine, endX, width)
 		}
 
 		bgLines[y] = leftPart + dLine + rightPart
