@@ -4,11 +4,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -31,7 +34,6 @@ type flags struct {
 	configPath   string
 	model        string
 	yolo         bool
-	autoApprove  bool
 	continueLast bool
 	sessionID    string
 	debug        bool
@@ -40,7 +42,6 @@ type flags struct {
 // appRunner is the interface for the application layer, allowing mocking in tests.
 type appRunner interface {
 	SetYolo(bool)
-	SetAutoApprove(bool)
 	ResumeSession(ctx context.Context, id string) (*api.Session, error)
 	ContinueLastSession(ctx context.Context) (*api.Session, error)
 	StartSession(ctx context.Context) (*api.Session, error)
@@ -88,28 +89,27 @@ persistence, and MCP integration.`, binaryName),
 		},
 	}
 
-	rootCmd.Flags().StringVarP(&f.configPath, "config", "c", "", "config file path")
+	rootCmd.PersistentFlags().StringVarP(&f.configPath, "config", "c", "", "config file path")
 	rootCmd.Flags().StringVarP(&f.model, "model", "m", "", "override LLM model")
 	rootCmd.Flags().BoolVar(&f.yolo, "yolo", false, "auto-approve all tool calls")
-	rootCmd.Flags().BoolVar(&f.autoApprove, "auto", false, "auto-approve read-only tools (default)")
 	rootCmd.Flags().BoolVar(&f.continueLast, "continue", false, "resume last session in current directory")
 	rootCmd.Flags().StringVar(&f.sessionID, "session", "", "resume specific session by ID")
-	rootCmd.Flags().BoolVar(&f.debug, "debug", false, "enable debug logging")
+	rootCmd.PersistentFlags().BoolVar(&f.debug, "debug", false, "enable debug logging")
 
-	rootCmd.AddCommand(newExportCmd())
-	rootCmd.AddCommand(newImportCmd())
-	rootCmd.AddCommand(newDoctorCmd())
+	rootCmd.AddCommand(newExportCmd(&f))
+	rootCmd.AddCommand(newImportCmd(&f))
+	rootCmd.AddCommand(newDoctorCmd(&f))
 
 	return rootCmd
 }
 
-func newExportCmd() *cobra.Command {
+func newExportCmd(f *flags) *cobra.Command {
 	var sessionID, outPath string
 	cmd := &cobra.Command{
 		Use:   "export",
 		Short: "Export a session to a JSON file",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runExport(cmd.Context(), sessionID, outPath)
+			return runExport(cmd.Context(), sessionID, outPath, f.configPath)
 		},
 	}
 	cmd.Flags().StringVarP(&sessionID, "session", "s", "", "session ID to export (required)")
@@ -119,13 +119,13 @@ func newExportCmd() *cobra.Command {
 	return cmd
 }
 
-func newImportCmd() *cobra.Command {
+func newImportCmd(f *flags) *cobra.Command {
 	var inPath string
 	cmd := &cobra.Command{
 		Use:   "import",
 		Short: "Import a session from a JSON file",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runImport(cmd.Context(), inPath)
+			return runImport(cmd.Context(), inPath, f.configPath)
 		},
 	}
 	cmd.Flags().StringVarP(&inPath, "input", "i", "", "input file path (required)")
@@ -133,19 +133,21 @@ func newImportCmd() *cobra.Command {
 	return cmd
 }
 
-func newDoctorCmd() *cobra.Command {
+func newDoctorCmd(f *flags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Run health checks on configuration and dependencies",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDoctor(cmd.Context())
+			return runDoctor(cmd.Context(), f.configPath)
 		},
 	}
 }
 
 func run(ctx context.Context, f flags) error {
 	// Ensure default config exists
-	_ = writeDefaultConfig()
+	if err := writeDefaultConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write default config: %v\n", err)
+	}
 
 	// Load configuration
 	loader := config.NewLoader()
@@ -155,7 +157,11 @@ func run(ctx context.Context, f flags) error {
 	cfg, err := loader.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load config (%v), using defaults\n", err)
-		cfg = config.DefaultConfig()
+		var err2 error
+		cfg, err2 = config.Default()
+		if err2 != nil {
+			return fmt.Errorf("load default config: %w", err2)
+		}
 	}
 
 	// Apply CLI overrides
@@ -164,7 +170,7 @@ func run(ctx context.Context, f flags) error {
 	}
 
 	// Validate API key
-	if cfg.LLM.APIKey == "" {
+	if cfg.LLM.APIKey == "" || strings.HasPrefix(cfg.LLM.APIKey, "$") {
 		return fmt.Errorf("LLM API key is not configured. Set it in ~/.config/kimi-lite/config.toml or via KIMI_LLM_API_KEY environment variable")
 	}
 
@@ -174,15 +180,14 @@ func run(ctx context.Context, f flags) error {
 		return fmt.Errorf("initialize app: %w", err)
 	}
 	defer func() {
-		_ = application.Close()
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "shutdown: %v\n", err)
+		}
 	}()
 
 	// Apply CLI flags
 	if f.yolo {
 		application.SetYolo(true)
-	}
-	if f.autoApprove {
-		application.SetAutoApprove(true)
 	}
 
 	// Resolve session
@@ -195,12 +200,13 @@ func run(ctx context.Context, f flags) error {
 		}
 	case f.continueLast:
 		session, err = application.ContinueLastSession(ctx)
-		if err != nil {
-			// If no previous session, start a new one
+		if errors.Is(err, store.ErrSessionNotFound) {
 			session, err = application.StartSession(ctx)
 			if err != nil {
 				return fmt.Errorf("start session: %w", err)
 			}
+		} else if err != nil {
+			return fmt.Errorf("continue last session: %w", err)
 		}
 	default:
 		session, err = application.StartSession(ctx)
@@ -210,7 +216,7 @@ func run(ctx context.Context, f flags) error {
 	}
 
 	// Print startup banner
-	fmt.Printf("[%s] v%s | model: %s | context: 0%%\n", binaryName, version, cfg.LLM.Model)
+	fmt.Printf("[%s] v%s | model: %s\n", binaryName, version, cfg.LLM.Model)
 	if f.continueLast || f.sessionID != "" {
 		fmt.Printf("[Resuming session %s (%s)]\n", session.ID, session.Path)
 	}
@@ -219,17 +225,29 @@ func run(ctx context.Context, f flags) error {
 	return application.Run(ctx, session)
 }
 
-func runExport(ctx context.Context, sessionID, outPath string) error {
-	cfg, err := config.NewLoader().Load()
+func runExport(ctx context.Context, sessionID, outPath, configPath string) error {
+	loader := config.NewLoader()
+	if configPath != "" {
+		loader.SetConfigFile(configPath)
+	}
+	cfg, err := loader.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load config (%v), using defaults\n", err)
-		cfg = config.DefaultConfig()
+		var err2 error
+		cfg, err2 = config.Default()
+		if err2 != nil {
+			return fmt.Errorf("load default config: %w", err2)
+		}
 	}
 	application, err := newApp(cfg, false)
 	if err != nil {
 		return fmt.Errorf("initialize app: %w", err)
 	}
-	defer func() { _ = application.Close() }()
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "shutdown: %v\n", err)
+		}
+	}()
 
 	export, err := application.ExportSession(ctx, sessionID)
 	if err != nil {
@@ -246,17 +264,29 @@ func runExport(ctx context.Context, sessionID, outPath string) error {
 	return nil
 }
 
-func runImport(ctx context.Context, inPath string) error {
-	cfg, err := config.NewLoader().Load()
+func runImport(ctx context.Context, inPath, configPath string) error {
+	loader := config.NewLoader()
+	if configPath != "" {
+		loader.SetConfigFile(configPath)
+	}
+	cfg, err := loader.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load config (%v), using defaults\n", err)
-		cfg = config.DefaultConfig()
+		var err2 error
+		cfg, err2 = config.Default()
+		if err2 != nil {
+			return fmt.Errorf("load default config: %w", err2)
+		}
 	}
 	application, err := newApp(cfg, false)
 	if err != nil {
 		return fmt.Errorf("initialize app: %w", err)
 	}
-	defer func() { _ = application.Close() }()
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "shutdown: %v\n", err)
+		}
+	}()
 
 	data, err := os.ReadFile(inPath)
 	if err != nil {
@@ -274,22 +304,30 @@ func runImport(ctx context.Context, inPath string) error {
 	return nil
 }
 
-func runDoctor(ctx context.Context) error {
+func runDoctor(ctx context.Context, configPath string) error {
 	var issues []string
 
 	// Config check
-	cfg, err := config.NewLoader().Load()
+	loader := config.NewLoader()
+	if configPath != "" {
+		loader.SetConfigFile(configPath)
+	}
+	cfg, err := loader.Load()
 	if err != nil {
 		fmt.Printf("[FAIL] Config: %v\n", err)
 		issues = append(issues, "config")
-		cfg = config.DefaultConfig()
+		var err2 error
+		cfg, err2 = config.Default()
+		if err2 != nil {
+			return fmt.Errorf("load default config: %w", err2)
+		}
 	} else {
 		fmt.Println("[OK]   Config loaded")
 	}
 
 	// Database check
 	dbDir := filepath.Dir(cfg.Session.DBPath)
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
+	if err := os.MkdirAll(dbDir, 0700); err != nil {
 		fmt.Printf("[FAIL] DB directory: %v\n", err)
 		issues = append(issues, "db-dir")
 	} else {
@@ -311,10 +349,27 @@ func runDoctor(ctx context.Context) error {
 		fmt.Println("[OK]   LLM API key present")
 		// Lightweight connectivity check
 		client := llm.NewClient(cfg.LLM, nil)
-		_, err := client.Chat(ctx, []api.Message{{Role: api.RoleUser, Content: "ping"}}, nil)
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		_, err := client.Chat(cctx, []api.Message{{Role: api.RoleUser, Content: "ping"}}, nil)
 		if err != nil {
-			fmt.Printf("[WARN] LLM connectivity: %v\n", err)
-			issues = append(issues, "llm-connectivity")
+			var apiErr *api.APIError
+			if errors.As(err, &apiErr) {
+				switch apiErr.StatusCode {
+				case 401, 403:
+					fmt.Printf("[FAIL] LLM auth: invalid API key\n")
+					issues = append(issues, "llm-auth")
+				case 400:
+					fmt.Printf("[FAIL] LLM request: %s\n", apiErr.Body)
+					issues = append(issues, "llm-request")
+				default:
+					fmt.Printf("[WARN] LLM connectivity: %v\n", err)
+					issues = append(issues, "llm-connectivity")
+				}
+			} else {
+				fmt.Printf("[WARN] LLM connectivity: %v\n", err)
+				issues = append(issues, "llm-connectivity")
+			}
 		} else {
 			fmt.Println("[OK]   LLM connectivity")
 		}
@@ -322,7 +377,9 @@ func runDoctor(ctx context.Context) error {
 
 	// MCP check (non-fatal)
 	mcpClient := mcp.NewClientFromConfig(cfg.MCP)
-	if err := mcpClient.Connect(ctx); err != nil {
+	mcpCtx, mcpCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer mcpCancel()
+	if err := mcpClient.Connect(mcpCtx); err != nil {
 		fmt.Printf("[WARN] MCP: %v\n", err)
 	} else {
 		fmt.Println("[OK]   MCP connected")

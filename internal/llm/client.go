@@ -4,12 +4,13 @@ package llm
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,6 +28,9 @@ const (
 	defaultRetries  = 3
 	maxBackoffDelay = 30 * time.Second
 )
+
+// ErrEmptyResponse is returned when the LLM API returns a 200 OK with no choices.
+var ErrEmptyResponse = errors.New("empty response from API")
 
 // Client implements api.LLMClient for OpenAI-compatible APIs.
 type Client struct {
@@ -83,7 +87,7 @@ func (c *Client) Chat(ctx context.Context, messages []api.Message, tools []api.T
 	}
 
 	if len(resp.Choices) == 0 {
-		return nil, &api.APIError{StatusCode: http.StatusOK, Message: "empty response from API"}
+		return nil, ErrEmptyResponse
 	}
 
 	choice := resp.Choices[0].Message
@@ -137,6 +141,7 @@ func sortedToolCalls(accumulator map[int]*rawToolCall) []api.ToolCall {
 // ChatStream sends messages to the LLM and streams the response via a channel.
 // The returned channel is closed when the stream ends or an error occurs.
 // Callers should check chunk.Error for stream errors.
+// The streaming goroutine owns the HTTP response body and closes it via defer body.Close().
 func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -207,7 +212,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 					return
 				}
 				raw, err := res.raw, res.err
-				if err == io.EOF {
+				if errors.Is(err, io.EOF) {
 					select {
 					case ch <- api.StreamChunk{Done: true, ToolCalls: sortedToolCalls(accumulator), FinishReason: raw.FinishReason}:
 					case <-ctx.Done():
@@ -360,6 +365,7 @@ func (c *Client) doRequest(ctx context.Context, reqBody chatCompletionRequest) (
 
 // doRequestStream performs a streaming request with retries.
 // On success it returns the response body for reading SSE events.
+// The caller takes ownership of the returned body and is responsible for closing it.
 func (c *Client) doRequestStream(ctx context.Context, reqBody chatCompletionRequest) (io.ReadCloser, error) {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -371,7 +377,7 @@ func (c *Client) doRequestStream(ctx context.Context, reqBody chatCompletionRequ
 		return nil, err
 	}
 
-	return resp.Body, nil
+	return resp.Body, nil //nolint:bodyclose // ownership transferred to streaming goroutine, closed in the ChatStream goroutine
 }
 
 // parseRetryAfter parses the Retry-After header value, supporting both
@@ -393,11 +399,14 @@ func parseRetryAfter(value string) time.Duration {
 
 // backoff returns the delay before a retry attempt.
 func (c *Client) backoff(attempt int) time.Duration {
-	delay := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
-	if delay > maxBackoffDelay {
-		delay = maxBackoffDelay
+	maxDelay := min(time.Duration(1<<(attempt-1))*time.Second, maxBackoffDelay)
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return maxDelay
 	}
-	return delay
+	val := binary.BigEndian.Uint64(buf[:])
+	// #nosec G115 -- maxDelay is bounded by maxBackoffDelay (30s) and non-negative.
+	return time.Duration(val % (uint64(maxDelay) + 1))
 }
 
 // isRetryableError reports whether an error warrants a retry.
@@ -429,9 +438,10 @@ func isRetryableError(err error) bool {
 // buildChatRequest constructs the API request payload from api types.
 func (c *Client) buildChatRequest(messages []api.Message, tools []api.ToolDefinition, stream bool) chatCompletionRequest {
 	req := chatCompletionRequest{
-		Model:    c.model,
-		Messages: make([]chatMessage, 0, len(messages)),
-		Stream:   stream,
+		Model:     c.model,
+		Messages:  make([]chatMessage, 0, len(messages)),
+		Stream:    stream,
+		MaxTokens: LookupModel(c.model).MaxTokens,
 	}
 
 	for _, msg := range messages {
@@ -480,10 +490,11 @@ func (c *Client) buildChatRequest(messages []api.Message, tools []api.ToolDefini
 // ---------------------------------------------------------------------------
 
 type chatCompletionRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Tools    []toolDef     `json:"tools,omitempty"`
-	Stream   bool          `json:"stream"`
+	Model     string        `json:"model"`
+	Messages  []chatMessage `json:"messages"`
+	Tools     []toolDef     `json:"tools,omitempty"`
+	Stream    bool          `json:"stream"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
 }
 
 type chatMessage struct {

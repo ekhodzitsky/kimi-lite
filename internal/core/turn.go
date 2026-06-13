@@ -40,6 +40,9 @@ type TurnManager struct {
 	approvalCh   chan approvalPayload
 	wg           sync.WaitGroup
 	running      atomic.Bool
+
+	cancelMu     sync.Mutex
+	activeCancel context.CancelFunc
 }
 
 // NewTurnManager creates a new TurnManager.
@@ -116,6 +119,16 @@ func (tm *TurnManager) Wait() {
 	tm.wg.Wait()
 }
 
+// CancelAll cancels the currently in-flight turn, if any.
+func (tm *TurnManager) CancelAll() {
+	tm.cancelMu.Lock()
+	cancel := tm.activeCancel
+	tm.cancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // RunTurn executes a complete turn for the given session and user input.
 // It returns a channel that streams turn events (content, done, error).
 // Returns an error if a turn is already in progress.
@@ -123,9 +136,17 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 	if !tm.running.CompareAndSwap(false, true) {
 		return nil, fmt.Errorf("turn already in progress")
 	}
-	outCh, err := tm.startTurn(ctx, sessionID, input)
+	runCtx, runCancel := context.WithCancel(ctx)
+	tm.cancelMu.Lock()
+	tm.activeCancel = runCancel
+	tm.cancelMu.Unlock()
+	outCh, err := tm.startTurn(runCtx, sessionID, input)
 	if err != nil {
 		tm.running.Store(false)
+		runCancel()
+		tm.cancelMu.Lock()
+		tm.activeCancel = nil
+		tm.cancelMu.Unlock()
 		return nil, err
 	}
 	return outCh, nil
@@ -135,11 +156,11 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 	if tm.cfg != nil && tm.cfg.Get() != nil {
 		maxTurns := tm.cfg.Get().Behavior.MaxTurns
 		if maxTurns > 0 {
-			turns, err := tm.store.GetTurns(ctx, sessionID, 100)
+			count, err := tm.store.CountTurns(ctx, sessionID, api.TurnIdle)
 			if err != nil {
-				return nil, fmt.Errorf("get turns: %w", err)
+				return nil, fmt.Errorf("count turns: %w", err)
 			}
-			if len(turns) >= maxTurns {
+			if count >= maxTurns {
 				return nil, fmt.Errorf("max turns (%d) reached for session %s", maxTurns, sessionID)
 			}
 		}
@@ -156,7 +177,7 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 
 	turn := &api.Turn{
 		ID:        idgen.GenerateID(),
-		State:     api.TurnThinking,
+		State:     api.TurnStreaming,
 		Input:     input,
 		StartedAt: time.Now().UTC(),
 	}
@@ -165,7 +186,8 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 	tm.turn = turn
 	tm.mu.Unlock()
 
-	if err := tm.saveTurn(ctx, sessionID, turn); err != nil {
+	// Persistence policy: turn-save failure is fatal at turn start...
+	if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
 		return nil, fmt.Errorf("save turn: %w", err)
 	}
 
@@ -188,14 +210,7 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 		return nil, fmt.Errorf("get messages: %w", err)
 	}
 
-	tools := tm.tools.Definitions()
-
-	tm.mu.Lock()
-	turn.State = api.TurnStreaming
-	tm.mu.Unlock()
-	if err := tm.saveTurn(ctx, sessionID, turn); err != nil {
-		slog.Error("failed to save turn", "error", err)
-	}
+	tools := tm.tools.Definitions(ctx)
 
 	// Start the first LLM stream synchronously so that immediate errors are returned.
 	streamCh, err := tm.llm.ChatStream(ctx, messages, tools)
@@ -215,9 +230,16 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 	defer tm.running.Store(false)
 	defer tm.wg.Done()
 	defer close(eventCh)
+	defer func() {
+		tm.cancelMu.Lock()
+		tm.activeCancel = nil
+		tm.cancelMu.Unlock()
+	}()
 
 	content, toolCalls, err := tm.consumeStream(ctx, sessionID, turn, firstStream, eventCh)
 	if err != nil {
+		tm.persistPartialResponse(ctx, sessionID, turn, content)
+		tm.setError(ctx, sessionID, turn, err)
 		return
 	}
 
@@ -228,11 +250,16 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 		turn.State = api.TurnToolCalls
 	}
 	tm.mu.Unlock()
-	if err := tm.saveTurn(ctx, sessionID, turn); err != nil {
+	if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
 		slog.Error("failed to save turn", "error", err)
 	}
 
-	const maxToolRounds = 10
+	maxToolRounds := 10
+	if tm.cfg != nil && tm.cfg.Get() != nil {
+		if v := tm.cfg.Get().Behavior.MaxToolRounds; v > 0 {
+			maxToolRounds = v
+		}
+	}
 	for round := 0; len(toolCalls) > 0; round++ {
 		if round >= maxToolRounds {
 			tm.setError(ctx, sessionID, turn, fmt.Errorf("max tool rounds (%d) exceeded", maxToolRounds))
@@ -241,6 +268,14 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 		results, pending := tm.executeToolCalls(ctx, sessionID, turn, toolCalls)
 
 		if len(pending) > 0 {
+			_, reqID := tm.PendingApprovals()
+			select {
+			case eventCh <- api.TurnEvent{Type: api.TurnEventApprovalRequest, ToolCalls: pending, RequestID: reqID}:
+			case <-ctx.Done():
+				tm.setError(ctx, sessionID, turn, ctx.Err())
+				return
+			}
+
 			var payload approvalPayload
 			select {
 			case payload = <-tm.approvalCh:
@@ -279,9 +314,6 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 					if !ok {
 						decision = api.ApprovalNo
 					}
-					if decision == api.ApprovalDiff {
-						decision = api.ApprovalNo
-					}
 					var result api.ToolResult
 					if decision == api.ApprovalNo {
 						result = api.ToolResult{
@@ -308,6 +340,16 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 		turn.Results = append(turn.Results, results...)
 		tm.mu.Unlock()
 
+		// Emit tool result events so the TUI can display them.
+		for _, result := range results {
+			select {
+			case eventCh <- api.TurnEvent{Type: api.TurnEventToolResult, Result: result}:
+			case <-ctx.Done():
+				tm.setError(ctx, sessionID, turn, ctx.Err())
+				return
+			}
+		}
+
 		assistantMsg := api.Message{
 			ID:        idgen.GenerateID(),
 			Role:      api.RoleAssistant,
@@ -315,12 +357,19 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 			ToolCalls: toolCalls,
 			CreatedAt: time.Now().UTC(),
 		}
-		_ = tm.store.AppendMessage(ctx, sessionID, assistantMsg)
+		if err := tm.store.AppendMessage(ctx, sessionID, assistantMsg); err != nil {
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("append message: %w", err))
+			return
+		}
 
 		for _, result := range results {
 			toolContent := result.Output
 			if result.Error != "" {
-				toolContent = fmt.Sprintf("Error: %s", result.Error)
+				if result.Output != "" {
+					toolContent = result.Output + "\nError: " + result.Error
+				} else {
+					toolContent = fmt.Sprintf("Error: %s", result.Error)
+				}
 			}
 			toolMsg := api.Message{
 				ID:         idgen.GenerateID(),
@@ -329,7 +378,10 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 				ToolCallID: result.CallID,
 				CreatedAt:  time.Now().UTC(),
 			}
-			_ = tm.store.AppendMessage(ctx, sessionID, toolMsg)
+			if err := tm.store.AppendMessage(ctx, sessionID, toolMsg); err != nil {
+				tm.setError(ctx, sessionID, turn, fmt.Errorf("append message: %w", err))
+				return
+			}
 		}
 
 		messages, err := tm.store.GetMessages(ctx, sessionID, msgLimit)
@@ -346,6 +398,8 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 
 		content, toolCalls, err = tm.consumeStream(ctx, sessionID, turn, streamCh, eventCh)
 		if err != nil {
+			tm.persistPartialResponse(ctx, sessionID, turn, content)
+			tm.setError(ctx, sessionID, turn, err)
 			return
 		}
 
@@ -363,20 +417,25 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 	case <-ctx.Done():
 	}
 
-	assistantMsg := api.Message{
-		ID:        idgen.GenerateID(),
-		Role:      api.RoleAssistant,
-		Content:   turn.Response,
-		CreatedAt: time.Now().UTC(),
+	// Skip persisting an empty trailing assistant message.
+	if strings.TrimSpace(turn.Response) != "" {
+		assistantMsg := api.Message{
+			ID:        idgen.GenerateID(),
+			Role:      api.RoleAssistant,
+			Content:   turn.Response,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := tm.store.AppendMessage(ctx, sessionID, assistantMsg); err != nil {
+			slog.Error("failed to append message", "error", err)
+		}
 	}
-	_ = tm.store.AppendMessage(ctx, sessionID, assistantMsg)
 
 	tm.mu.Lock()
 	turn.State = api.TurnIdle
 	ended := time.Now().UTC()
 	turn.EndedAt = &ended
 	tm.mu.Unlock()
-	if err := tm.saveTurn(ctx, sessionID, turn); err != nil {
+	if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
 		slog.Error("failed to save turn", "error", err)
 	}
 	tm.mu.Lock()
@@ -387,7 +446,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 // consumeStream reads chunks from a stream channel, forwards content as TurnEvents,
 // and returns the accumulated text plus any tool calls from the final chunk.
 // It checks for context cancellation both during streaming and after the channel closes.
-func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn *api.Turn, streamCh <-chan api.StreamChunk, eventCh chan api.TurnEvent) (string, []api.ToolCall, error) {
+func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn, streamCh <-chan api.StreamChunk, eventCh chan api.TurnEvent) (string, []api.ToolCall, error) {
 	var content strings.Builder
 	var toolCalls []api.ToolCall
 
@@ -397,8 +456,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 			case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
 			case <-ctx.Done():
 			}
-			tm.setError(ctx, sessionID, turn, ctx.Err())
-			return "", nil, ctx.Err()
+			return content.String(), nil, ctx.Err()
 		}
 
 		if chunk.Error != nil {
@@ -406,8 +464,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 			case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: chunk.Error}:
 			case <-ctx.Done():
 			}
-			tm.setError(ctx, sessionID, turn, chunk.Error)
-			return "", nil, chunk.Error
+			return content.String(), nil, chunk.Error
 		}
 
 		if chunk.Content != "" {
@@ -417,8 +474,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 				case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: errors.New(msg)}:
 				case <-ctx.Done():
 				}
-				tm.setError(ctx, sessionID, turn, errors.New(msg))
-				return "", nil, errors.New(msg)
+				return content.String(), nil, errors.New(msg)
 			}
 			content.WriteString(chunk.Content)
 			select {
@@ -428,8 +484,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 				case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
 				case <-ctx.Done():
 				}
-				tm.setError(ctx, sessionID, turn, ctx.Err())
-				return "", nil, ctx.Err()
+				return content.String(), nil, ctx.Err()
 			}
 		}
 
@@ -444,8 +499,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, sessionID string, turn
 		case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
 		case <-ctx.Done():
 		}
-		tm.setError(ctx, sessionID, turn, ctx.Err())
-		return "", nil, ctx.Err()
+		return content.String(), nil, ctx.Err()
 	}
 
 	return content.String(), toolCalls, nil
@@ -495,7 +549,7 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 		tm.mu.Lock()
 		turn.State = api.TurnWaitingApproval
 		tm.mu.Unlock()
-		if err := tm.saveTurn(ctx, sessionID, turn); err != nil {
+		if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
 			slog.Error("failed to save turn", "error", err)
 		}
 		tm.pendingMu.Lock()
@@ -517,7 +571,7 @@ func (tm *TurnManager) setError(ctx context.Context, sessionID string, turn *api
 	tm.pendingMu.Lock()
 	tm.pendingCalls = nil
 	tm.pendingMu.Unlock()
-	if saveErr := tm.saveTurn(ctx, sessionID, turn); saveErr != nil {
+	if saveErr := tm.store.SaveTurn(ctx, sessionID, *turn); saveErr != nil {
 		slog.Error("failed to save turn", "error", saveErr)
 	}
 	tm.mu.Lock()
@@ -525,10 +579,20 @@ func (tm *TurnManager) setError(ctx context.Context, sessionID string, turn *api
 	tm.mu.Unlock()
 }
 
-func (tm *TurnManager) saveTurn(ctx context.Context, sessionID string, turn *api.Turn) error {
-	if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
-		// Best-effort persistence; do not fail the turn.
-		return err
+func (tm *TurnManager) persistPartialResponse(ctx context.Context, sessionID string, turn *api.Turn, content string) {
+	tm.mu.Lock()
+	turn.Response = content
+	tm.mu.Unlock()
+	if content == "" {
+		return
 	}
-	return nil
+	assistantMsg := api.Message{
+		ID:        idgen.GenerateID(),
+		Role:      api.RoleAssistant,
+		Content:   content,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := tm.store.AppendMessage(ctx, sessionID, assistantMsg); err != nil {
+		slog.Error("failed to append partial assistant message", "error", err)
+	}
 }

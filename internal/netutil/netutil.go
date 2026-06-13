@@ -37,11 +37,20 @@ func IsBlockedHost(hostname string) bool {
 // it resolves the hostname, checks all returned IPs against IsBlockedHost,
 // and dials the first allowed IP.
 func SecureTransport() *http.Transport {
-	dialer := &net.Dialer{
+	return secureTransport(net.DefaultResolver.LookupHost, defaultDialer().DialContext)
+}
+
+func defaultDialer() *net.Dialer {
+	return &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
+}
 
+func secureTransport(
+	lookupHost func(context.Context, string) ([]string, error),
+	dialContext func(context.Context, string, string) (net.Conn, error),
+) *http.Transport {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
@@ -49,21 +58,21 @@ func SecureTransport() *http.Transport {
 				return nil, err
 			}
 
-			ips, err := net.DefaultResolver.LookupHost(ctx, host)
+			ips, err := lookupHost(ctx, host)
 			if err != nil {
 				return nil, err
 			}
 			if len(ips) == 0 {
-				return nil, fmt.Errorf("no IPs resolved for host %s", host)
+				return nil, fmt.Errorf("no IPs resolved for host %q", host)
 			}
 
 			for _, ip := range ips {
 				if IsBlockedHost(ip) {
-					return nil, fmt.Errorf("blocked host: resolved IP %s for %s is blocked", ip, host)
+					return nil, fmt.Errorf("blocked host: resolved IP %q for %q is blocked", ip, host)
 				}
 			}
 
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0], port))
+			return dialContext(ctx, network, net.JoinHostPort(ips[0], port))
 		},
 	}
 }

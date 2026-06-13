@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +100,9 @@ func TestSQLite_GetSession_NotFound(t *testing.T) {
 	_, err := s.GetSession(ctx, "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for nonexistent session")
+	}
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %T: %v", err, err)
 	}
 }
 
@@ -228,6 +234,76 @@ func TestSQLite_DeleteSession_Cascade(t *testing.T) {
 	}
 }
 
+func TestSQLite_PragmaAppliedToAllConnections(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Reserve both pooled connections sequentially so the second one is forced
+	// to be a distinct physical connection from the first.
+	conns := make([]*sql.Conn, 2)
+	for i := range conns {
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("acquire connection %d: %v", i, err)
+		}
+		defer conn.Close()
+		conns[i] = conn
+	}
+
+	for i, conn := range conns {
+		var fk int
+		if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err != nil {
+			t.Fatalf("read foreign_keys on connection %d: %v", i, err)
+		}
+		if fk != 1 {
+			t.Errorf("foreign_keys on connection %d = %d, want 1", i, fk)
+		}
+
+		var bt int
+		if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&bt); err != nil {
+			t.Fatalf("read busy_timeout on connection %d: %v", i, err)
+		}
+		if bt != 5000 {
+			t.Errorf("busy_timeout on connection %d = %d, want 5000", i, bt)
+		}
+	}
+}
+
+func TestSQLite_DeleteSession_NoOrphans(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+	_ = s.AppendMessage(ctx, sess.ID, api.Message{ID: "m1", Role: api.RoleUser, Content: "hi", CreatedAt: time.Now().UTC()})
+	_ = s.SaveTurn(ctx, sess.ID, api.Turn{ID: "t1", State: api.TurnIdle, StartedAt: time.Now().UTC()})
+
+	if err := s.DeleteSession(ctx, sess.ID); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+
+	var msgCount, turnCount, sessCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM messages`).Scan(&msgCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM turns`).Scan(&turnCount); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id = ?`, sess.ID).Scan(&sessCount); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if msgCount != 0 {
+		t.Errorf("messages table has %d orphaned rows, want 0", msgCount)
+	}
+	if turnCount != 0 {
+		t.Errorf("turns table has %d orphaned rows, want 0", turnCount)
+	}
+	if sessCount != 0 {
+		t.Errorf("sessions table has %d rows for deleted session, want 0", sessCount)
+	}
+}
+
 func TestSQLite_AppendAndGetMessages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -313,6 +389,86 @@ func TestSQLite_ClearMessages(t *testing.T) {
 	if len(msgs) != 0 {
 		t.Errorf("expected 0 messages, got %d", len(msgs))
 	}
+}
+
+func TestSQLite_ReplaceMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+	orig1 := api.Message{ID: "m1", Role: api.RoleUser, Content: "hello", CreatedAt: time.Now().UTC()}
+	orig2 := api.Message{ID: "m2", Role: api.RoleAssistant, Content: "hi", CreatedAt: time.Now().UTC().Add(time.Millisecond)}
+	if err := s.AppendMessage(ctx, sess.ID, orig1); err != nil {
+		t.Fatalf("append message 1: %v", err)
+	}
+	if err := s.AppendMessage(ctx, sess.ID, orig2); err != nil {
+		t.Fatalf("append message 2: %v", err)
+	}
+
+	t.Run("happy path", func(t *testing.T) {
+		new1 := api.Message{ID: "n1", Role: api.RoleSystem, Content: "system", CreatedAt: time.Now().UTC()}
+		new2 := api.Message{ID: "n2", Role: api.RoleUser, Content: "user", CreatedAt: time.Now().UTC().Add(time.Millisecond)}
+		if err := s.ReplaceMessages(ctx, sess.ID, []api.Message{new1, new2}); err != nil {
+			t.Fatalf("replace messages: %v", err)
+		}
+
+		msgs, err := s.GetMessages(ctx, sess.ID, 0)
+		if err != nil {
+			t.Fatalf("get messages: %v", err)
+		}
+		if len(msgs) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(msgs))
+		}
+		if msgs[0].ID != new1.ID || msgs[0].Role != new1.Role || msgs[0].Content != new1.Content {
+			t.Errorf("first message = %+v, want %+v", msgs[0], new1)
+		}
+		if msgs[1].ID != new2.ID || msgs[1].Role != new2.Role || msgs[1].Content != new2.Content {
+			t.Errorf("second message = %+v, want %+v", msgs[1], new2)
+		}
+	})
+
+	t.Run("empty slice clears messages", func(t *testing.T) {
+		if err := s.ReplaceMessages(ctx, sess.ID, []api.Message{}); err != nil {
+			t.Fatalf("replace messages with empty slice: %v", err)
+		}
+
+		msgs, err := s.GetMessages(ctx, sess.ID, 0)
+		if err != nil {
+			t.Fatalf("get messages: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Fatalf("expected 0 messages, got %d", len(msgs))
+		}
+	})
+
+	t.Run("rollback restores original messages", func(t *testing.T) {
+		// Seed fresh original messages so the rollback assertion is meaningful.
+		if err := s.ReplaceMessages(ctx, sess.ID, []api.Message{orig1, orig2}); err != nil {
+			t.Fatalf("seed original messages: %v", err)
+		}
+
+		// Two new messages sharing the same ID trigger a PRIMARY KEY conflict
+		// inside the INSERT loop, forcing a rollback.
+		bad := []api.Message{
+			{ID: "dup", Role: api.RoleUser, Content: "first", CreatedAt: time.Now().UTC()},
+			{ID: "dup", Role: api.RoleAssistant, Content: "second", CreatedAt: time.Now().UTC().Add(time.Millisecond)},
+		}
+		if err := s.ReplaceMessages(ctx, sess.ID, bad); err == nil {
+			t.Fatal("expected error for duplicate IDs, got nil")
+		}
+
+		msgs, err := s.GetMessages(ctx, sess.ID, 0)
+		if err != nil {
+			t.Fatalf("get messages: %v", err)
+		}
+		if len(msgs) != 2 {
+			t.Fatalf("expected 2 messages after rollback, got %d", len(msgs))
+		}
+		if msgs[0].ID != orig1.ID || msgs[1].ID != orig2.ID {
+			t.Errorf("messages after rollback = %+v, want original", msgs)
+		}
+	})
 }
 
 func TestSQLite_SaveAndGetTurns(t *testing.T) {
@@ -430,6 +586,26 @@ func TestSQLite_SaveTurn_WithToolCallsAndResults(t *testing.T) {
 	}
 }
 
+func TestSQLite_DBFilePermissions(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	s, err := NewSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("new sqlite: %v", err)
+	}
+	defer s.Close()
+
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat db file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("db file permissions = %o, want %o", info.Mode().Perm(), 0600)
+	}
+}
+
 func TestSQLite_Close(t *testing.T) {
 	s, err := NewSQLite(":memory:")
 	if err != nil {
@@ -437,6 +613,35 @@ func TestSQLite_Close(t *testing.T) {
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestSQLite_PathWithSpaceAndQuestionMark(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbDir := filepath.Join(tmpDir, "a?b")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatalf("create db dir: %v", err)
+	}
+	dbPath := filepath.Join(dbDir, "c d.db")
+
+	s, err := NewSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("new sqlite: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("db file not found at %q: %v", dbPath, err)
+	}
+
+	ctx := context.Background()
+	sess, err := s.CreateSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if sess.ID == "" {
+		t.Error("expected session ID to be set")
 	}
 }
 
@@ -451,27 +656,27 @@ func TestSQLiteDSN(t *testing.T) {
 		{
 			name:   "memory",
 			dbPath: ":memory:",
-			want:   ":memory:?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29&cache=shared",
+			want:   "file:kimi-mem?mode=memory&cache=shared&_pragma=busy_timeout%285000%29&_pragma=foreign_keys%281%29",
 		},
 		{
 			name:   "absolute path",
 			dbPath: "/tmp/test.db",
-			want:   "file:///tmp/test.db?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
+			want:   "file:///tmp/test.db?_pragma=busy_timeout%285000%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
 		},
 		{
 			name:   "relative path",
 			dbPath: "relative.db",
-			want:   "file:relative.db?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
+			want:   "file:relative.db?_pragma=busy_timeout%285000%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
 		},
 		{
 			name:   "path with spaces",
 			dbPath: "/tmp/path with spaces.db",
-			want:   "file:///tmp/path%20with%20spaces.db?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
+			want:   "file:///tmp/path%20with%20spaces.db?_pragma=busy_timeout%285000%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
 		},
 		{
 			name:   "path with question mark",
 			dbPath: "/tmp/path?query.db",
-			want:   "file:///tmp/path%3Fquery.db?_fk=1&_pragma=busy_timeout%285000%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
+			want:   "file:///tmp/path%3Fquery.db?_pragma=busy_timeout%285000%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
 		},
 	}
 
@@ -661,7 +866,202 @@ func TestSQLite_GetLastSession_Errors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty path")
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("expected sql.ErrNoRows wrapped, got %T: %v", err, err)
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %T: %v", err, err)
 	}
+}
+
+func TestSQLite_EmptyPathValidation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	_, err := s.GetLastSession(ctx, "")
+	if err == nil {
+		t.Fatal("expected error for empty path in GetLastSession")
+	}
+	if !strings.Contains(err.Error(), "path is required") {
+		t.Fatalf("expected 'path is required' error, got %q", err.Error())
+	}
+
+	_, err = s.ListSessions(ctx, "", 0)
+	if err == nil {
+		t.Fatal("expected error for empty path in ListSessions")
+	}
+	if !strings.Contains(err.Error(), "path is required") {
+		t.Fatalf("expected 'path is required' error, got %q", err.Error())
+	}
+}
+
+func TestSQLite_AppendMessage_BumpsUpdatedAt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	sessA := createSessionAt(t, s, "/tmp/proj", base, base)
+	_ = createSessionAt(t, s, "/tmp/proj", base.Add(time.Second), base.Add(time.Second))
+
+	msg := api.Message{ID: "m1", Role: api.RoleUser, Content: "hi", CreatedAt: time.Now().UTC()}
+	if err := s.AppendMessage(ctx, sessA.ID, msg); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+
+	got, err := s.GetLastSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("get last session: %v", err)
+	}
+	if got.ID != sessA.ID {
+		t.Errorf("last session = %q, want %q", got.ID, sessA.ID)
+	}
+}
+
+func TestSQLite_SaveTurn_BumpsUpdatedAt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	sessA := createSessionAt(t, s, "/tmp/proj", base, base)
+	_ = createSessionAt(t, s, "/tmp/proj", base.Add(time.Second), base.Add(time.Second))
+
+	turn := api.Turn{ID: "t1", State: api.TurnIdle, StartedAt: time.Now().UTC()}
+	if err := s.SaveTurn(ctx, sessA.ID, turn); err != nil {
+		t.Fatalf("save turn: %v", err)
+	}
+
+	got, err := s.GetLastSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("get last session: %v", err)
+	}
+	if got.ID != sessA.ID {
+		t.Errorf("last session = %q, want %q", got.ID, sessA.ID)
+	}
+}
+
+func TestSQLite_GetMessages_NoLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+
+	// Insert more than the old default cap of 1000.
+	for i := 0; i < 1005; i++ {
+		msg := api.Message{
+			ID:        fmt.Sprintf("msg-%d", i),
+			Role:      api.RoleUser,
+			Content:   fmt.Sprintf("content %d", i),
+			CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond),
+		}
+		if err := s.AppendMessage(ctx, sess.ID, msg); err != nil {
+			t.Fatalf("append message %d: %v", i, err)
+		}
+	}
+
+	msgs, err := s.GetMessages(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("get messages: %v", err)
+	}
+	if len(msgs) != 1005 {
+		t.Fatalf("expected 1005 messages, got %d", len(msgs))
+	}
+	// Verify chronological order.
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i].CreatedAt.Before(msgs[i-1].CreatedAt) {
+			t.Errorf("messages out of order at index %d", i)
+		}
+	}
+}
+
+func TestSQLite_MigrationRunner(t *testing.T) {
+	t.Parallel()
+
+	t.Run("advances user_version on fresh db", func(t *testing.T) {
+		t.Parallel()
+		s, err := NewSQLite(filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("new sqlite: %v", err)
+		}
+		defer s.Close()
+
+		var version int
+		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+			t.Fatalf("read user_version: %v", err)
+		}
+		if version != 1 {
+			t.Errorf("user_version = %d, want 1", version)
+		}
+	})
+
+	t.Run("fake migration applies once", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		migrationsDir := filepath.Join(tmpDir, "migrations")
+		if err := os.MkdirAll(migrationsDir, 0755); err != nil {
+			t.Fatalf("create migrations dir: %v", err)
+		}
+
+		// Seed a real 001 and a fake 002.
+		initialSQL, err := os.ReadFile("migrations/001_initial.sql")
+		if err != nil {
+			t.Fatalf("read initial migration: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(migrationsDir, "001_initial.sql"), initialSQL, 0644); err != nil {
+			t.Fatalf("write initial migration: %v", err)
+		}
+		fake002 := `CREATE TABLE migration_test (id TEXT PRIMARY KEY);`
+		if err := os.WriteFile(filepath.Join(migrationsDir, "002_test.sql"), []byte(fake002), 0644); err != nil {
+			t.Fatalf("write fake migration: %v", err)
+		}
+
+		// First open: migrations should run.
+		db, err := sql.Open("sqlite", sqliteDSN(dbPath))
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		if err := runMigrations(db, os.DirFS(migrationsDir), "."); err != nil {
+			t.Fatalf("run migrations: %v", err)
+		}
+
+		var version int
+		if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+			t.Fatalf("read user_version: %v", err)
+		}
+		if version != 2 {
+			t.Errorf("user_version after first run = %d, want 2", version)
+		}
+
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM migration_test`).Scan(&count); err != nil {
+			t.Errorf("migration_test table missing: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+
+		// Replace 002 with a statement that would fail if re-run, proving it is skipped.
+		failing002 := `CREATE TABLE migration_test (id TEXT PRIMARY KEY);`
+		if err := os.WriteFile(filepath.Join(migrationsDir, "002_test.sql"), []byte(failing002), 0644); err != nil {
+			t.Fatalf("write failing migration: %v", err)
+		}
+
+		db2, err := sql.Open("sqlite", sqliteDSN(dbPath))
+		if err != nil {
+			t.Fatalf("reopen sqlite: %v", err)
+		}
+		defer db2.Close()
+
+		if err := runMigrations(db2, os.DirFS(migrationsDir), "."); err != nil {
+			t.Fatalf("re-run migrations: %v", err)
+		}
+
+		var version2 int
+		if err := db2.QueryRow(`PRAGMA user_version`).Scan(&version2); err != nil {
+			t.Fatalf("read user_version: %v", err)
+		}
+		if version2 != 2 {
+			t.Errorf("user_version after re-run = %d, want 2", version2)
+		}
+	})
 }

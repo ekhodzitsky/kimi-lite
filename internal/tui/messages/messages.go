@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,10 +16,16 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
+type cachedRenderer struct {
+	r  *glamour.TermRenderer
+	mu sync.Mutex
+}
+
+var rendererCache sync.Map // key: theme string, value: *cachedRenderer
+
 const (
 	messageWidthPadding = 8
 	minMessageWidth     = 20
-	renderDebounce      = 200 * time.Millisecond
 )
 
 // Type represents the kind of message.
@@ -61,13 +67,11 @@ type Message struct {
 	Err error
 
 	// Assistant rendering
-	RawMode     bool   // if true, show raw markdown instead of rendered
 	Rendered    string // cached glamour output
 	renderCache string // content that was rendered
 
 	// Debounce state
 	needsRender bool
-	lastRender  time.Time
 	Streaming   bool // true while content is being streamed
 
 	// State
@@ -75,6 +79,11 @@ type Message struct {
 	Width    int
 	Styles   *styles.Styles
 	KeyMap   KeyMap
+
+	// Cached wrapped output for non-assistant messages
+	cachedView    string
+	cacheWidth    int
+	cacheExpanded bool
 }
 
 // NewUserMessage creates a new user message.
@@ -129,17 +138,25 @@ func (m *Message) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (m *Message) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	cmd := m.UpdateMsg(msg)
+	return m, cmd
+}
+
+// UpdateMsg processes a message and returns the resulting command.
+func (m *Message) UpdateMsg(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if key.Matches(msg, m.KeyMap.ToggleExpand) && m.Type == TypeToolCall {
 			m.Expanded = !m.Expanded
+			m.cacheWidth = -1
 		}
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft && m.Type == TypeToolCall {
 			m.Expanded = !m.Expanded
+			m.cacheWidth = -1
 		}
 	}
-	return m, nil
+	return nil
 }
 
 // View implements tea.Model.
@@ -160,6 +177,9 @@ func (m *Message) View() string {
 
 // SetWidth sets the rendering width.
 func (m *Message) SetWidth(w int) {
+	if m.Width != w {
+		m.cacheWidth = -1
+	}
 	m.Width = w
 }
 
@@ -183,23 +203,24 @@ func (m *Message) SetStreaming(streaming bool) {
 // SetToolResult sets the result for a tool call message.
 func (m *Message) SetToolResult(r api.ToolResult) {
 	m.ToolResult = &r
+	m.cacheWidth = -1
 }
 
 func (m *Message) viewUser() string {
+	if m.cacheWidth == m.Width && m.cachedView != "" {
+		return m.cachedView
+	}
 	prefix := m.Styles.UserMessage.Render("You")
 	content := wordWrap(m.Content, max(m.Width-messageWidthPadding, minMessageWidth))
 	body := m.Styles.UserMessage.Render(content)
-	return lipgloss.JoinVertical(lipgloss.Left, prefix, body)
+	m.cachedView = lipgloss.JoinVertical(lipgloss.Left, prefix, body)
+	m.cacheWidth = m.Width
+	return m.cachedView
 }
 
 func (m *Message) viewAssistant() string {
 	prefix := m.Styles.AssistantMessage.Render("Assistant")
-	var body string
-	if m.RawMode {
-		body = m.Styles.AssistantMessage.Render(wordWrap(m.Content, max(m.Width-messageWidthPadding, minMessageWidth)))
-	} else {
-		body = m.renderedContent()
-	}
+	body := m.renderedContent()
 	return lipgloss.JoinVertical(lipgloss.Left, prefix, body)
 }
 
@@ -208,21 +229,13 @@ func (m *Message) renderedContent() string {
 		return m.Rendered
 	}
 
-	shouldRender := false
-	if !m.Streaming {
-		// Streaming is done, always render
-		shouldRender = true
-	} else if m.needsRender && time.Since(m.lastRender) >= renderDebounce {
-		// Debounce: only render if 200ms passed since last render
-		shouldRender = true
-	}
+	shouldRender := !m.Streaming
 
 	if shouldRender {
 		rendered := safeGlamourRender(m.Content, m.Styles.Theme.Name)
 		m.Rendered = rendered
 		m.renderCache = m.Content
 		m.needsRender = false
-		m.lastRender = time.Now()
 	}
 
 	// During active streaming, show raw text
@@ -237,6 +250,9 @@ func (m *Message) renderedContent() string {
 }
 
 func (m *Message) viewToolCall() string {
+	if m.cacheWidth == m.Width && m.cacheExpanded == m.Expanded && m.cachedView != "" {
+		return m.cachedView
+	}
 	var b strings.Builder
 	icon := "▸"
 	if m.Expanded {
@@ -268,14 +284,22 @@ func (m *Message) viewToolCall() string {
 			}
 		}
 	}
-	return b.String()
+	m.cachedView = b.String()
+	m.cacheWidth = m.Width
+	m.cacheExpanded = m.Expanded
+	return m.cachedView
 }
 
 func (m *Message) viewError() string {
+	if m.cacheWidth == m.Width && m.cachedView != "" {
+		return m.cachedView
+	}
 	prefix := m.Styles.ErrorMessage.Render("Error")
 	content := wordWrap(m.Content, max(m.Width-messageWidthPadding, minMessageWidth))
 	body := m.Styles.ErrorMessage.Render(content)
-	return lipgloss.JoinVertical(lipgloss.Left, prefix, body)
+	m.cachedView = lipgloss.JoinVertical(lipgloss.Left, prefix, body)
+	m.cacheWidth = m.Width
+	return m.cachedView
 }
 
 func safeGlamourRender(content, theme string) (rendered string) {
@@ -285,8 +309,21 @@ func safeGlamourRender(content, theme string) (rendered string) {
 			rendered = content
 		}
 	}()
-	var err error
-	rendered, err = glamour.Render(content, theme)
+
+	cr, _ := rendererCache.LoadOrStore(theme, &cachedRenderer{})
+	c := cr.(*cachedRenderer)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.r == nil {
+		var err error
+		c.r, err = glamour.NewTermRenderer(glamour.WithStandardStyle(theme))
+		if err != nil {
+			return content
+		}
+	}
+
+	rendered, err := c.r.Render(content)
 	if err != nil {
 		rendered = content
 	}

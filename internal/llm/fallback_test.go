@@ -11,6 +11,7 @@ import (
 type mockLLM struct {
 	chatStreamFunc func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error)
 	chatFunc       func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error)
+	modelsFunc     func() []api.ModelInfo
 }
 
 func (m *mockLLM) Chat(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
@@ -31,6 +32,9 @@ func (m *mockLLM) ChatStream(ctx context.Context, messages []api.Message, tools 
 }
 
 func (m *mockLLM) Models() []api.ModelInfo {
+	if m.modelsFunc != nil {
+		return m.modelsFunc()
+	}
 	return nil
 }
 
@@ -152,5 +156,111 @@ func TestFallbackClient_ChatStream_HappyPath(t *testing.T) {
 	}
 	if got != "primary" {
 		t.Fatalf("expected primary content, got %q", got)
+	}
+}
+
+func TestFallbackClient_Models(t *testing.T) {
+	t.Parallel()
+
+	primary := &mockLLM{
+		modelsFunc: func() []api.ModelInfo {
+			return []api.ModelInfo{
+				{Name: "model-a", Provider: "primary"},
+				{Name: "model-b", Provider: "primary"},
+			}
+		},
+	}
+	fallback := &mockLLM{
+		modelsFunc: func() []api.ModelInfo {
+			return []api.ModelInfo{
+				{Name: "model-b", Provider: "fallback"},
+				{Name: "model-c", Provider: "fallback"},
+			}
+		},
+	}
+
+	client := NewFallbackClient(primary, fallback)
+	models := client.Models()
+
+	if len(models) != 3 {
+		t.Fatalf("expected 3 models, got %d", len(models))
+	}
+	if models[0].Name != "model-a" {
+		t.Errorf("models[0].Name = %q, want model-a", models[0].Name)
+	}
+	if models[1].Name != "model-b" {
+		t.Errorf("models[1].Name = %q, want model-b", models[1].Name)
+	}
+	if models[2].Name != "model-c" {
+		t.Errorf("models[2].Name = %q, want model-c", models[2].Name)
+	}
+}
+
+func TestFallbackClient_Chat_PrimaryError_FallbackInvoked(t *testing.T) {
+	t.Parallel()
+
+	want := &api.Message{Role: api.RoleAssistant, Content: "fallback"}
+	primaryErr := errors.New("primary chat error")
+	primary := &mockLLM{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			return nil, primaryErr
+		},
+	}
+	fallback := &mockLLM{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			return want, nil
+		},
+	}
+
+	client := NewFallbackClient(primary, fallback)
+	got, err := client.Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Content != want.Content {
+		t.Errorf("content = %q, want %q", got.Content, want.Content)
+	}
+}
+
+func TestFallbackClient_Chat_PrimarySuccess_FallbackNotCalled(t *testing.T) {
+	t.Parallel()
+
+	want := &api.Message{Role: api.RoleAssistant, Content: "primary"}
+	primary := &mockLLM{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			return want, nil
+		},
+	}
+	fallback := &mockLLM{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			t.Error("fallback Chat should not be called")
+			return nil, errors.New("should not reach")
+		},
+	}
+
+	client := NewFallbackClient(primary, fallback)
+	got, err := client.Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Content != want.Content {
+		t.Errorf("content = %q, want %q", got.Content, want.Content)
+	}
+}
+
+func TestFallbackClient_Chat_NilFallback_ErrorPropagates(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("primary chat error")
+	primary := &mockLLM{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			return nil, wantErr
+		},
+	}
+
+	client := NewFallbackClient(primary, nil)
+	_, err := client.Chat(context.Background(), nil, nil)
+	if err != wantErr {
+		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
 }

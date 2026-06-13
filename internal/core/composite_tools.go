@@ -22,9 +22,10 @@ func NewCompositeToolExecutor(executors ...api.ToolExecutor) *CompositeToolExecu
 		toolMap:   make(map[string]api.ToolExecutor),
 	}
 	for _, exec := range executors {
-		for _, def := range exec.Definitions() {
+		for _, def := range exec.Definitions(context.Background()) {
 			if _, exists := c.toolMap[def.Name]; exists {
-				slog.Warn("tool definition collision detected", "tool", def.Name)
+				slog.Warn("tool definition collision detected, keeping first registration", "tool", def.Name)
+				continue
 			}
 			c.toolMap[def.Name] = exec
 		}
@@ -32,11 +33,19 @@ func NewCompositeToolExecutor(executors ...api.ToolExecutor) *CompositeToolExecu
 	return c
 }
 
-// Definitions returns the union of all child definitions.
-func (c *CompositeToolExecutor) Definitions() []api.ToolDefinition {
-	var defs []api.ToolDefinition
+// Definitions returns the union of all child definitions, deduplicated by name
+// with first-seen ordering preserved.
+func (c *CompositeToolExecutor) Definitions(ctx context.Context) []api.ToolDefinition {
+	defs := make([]api.ToolDefinition, 0, 16)
+	seen := make(map[string]bool)
 	for _, exec := range c.executors {
-		defs = append(defs, exec.Definitions()...)
+		for _, def := range exec.Definitions(ctx) {
+			if seen[def.Name] {
+				continue
+			}
+			seen[def.Name] = true
+			defs = append(defs, def)
+		}
 	}
 	return defs
 }
@@ -52,13 +61,4 @@ func (c *CompositeToolExecutor) Execute(ctx context.Context, call api.ToolCall) 
 		}, nil
 	}
 	return exec.Execute(ctx, call)
-}
-
-// IsReadOnly delegates to the child executor that owns the tool.
-func (c *CompositeToolExecutor) IsReadOnly(name string) bool {
-	exec, ok := c.toolMap[name]
-	if !ok {
-		return false
-	}
-	return exec.IsReadOnly(name)
 }

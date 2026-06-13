@@ -117,7 +117,24 @@ func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message,
 	}
 }
 
-// Models delegates to primary (fallback not used for listing models).
+// Models returns the union of primary and fallback model lists,
+// deduplicated by ModelInfo.Name with primary-first ordering.
 func (c *FallbackClient) Models() []api.ModelInfo {
-	return c.primary.Models()
+	primaryModels := c.primary.Models()
+	seen := make(map[string]struct{}, len(primaryModels))
+	for _, m := range primaryModels {
+		seen[m.Name] = struct{}{}
+	}
+	result := make([]api.ModelInfo, len(primaryModels))
+	copy(result, primaryModels)
+
+	if c.fallback != nil {
+		for _, m := range c.fallback.Models() {
+			if _, ok := seen[m.Name]; !ok {
+				seen[m.Name] = struct{}{}
+				result = append(result, m)
+			}
+		}
+	}
+	return result
 }

@@ -2,9 +2,15 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -326,5 +332,269 @@ done
 	}
 	if !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("expected 'closed' error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_EOFFastFail(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+read line
+`
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "eof.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write helper script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	ctx := context.Background()
+
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer tr.Close()
+
+	// First send: child reads and exits, causing EOF.
+	_, err := tr.Send(ctx, "initialize", nil)
+	if err == nil {
+		t.Fatal("expected error after EOF")
+	}
+	if !strings.Contains(err.Error(), "transport closed") {
+		t.Fatalf("expected transport closed error, got: %v", err)
+	}
+
+	// Second send should fast-fail without blocking.
+	ctx2, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_, err = tr.Send(ctx2, "ping", nil)
+	if err == nil {
+		t.Fatal("expected fast-fail error")
+	}
+	if !strings.Contains(err.Error(), "transport closed") && !strings.Contains(err.Error(), "subprocess closed") {
+		t.Fatalf("expected transport closed error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_SendWriteContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("sleep", "3600")
+	ctx := context.Background()
+
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer tr.Close()
+
+	ctx2, cancel := context.WithCancel(ctx)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := tr.Send(ctx2, "initialize", map[string]string{"x": strings.Repeat("a", 1024*1024)})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "cancelled") && !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("expected context cancellation error, got: %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("expected fast return on cancellation, took %v", elapsed)
+	}
+}
+
+func TestStdioTransport_CloseRaceNotify(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+while read line; do
+  :
+done
+`
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "loop.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write helper script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	ctx := context.Background()
+
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				err := tr.Notify(ctx, "notifications/initialized", nil)
+				if err == nil {
+					continue
+				}
+				if strings.Contains(err.Error(), "file already closed") {
+					t.Errorf("got 'file already closed', expected 'transport closed' or success: %v", err)
+				}
+			}
+		}()
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	_ = tr.Close()
+	wg.Wait()
+}
+
+func TestStdioTransport_JSONRPCRequestID(t *testing.T) {
+	t.Parallel()
+
+	req := JSONRPCRequest{JSONRPC: "2.0", ID: 0, Method: "test"}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if !strings.Contains(string(data), `"id":0`) {
+		t.Fatalf("expected id=0 in JSON, got: %s", string(data))
+	}
+
+	notify := JSONRPCNotification{JSONRPC: "2.0", Method: "test"}
+	data, err = json.Marshal(notify)
+	if err != nil {
+		t.Fatalf("marshal notification: %v", err)
+	}
+	if strings.Contains(string(data), `"id"`) {
+		t.Fatalf("expected no id in notification JSON, got: %s", string(data))
+	}
+}
+
+type testLogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *testLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *testLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.records = append(h.records, r)
+	h.mu.Unlock()
+	return nil
+}
+func (h *testLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *testLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestStdioTransport_UnmatchedFrameDebugLog(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+read line
+echo '{"jsonrpc":"2.0","id":99,"result":{}}'
+echo '{"jsonrpc":"2.0","id":1,"result":{}}'
+`
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "unmatched.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write helper script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	handler := &testLogHandler{}
+	tr.logger = slog.New(handler)
+
+	ctx := context.Background()
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer tr.Close()
+
+	// Send a request with id=1; the script replies id=99 first (unmatched), then id=1.
+	resp, err := tr.Send(ctx, "ping", nil)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	var found bool
+	for _, r := range handler.records {
+		if r.Message != "dropping unmatched JSON-RPC frame" {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "id" {
+				switch v := a.Value.Any().(type) {
+				case int64:
+					if v == 99 {
+						found = true
+					}
+				case int:
+					if v == 99 {
+						found = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Fatal("expected debug log for unmatched id=99")
+	}
+}
+
+func TestStdioTransport_StartFailureCleanup(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("echo")
+	tr.newCmd = func(name string, arg ...string) *exec.Cmd {
+		return exec.Command("/nonexistent-binary-for-test")
+	}
+
+	ctx := context.Background()
+	err := tr.Connect(ctx)
+	if err == nil {
+		t.Fatal("expected error for failing start")
+	}
+
+	err = tr.Connect(ctx)
+	if err == nil {
+		t.Fatal("expected error for second connect")
+	}
+	if strings.Contains(err.Error(), "already connected") {
+		t.Fatalf("expected not 'already connected', got: %v", err)
+	}
+}
+
+func TestIsClosedError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"EOF", io.EOF, true},
+		{"ErrClosed", os.ErrClosed, true},
+		{"file already closed", errors.New("read |0: file already closed"), true},
+		{"other error", errors.New("something else"), false},
+		{"nil", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isClosedError(tt.err); got != tt.want {
+				t.Errorf("isClosedError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }

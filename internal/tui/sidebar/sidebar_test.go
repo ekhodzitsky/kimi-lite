@@ -3,6 +3,7 @@ package sidebar
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -250,6 +251,32 @@ func TestBuildTreeSkipsHidden(t *testing.T) {
 	for _, child := range node.Children {
 		if child.Name == ".hidden" {
 			t.Error("buildTree should skip hidden files")
+		}
+	}
+}
+
+func TestRenderNodeDepth(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	tmpDir := t.TempDir()
+	_ = os.Mkdir(filepath.Join(tmpDir, "subdir"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "subdir", "nested.txt"), []byte("hello"), 0644)
+
+	m, err := New(st, tmpDir)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.SetSize(30, 20)
+	m.rebuildFlat()
+
+	for _, node := range m.flat {
+		line := m.renderNode(node, false)
+		expectedPrefix := strings.Repeat("  ", node.Depth)
+		if !strings.HasPrefix(line, "  "+expectedPrefix) {
+			// The renderNode prefixes with "  " then the depth spaces
+			actual := strings.TrimLeft(line, " ")
+			t.Errorf("node %q depth=%d: expected prefix with %d indent spaces, got %q", node.Name, node.Depth, len(expectedPrefix), actual)
 		}
 	}
 }

@@ -5,8 +5,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,6 +16,20 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// isClosedError reports whether err signals that the transport's underlying
+// reader or process has closed. It treats io.EOF and os.ErrClosed as clean
+// closes, and also catches the "file already closed" error returned by some
+// platforms when a pipe is closed concurrently.
+func isClosedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	return strings.Contains(err.Error(), "file already closed")
+}
 
 const (
 	maxFrameSize = 8 * 1024 * 1024 // 8 MB
@@ -25,19 +41,26 @@ type Transport interface {
 	// Connect establishes the underlying connection.
 	Connect(ctx context.Context) error
 	// Send sends a JSON-RPC request and waits for a matching response.
-	Send(ctx context.Context, method string, params interface{}) (*JSONRPCResponse, error)
+	Send(ctx context.Context, method string, params any) (*JSONRPCResponse, error)
 	// Notify sends a JSON-RPC notification (no response expected).
-	Notify(ctx context.Context, method string, params interface{}) error
+	Notify(ctx context.Context, method string, params any) error
 	// Close gracefully shuts down the transport.
 	Close() error
 }
 
 // JSONRPCRequest represents a JSON-RPC 2.0 request.
 type JSONRPCRequest struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      int64       `json:"id,omitempty"`
-	Method  string      `json:"method"`
-	Params  interface{} `json:"params,omitempty"`
+	JSONRPC string `json:"jsonrpc"`
+	ID      int64  `json:"id"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
+}
+
+// JSONRPCNotification represents a JSON-RPC 2.0 notification (no ID field).
+type JSONRPCNotification struct {
+	JSONRPC string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
 }
 
 // JSONRPCResponse represents a JSON-RPC 2.0 response.
@@ -50,9 +73,9 @@ type JSONRPCResponse struct {
 
 // JSONRPCError represents a JSON-RPC 2.0 error object.
 type JSONRPCError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 // Error implements the error interface.
@@ -158,6 +181,7 @@ type StdioTransport struct {
 	cmdWaitCh chan struct{}
 	cmdErr    error
 	cmdWaited sync.Once
+	logger    *slog.Logger
 }
 
 // NewStdioTransport creates a new stdio transport for the given command.
@@ -166,6 +190,7 @@ func NewStdioTransport(command string, args ...string) *StdioTransport {
 		command: command,
 		args:    args,
 		newCmd:  exec.Command,
+		logger:  slog.Default(),
 	}
 }
 
@@ -213,6 +238,11 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 	t.stderr = stderrBuf
 
 	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		t.cmd = nil
+		t.stdin = nil
+		t.stdout = nil
 		t.mu.Unlock()
 		return fmt.Errorf("start mcp-guard: %w (stderr: %s)", err, stderrBuf.String())
 	}
@@ -242,15 +272,12 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 	t.wg.Add(1)
 	go t.readLoop(stdout)
 
-	select {
-	case <-ctx.Done():
-		t.mu.Unlock()
-		_ = t.Close()
-		return fmt.Errorf("connect cancelled: %w", ctx.Err())
-	default:
-		t.mu.Unlock()
-		return nil
-	}
+	// The connect ctx bounds only process spawn + the handshake
+	// (via Send in client.Connect), not the session lifetime — the
+	// readLoop goroutine and subprocess intentionally outlive the
+	// connect ctx until Close.
+	t.mu.Unlock()
+	return nil
 }
 
 func (t *StdioTransport) readLoop(r io.Reader) {
@@ -261,21 +288,31 @@ func (t *StdioTransport) readLoop(r io.Reader) {
 		// Read line-delimited frames with a size cap.
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
-			if err == io.EOF {
+			if isClosedError(err) {
+				t.mu.Lock()
+				t.readErr = fmt.Errorf("mcp transport: subprocess closed connection")
+				for id, ch := range t.pending {
+					ch <- &JSONRPCResponse{
+						ID: id,
+						Error: &JSONRPCError{
+							Code:    -32000,
+							Message: "transport closed",
+						},
+					}
+					delete(t.pending, id)
+				}
+				t.mu.Unlock()
 				return
 			}
 			t.mu.Lock()
 			t.readErr = fmt.Errorf("read JSON-RPC frame: %w", err)
 			for id, ch := range t.pending {
-				select {
-				case ch <- &JSONRPCResponse{
+				ch <- &JSONRPCResponse{
 					ID: id,
 					Error: &JSONRPCError{
 						Code:    -32700,
 						Message: "parse error: " + err.Error(),
 					},
-				}:
-				default:
 				}
 				delete(t.pending, id)
 			}
@@ -287,15 +324,12 @@ func (t *StdioTransport) readLoop(r io.Reader) {
 			t.mu.Lock()
 			t.readErr = fmt.Errorf("frame exceeds max size (%d bytes)", maxFrameSize)
 			for id, ch := range t.pending {
-				select {
-				case ch <- &JSONRPCResponse{
+				ch <- &JSONRPCResponse{
 					ID: id,
 					Error: &JSONRPCError{
 						Code:    -32700,
 						Message: "frame too large",
 					},
-				}:
-				default:
 				}
 				delete(t.pending, id)
 			}
@@ -308,15 +342,12 @@ func (t *StdioTransport) readLoop(r io.Reader) {
 			t.mu.Lock()
 			t.readErr = fmt.Errorf("decode JSON-RPC response: %w", err)
 			for id, ch := range t.pending {
-				select {
-				case ch <- &JSONRPCResponse{
+				ch <- &JSONRPCResponse{
 					ID: id,
 					Error: &JSONRPCError{
 						Code:    -32700,
 						Message: "parse error: " + err.Error(),
 					},
-				}:
-				default:
 				}
 				delete(t.pending, id)
 			}
@@ -332,20 +363,23 @@ func (t *StdioTransport) readLoop(r io.Reader) {
 		t.mu.Unlock()
 
 		if ok {
-			select {
-			case ch <- &resp:
-			default:
-			}
+			ch <- &resp
+		} else if t.logger != nil {
+			t.logger.Debug("dropping unmatched JSON-RPC frame", "id", resp.ID)
 		}
 	}
 }
 
 // Send sends a JSON-RPC request and waits for the response.
-func (t *StdioTransport) Send(ctx context.Context, method string, params interface{}) (*JSONRPCResponse, error) {
+func (t *StdioTransport) Send(ctx context.Context, method string, params any) (*JSONRPCResponse, error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
 		return nil, fmt.Errorf("transport closed")
+	}
+	if t.readErr != nil {
+		t.mu.Unlock()
+		return nil, t.readErr
 	}
 	stdin := t.stdin
 	if stdin == nil {
@@ -373,14 +407,30 @@ func (t *StdioTransport) Send(ctx context.Context, method string, params interfa
 	}
 
 	t.writeMu.Lock()
-	_, err = fmt.Fprintln(stdin, string(data))
-	t.writeMu.Unlock()
-
-	if err != nil {
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, err := fmt.Fprintln(stdin, string(data))
+		writeErrCh <- err
+	}()
+	select {
+	case <-ctx.Done():
+		t.writeMu.Unlock()
 		t.mu.Lock()
 		delete(t.pending, id)
 		t.mu.Unlock()
-		return nil, fmt.Errorf("write request: %w", err)
+		return nil, fmt.Errorf("request %s cancelled: %w", method, ctx.Err())
+	case err := <-writeErrCh:
+		t.writeMu.Unlock()
+		if err != nil {
+			t.mu.Lock()
+			readErr := t.readErr
+			delete(t.pending, id)
+			t.mu.Unlock()
+			if readErr != nil {
+				return nil, readErr
+			}
+			return nil, fmt.Errorf("write request: %w", err)
+		}
 	}
 
 	select {
@@ -398,8 +448,8 @@ func (t *StdioTransport) Send(ctx context.Context, method string, params interfa
 }
 
 // Notify sends a JSON-RPC notification (no response expected).
-func (t *StdioTransport) Notify(ctx context.Context, method string, params interface{}) error {
-	req := JSONRPCRequest{
+func (t *StdioTransport) Notify(ctx context.Context, method string, params any) error {
+	req := JSONRPCNotification{
 		JSONRPC: "2.0",
 		Method:  method,
 		Params:  params,
@@ -425,14 +475,24 @@ func (t *StdioTransport) Notify(ctx context.Context, method string, params inter
 		return fmt.Errorf("transport not connected")
 	}
 
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, err := fmt.Fprintln(stdin, string(data))
+		writeErrCh <- err
+	}()
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("notification %s cancelled: %w", method, ctx.Err())
-	default:
-	}
-
-	if _, err := fmt.Fprintln(stdin, string(data)); err != nil {
-		return fmt.Errorf("write notification: %w", err)
+	case err := <-writeErrCh:
+		if err != nil {
+			t.mu.Lock()
+			readErr := t.readErr
+			t.mu.Unlock()
+			if readErr != nil {
+				return readErr
+			}
+			return fmt.Errorf("write notification: %w", err)
+		}
 	}
 	return nil
 }
@@ -446,29 +506,30 @@ func (t *StdioTransport) Close() error {
 		return nil
 	}
 	t.closed = true
+	t.readErr = fmt.Errorf("transport closed")
 
 	for id, ch := range t.pending {
-		select {
-		case ch <- &JSONRPCResponse{
+		ch <- &JSONRPCResponse{
 			ID: id,
 			Error: &JSONRPCError{
 				Code:    -32000,
 				Message: "transport closed",
 			},
-		}:
-		default:
 		}
 		delete(t.pending, id)
 	}
 
-	if t.stdin != nil {
-		_ = t.stdin.Close() // ignore close errors on cleanup
-		t.stdin = nil
-	}
-
+	stdin := t.stdin
+	t.stdin = nil
 	cmd := t.cmd
 	t.cmd = nil
 	t.mu.Unlock()
+
+	t.writeMu.Lock()
+	if stdin != nil {
+		_ = stdin.Close() // ignore close errors on cleanup
+	}
+	t.writeMu.Unlock()
 
 	if cmd != nil && cmd.Process != nil {
 		// Ensure the wait goroutine is started (it may have been started in Connect).
@@ -479,13 +540,11 @@ func (t *StdioTransport) Close() error {
 			}()
 		})
 
-		select {
-		case <-t.cmdWaitCh:
-			// ignore process exit status on close
-		case <-time.After(5 * time.Second):
+		timer := time.AfterFunc(5*time.Second, func() {
 			_ = cmd.Process.Kill() // ignore kill errors on cleanup
-			<-t.cmdWaitCh          // drain
-		}
+		})
+		<-t.cmdWaitCh
+		timer.Stop()
 	}
 
 	t.wg.Wait()

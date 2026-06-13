@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -12,7 +14,9 @@ import (
 
 // ToolExecutor wraps an api.MCPClient to implement api.ToolExecutor.
 type ToolExecutor struct {
-	client api.MCPClient
+	client     api.MCPClient
+	mu         sync.RWMutex
+	cachedDefs []api.ToolDefinition
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -21,23 +25,34 @@ func NewToolExecutor(client api.MCPClient) *ToolExecutor {
 }
 
 // Definitions returns available MCP tool definitions with names prefixed by "mcp_".
-func (m *ToolExecutor) Definitions() []api.ToolDefinition {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (m *ToolExecutor) Definitions(ctx context.Context) []api.ToolDefinition {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	tools, err := m.client.ListTools(ctx)
 	if err != nil {
+		m.mu.RLock()
+		cached := m.cachedDefs
+		m.mu.RUnlock()
+		if cached != nil {
+			slog.Warn("mcp ListTools failed, returning cached tool definitions", "error", err)
+			return cached
+		}
+		slog.Warn("mcp ListTools failed, no cached definitions available", "error", err)
 		return nil
 	}
 	for i := range tools {
 		tools[i].Name = "mcp_" + tools[i].Name
 	}
+	m.mu.Lock()
+	m.cachedDefs = tools
+	m.mu.Unlock()
 	return tools
 }
 
 // Execute invokes an MCP tool. The tool name must be prefixed with "mcp_".
 func (m *ToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 	name := strings.TrimPrefix(call.Name, "mcp_")
-	var args map[string]interface{}
+	var args map[string]any
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 		return api.ToolResult{
 			CallID: call.ID,
@@ -55,9 +70,4 @@ func (m *ToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.Tool
 		result.Error = err.Error()
 	}
 	return result, nil
-}
-
-// IsReadOnly returns false for all MCP tools (conservative default).
-func (m *ToolExecutor) IsReadOnly(name string) bool {
-	return false
 }
