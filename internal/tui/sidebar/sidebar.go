@@ -68,6 +68,19 @@ func (m *Model) SelectedPath() string {
 	return m.selected
 }
 
+// VisiblePaths returns the paths of all nodes currently visible in the flat
+// tree, including collapsed directories.
+func (m *Model) VisiblePaths() []string {
+	if m.flatDirty {
+		m.rebuildFlat()
+	}
+	paths := make([]string, len(m.flat))
+	for i, node := range m.flat {
+		paths[i] = node.Path
+	}
+	return paths
+}
+
 // New creates a new sidebar model for the given root directory.
 func New(st *styles.Styles, root string) (*Model, error) {
 	if root == "" {

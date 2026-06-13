@@ -83,6 +83,7 @@ type Styles struct {
 	SidebarItem      lipgloss.Style
 	SidebarSelected  lipgloss.Style
 	InputBox         lipgloss.Style
+	MentionPopup     lipgloss.Style
 	ScrollIndicator  lipgloss.Style
 	ApprovalDialog   lipgloss.Style
 }
@@ -191,6 +192,13 @@ func (s *Styles) init() {
 		Foreground(t.Foreground).
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(t.Border).
+		Padding(0, 1)
+
+	s.MentionPopup = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Foreground).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(t.Primary).
 		Padding(0, 1)
 
 	s.ScrollIndicator = lipgloss.NewStyle().

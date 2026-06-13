@@ -354,3 +354,204 @@ func TestSetWidth(t *testing.T) {
 		t.Error("View() should not be empty after setting width")
 	}
 }
+
+
+func TestMentionDetection(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{
+		"cmd/kimi-lite/main.go",
+		"cmd/kimi-lite/root.go",
+		"internal/app/app.go",
+	})
+
+	m.SetValue("@cmd")
+	m.detectMention()
+
+	if !m.Completing() {
+		t.Fatal("expected completion to be active for @cmd")
+	}
+	// Only the two paths prefixed with "cmd/" match; "internal/app/app.go"
+	// matches by basename only when the query targets "app".
+	if len(m.mention.candidates) != 2 {
+		t.Errorf("candidates = %d, want 2", len(m.mention.candidates))
+	}
+}
+
+func TestMentionNoAtSymbol(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{"cmd/kimi-lite/main.go"})
+
+	m.SetValue("cmd")
+	m.detectMention()
+
+	if m.Completing() {
+		t.Error("expected no completion without @ prefix")
+	}
+}
+
+func TestMentionPrefixMatching(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{
+		"cmd/kimi-lite/main.go",
+		"cmd/kimi-lite/root.go",
+		"internal/app/app.go",
+	})
+
+	m.SetValue("@main")
+	m.detectMention()
+
+	if !m.Completing() {
+		t.Fatal("expected completion for basename prefix @main")
+	}
+	if len(m.mention.candidates) != 1 {
+		t.Fatalf("candidates = %d, want 1", len(m.mention.candidates))
+	}
+	if m.mention.candidates[0] != "cmd/kimi-lite/main.go" {
+		t.Errorf("candidate = %q, want cmd/kimi-lite/main.go", m.mention.candidates[0])
+	}
+}
+
+func TestMentionCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{"CMD/Kimi-Lite/Main.go"})
+
+	m.SetValue("@cmd")
+	m.detectMention()
+
+	if !m.Completing() {
+		t.Fatal("expected case-insensitive completion")
+	}
+}
+
+func TestMentionInsertCandidate(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{
+		"cmd/kimi-lite/main.go",
+		"cmd/kimi-lite/root.go",
+	})
+
+	m.SetValue("@cmd")
+	m.detectMention()
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	inp := updated.(*Model)
+
+	want := "@cmd/kimi-lite/main.go"
+	if inp.Value() != want {
+		t.Errorf("value = %q, want %q", inp.Value(), want)
+	}
+	if inp.Completing() {
+		t.Error("completion should close after insertion")
+	}
+}
+
+func TestMentionNavigateAndInsert(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{
+		"cmd/kimi-lite/main.go",
+		"cmd/kimi-lite/root.go",
+	})
+
+	m.SetValue("@cmd")
+	m.detectMention()
+
+	m.UpdateMsg(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	inp := updated.(*Model)
+
+	want := "@cmd/kimi-lite/root.go"
+	if inp.Value() != want {
+		t.Errorf("value = %q, want %q", inp.Value(), want)
+	}
+}
+
+func TestMentionCloseWithEsc(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{"cmd/kimi-lite/main.go"})
+
+	m.SetValue("@cmd")
+	m.detectMention()
+	if !m.Completing() {
+		t.Fatal("expected completion active")
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	inp := updated.(*Model)
+
+	if inp.Completing() {
+		t.Error("expected completion to close on Esc")
+	}
+}
+
+func TestMentionSetFileCandidatesRefresh(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{"cmd/kimi-lite/main.go"})
+
+	m.SetValue("@cmd")
+	m.detectMention()
+	if !m.Completing() {
+		t.Fatal("expected completion active")
+	}
+
+	m.SetFileCandidates([]string{})
+	if m.Completing() {
+		t.Error("expected completion to close when candidates are cleared")
+	}
+}
+
+func TestMentionViewContainsPopup(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(100)
+	m.SetFileCandidates([]string{"cmd/kimi-lite/main.go"})
+
+	m.SetValue("@cmd")
+	m.detectMention()
+
+	view := m.View()
+	if !strings.Contains(view, "cmd/kimi-lite/main.go") {
+		t.Error("expected View() to contain the completion candidate")
+	}
+}

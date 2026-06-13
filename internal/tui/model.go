@@ -205,6 +205,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 		approvalMode: 1,
 	}
 	m.updateLayout()
+	m.syncInputCandidates()
 	return m, nil
 }
 
@@ -286,7 +287,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		cmds = append(cmds, m.handleKeyMsg(msg)...)
+		// Let the input component consume completion keys while a popup is open.
+		if !m.input.Completing() {
+			cmds = append(cmds, m.handleKeyMsg(msg)...)
+		}
 	case tea.MouseMsg:
 		m.handleMouseMsg(msg)
 	case tea.WindowSizeMsg:
@@ -388,6 +392,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case focusSidebar:
 				if m.sidebar.Visible() {
 					cmds = append(cmds, m.sidebar.UpdateMsg(msg))
+					m.syncInputCandidates()
 				}
 			}
 		}
@@ -395,6 +400,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.input.UpdateMsg(msg))
 		cmds = append(cmds, m.vp.UpdateMsg(msg))
 		cmds = append(cmds, m.sidebar.UpdateMsg(msg))
+		m.syncInputCandidates()
 	}
 
 	// Update messages - do not pass KeyMsg to message components (mouse only)
@@ -496,6 +502,12 @@ func (m *Model) setState(s api.TurnState) {
 	m.state = s
 }
 
+// syncInputCandidates refreshes the input's file completion list from the
+// sidebar's currently visible tree.
+func (m *Model) syncInputCandidates() {
+	m.input.SetFileCandidates(m.sidebar.VisiblePaths())
+}
+
 func (m *Model) handleKeyMsg(msg tea.KeyMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 
@@ -544,6 +556,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) []tea.Cmd {
 		m.updateLayout()
 		if !m.sidebar.Visible() && m.focused == focusSidebar {
 			m.focused = focusInput
+			m.syncInputCandidates()
 			if cmd := m.input.Focus(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -596,6 +609,7 @@ func (m *Model) cycleFocus(delta int) tea.Cmd {
 	m.focused = components[newIdx]
 
 	if m.focused == focusInput {
+		m.syncInputCandidates()
 		return m.input.Focus()
 	}
 	m.input.Blur()
@@ -616,6 +630,7 @@ func (m *Model) handleMouseMsg(msg tea.MouseMsg) {
 
 	if msg.Y >= l.vpHeight && msg.Y < l.statusY {
 		m.focused = focusInput
+		m.syncInputCandidates()
 	} else if msg.Y < l.vpHeight {
 		m.focused = focusViewport
 	}
