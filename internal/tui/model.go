@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	gloss "charm.land/lipgloss/v2"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -950,10 +951,8 @@ func (m *Model) renderApprovalDialog(background string) string {
 // stable even on narrow terminals or when the dialog is larger than the
 // background. Wide runes (CJK/emoji) are handled via ansi.Cut.
 //
-// Note: lipgloss.PlaceOverlay is not available in the pinned version, so the
-// overlay is implemented manually with explicit cell-level cuts. The endX==width
-// boundary is handled by cutCells, which returns an empty string when the slice
-// range is empty.
+// The overlay is implemented with lipgloss v2's Canvas and Layer compositor
+// instead of hand-rolled ANSI string splicing.
 func overlayDialog(background string, dialog string, width int, height int) string {
 	bgLines := strings.Split(background, "\n")
 
@@ -974,8 +973,8 @@ func overlayDialog(background string, dialog string, width int, height int) stri
 		}
 	}
 
-	dialogHeight := lipgloss.Height(dialog)
-	dialogWidth := lipgloss.Width(dialog)
+	dialogHeight := gloss.Height(dialog)
+	dialogWidth := gloss.Width(dialog)
 
 	startY := (height - dialogHeight) / 2
 	if startY < 0 {
@@ -985,43 +984,47 @@ func overlayDialog(background string, dialog string, width int, height int) stri
 	if startX < 0 {
 		startX = 0
 	}
-	endX := startX + dialogWidth
 
-	for i, dLine := range strings.Split(dialog, "\n") {
-		y := startY + i
-		if y < 0 || y >= height {
-			continue
-		}
-
-		// Clamp the dialog line so the rendered output never exceeds the
-		// requested width, even on very narrow terminals.
-		maxDialogWidth := width - startX
+	// Clamp the dialog line so the rendered output never exceeds the
+	// requested width, even on very narrow terminals.
+	maxDialogWidth := width - startX
+	dialogLines := strings.Split(dialog, "\n")
+	for i, dLine := range dialogLines {
 		if ansi.StringWidth(dLine) > maxDialogWidth {
-			dLine = ansi.Cut(dLine, 0, maxDialogWidth)
+			dialogLines[i] = ansi.Cut(dLine, 0, maxDialogWidth)
 		}
-
-		bgLine := bgLines[y]
-		leftPart := cutCells(bgLine, 0, startX)
-		rightPart := cutCells(bgLine, endX, width)
-
-		bgLines[y] = leftPart + dLine + rightPart
 	}
+	dialog = strings.Join(dialogLines, "\n")
 
-	return strings.Join(bgLines, "\n")
+	comp := gloss.NewCompositor(
+		gloss.NewLayer(strings.Join(bgLines, "\n")),
+		gloss.NewLayer(dialog).X(startX).Y(startY).Z(1),
+	)
+	rendered := gloss.NewCanvas(width, height).Compose(comp).Render()
+
+	// Canvas.Render trims trailing whitespace. Re-normalize each line to the
+	// requested width x height so callers get a stable, predictable rectangle.
+	return normalizeRect(rendered, width, height)
 }
 
-// cutCells returns the substring of s covering the half-open cell range
-// [start, end). It returns an empty string when start >= end or end <= 0,
-// ensuring callers do not need special-case handling for boundary values
-// such as endX == width or startX == 0.
-func cutCells(s string, start, end int) string {
-	if start >= end || end <= 0 {
-		return ""
+// normalizeRect pads or truncates a rendered string so that every line has
+// exactly width cells and the output contains exactly height lines.
+func normalizeRect(s string, width, height int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) < height {
+		lines = append(lines, make([]string, height-len(lines))...)
 	}
-	if start < 0 {
-		start = 0
+	lines = lines[:height]
+	for i, line := range lines {
+		lineWidth := ansi.StringWidth(line)
+		switch {
+		case lineWidth > width:
+			lines[i] = ansi.Cut(line, 0, width)
+		case lineWidth < width:
+			lines[i] = line + strings.Repeat(" ", width-lineWidth)
+		}
 	}
-	return ansi.Cut(s, start, end)
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) statusBar() string {

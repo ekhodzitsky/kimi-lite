@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-06-13
+
+### Changed
+
+- **Lipgloss v2 overlay compositor** — replaced the hand-rolled ANSI string splicing in the approval-dialog overlay with `charm.land/lipgloss/v2`'s `Canvas`/`Compositor`. This closes the R08 parity-gap item and makes wide-rune/CJK dialog positioning more reliable.
+
 ## [0.2.5] - 2026-06-13
 
 ### Added
@@ -93,6 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `--debug` flag, sanitized error logging, structured `slog` output.
 - **Cross-platform** — static binary with `CGO_ENABLED=0`, supports macOS, Linux (glibc & musl), ARM64.
 
+[0.2.6]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.6
 [0.2.5]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.5
 [0.2.4]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.4
 [0.2.3]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.3

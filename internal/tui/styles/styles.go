@@ -1,9 +1,7 @@
 // Package styles provides Lipgloss styles for the kimi-lite TUI.
 package styles
 
-import (
-	"github.com/charmbracelet/lipgloss"
-)
+import "github.com/charmbracelet/lipgloss"
 
 // Theme represents a UI theme with color definitions.
 type Theme struct {
