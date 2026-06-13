@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -332,6 +334,71 @@ done
 	}
 	if !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("expected 'closed' error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_CloseKillsAfterGracePeriod(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix signals required")
+	}
+
+	tmpDir := t.TempDir()
+	helperSrc := filepath.Join(tmpDir, "ignoreterm.go")
+	helperBin := filepath.Join(tmpDir, "ignoreterm")
+	src := `package main
+
+import (
+	"fmt"
+	"os/signal"
+	"syscall"
+	"time"
+)
+
+func main() {
+	signal.Ignore(syscall.SIGTERM)
+	fmt.Println("ready")
+	time.Sleep(30 * time.Second)
+}
+`
+	if err := os.WriteFile(helperSrc, []byte(src), 0644); err != nil {
+		t.Fatalf("write helper source: %v", err)
+	}
+	buildCmd := exec.Command("go", "build", "-o", helperBin, helperSrc)
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build helper: %v\n%s", err, out)
+	}
+
+	tr := NewStdioTransport(helperBin)
+	tr.closeTimeout = 50 * time.Millisecond
+	ctx := context.Background()
+
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	tr.mu.Lock()
+	pid := tr.cmd.Process.Pid
+	tr.mu.Unlock()
+
+	start := time.Now()
+	if err := tr.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Should wait roughly the configured grace period, not the full 5s default.
+	if elapsed > 2*time.Second {
+		t.Fatalf("Close took too long: %v", elapsed)
+	}
+	if elapsed < 50*time.Millisecond {
+		t.Fatalf("Close returned before grace period: %v", elapsed)
+	}
+
+	// Process should have been reaped; signal 0 will fail if it is gone.
+	if err := syscall.Kill(pid, 0); err == nil {
+		t.Fatal("expected child process to be killed")
 	}
 }
 
