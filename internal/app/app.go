@@ -90,6 +90,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		SandboxRoot:    sandboxRoot,
 		HTTPClient:     nil,
 		ProtectedPaths: []string{configPath, cfg.Session.DBPath},
+		PassEnv:        cfg.Behavior.PassEnv,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create built-in tool executor: %w", err)

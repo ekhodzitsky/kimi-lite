@@ -61,6 +61,7 @@ func DefaultConfig() *api.Config {
 			MaxToolRounds:     10,
 			AllowShell:        true,
 			CompactKeepRecent: 2,
+			PassEnv:           false,
 		},
 		Permission: api.PermissionConfig{
 			Rules: []api.PermissionRule{},
