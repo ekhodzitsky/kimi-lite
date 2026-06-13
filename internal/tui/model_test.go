@@ -1046,6 +1046,14 @@ func (s *slowSessionManager) ClearMessages(ctx context.Context, id string) error
 	<-ctx.Done()
 	return ctx.Err()
 }
+func (s *slowSessionManager) Rename(ctx context.Context, id string, name string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (s *slowSessionManager) Fork(ctx context.Context, sourceID string, name string) (*api.Session, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
 
 type mockStore struct{}
 

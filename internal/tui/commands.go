@@ -81,6 +81,16 @@ type MCPListMsg struct {
 	Tools []api.ToolDefinition
 }
 
+// SetTitleMsg carries the new name for the current session.
+type SetTitleMsg struct {
+	Name string
+}
+
+// ForkResultMsg carries the result of forking the current session.
+type ForkResultMsg struct {
+	Session *api.Session
+}
+
 // debouncedResizeMsg is emitted after the terminal size has settled.
 type debouncedResizeMsg struct {
 	gen int
@@ -165,6 +175,35 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 				return ErrorMsg{Err: fmt.Errorf("list mcp tools: %w", err)}
 			}
 			return MCPListMsg{Tools: tools}
+		}
+	case "/title":
+		name := strings.TrimSpace(strings.TrimPrefix(content, cmd))
+		if name == "" {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("usage: /title <name>"), m.styles))
+			return nil
+		}
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Renaming session to %q...", name), m.styles))
+		return func() tea.Msg {
+			if m.sessionManager == nil || m.session == nil {
+				return ErrorMsg{Err: fmt.Errorf("no session to rename")}
+			}
+			if err := m.sessionManager.Rename(context.Background(), m.session.ID, name); err != nil {
+				return ErrorMsg{Err: fmt.Errorf("rename session: %w", err)}
+			}
+			return SetTitleMsg{Name: name}
+		}
+	case "/fork":
+		name := strings.TrimSpace(strings.TrimPrefix(content, cmd))
+		m.addMessage(msgcomp.NewUserMessage("Forking session...", m.styles))
+		return func() tea.Msg {
+			if m.sessionManager == nil || m.session == nil {
+				return ErrorMsg{Err: fmt.Errorf("no session to fork")}
+			}
+			sess, err := m.sessionManager.Fork(context.Background(), m.session.ID, name)
+			if err != nil {
+				return ErrorMsg{Err: fmt.Errorf("fork session: %w", err)}
+			}
+			return ForkResultMsg{Session: sess}
 		}
 	default:
 		m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("unknown command: %s", cmd), m.styles))

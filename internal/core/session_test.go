@@ -224,3 +224,94 @@ func TestSessionManager_ConcurrentCurrentID(t *testing.T) {
 		t.Errorf("current = %q, want %q", sm.CurrentSessionID(), ids[len(ids)-1])
 	}
 }
+
+func TestSessionManager_Rename(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	sess, err := sm.Start(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	if err := sm.Rename(ctx, sess.ID, "My Session"); err != nil {
+		t.Fatalf("rename session: %v", err)
+	}
+
+	updated, err := store.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if updated.Name != "My Session" {
+		t.Errorf("name = %q, want %q", updated.Name, "My Session")
+	}
+}
+
+func TestSessionManager_Fork(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	sess, err := sm.Start(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m1", Role: api.RoleUser, Content: "hello", CreatedAt: sess.CreatedAt})
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m2", Role: api.RoleAssistant, Content: "hi", CreatedAt: sess.CreatedAt})
+
+	forked, err := sm.Fork(ctx, sess.ID, "Forked Session")
+	if err != nil {
+		t.Fatalf("fork session: %v", err)
+	}
+
+	if forked.ID == sess.ID {
+		t.Error("forked session should have a new ID")
+	}
+	if forked.Name != "Forked Session" {
+		t.Errorf("name = %q, want %q", forked.Name, "Forked Session")
+	}
+	if forked.Path != "/tmp/proj" {
+		t.Errorf("path = %q, want %q", forked.Path, "/tmp/proj")
+	}
+	if len(forked.Messages) != 2 {
+		t.Errorf("expected 2 messages, got %d", len(forked.Messages))
+	}
+	if sm.CurrentSessionID() != forked.ID {
+		t.Errorf("current session = %q, want %q", sm.CurrentSessionID(), forked.ID)
+	}
+
+	// Verify messages are persisted under the new session.
+	storedMsgs, err := store.GetMessages(ctx, forked.ID, 0)
+	if err != nil {
+		t.Fatalf("get forked messages: %v", err)
+	}
+	if len(storedMsgs) != 2 {
+		t.Errorf("expected 2 stored messages, got %d", len(storedMsgs))
+	}
+}
+
+func TestSessionManager_Fork_DefaultName(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	sess, err := sm.Start(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	_ = sm.Rename(ctx, sess.ID, "Original")
+
+	forked, err := sm.Fork(ctx, sess.ID, "")
+	if err != nil {
+		t.Fatalf("fork session: %v", err)
+	}
+
+	want := "Fork of Original"
+	if forked.Name != want {
+		t.Errorf("name = %q, want %q", forked.Name, want)
+	}
+}

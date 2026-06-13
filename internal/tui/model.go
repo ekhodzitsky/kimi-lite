@@ -104,6 +104,8 @@ type turnManager interface {
 type sessionManager interface {
 	CurrentSessionID() string
 	ClearMessages(ctx context.Context, id string) error
+	Rename(ctx context.Context, id string, name string) error
+	Fork(ctx context.Context, sourceID string, name string) (*api.Session, error)
 }
 
 // compressor is the interface needed from core.ContextCompressor.
@@ -335,6 +337,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Compacted %d messages into a summary", msg.Count), m.styles))
 		}
+		m.setState(api.TurnIdle)
+
+	case SetTitleMsg:
+		if m.session != nil {
+			m.session.Name = msg.Name
+		}
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Session renamed to %q.", msg.Name), m.styles))
+		m.setState(api.TurnIdle)
+
+	case ForkResultMsg:
+		if msg.Session != nil {
+			m.session = msg.Session
+		}
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Forked to session %q (%s).", m.session.Name, m.session.ID), m.styles))
 		m.setState(api.TurnIdle)
 
 	case ApprovalRequestMsg:
