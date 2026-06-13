@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -1461,6 +1462,42 @@ func (e *BuiltInToolExecutor) execGrepRoot(relPath string, re *regexp.Regexp) (s
 	return strings.Join(results, "\n"), nil
 }
 
+// runCommandWithContext runs cmd and kills its whole process group when ctx is
+// cancelled or reaches its deadline. This ensures child processes spawned by a
+// shell (e.g. "sleep 5") are terminated along with the parent.
+func runCommandWithContext(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled: %w", err)
+	}
+	setProcessGroup(cmd)
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start command: %w", err)
+	}
+
+	done := make(chan struct{})
+	go func(pid int) {
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+		}
+		select {
+		case <-done:
+		default:
+			_ = killProcessGroupPID(pid)
+		}
+	}(cmd.Process.Pid)
+
+	err := cmd.Wait()
+	close(done)
+	return out.Bytes(), err
+}
+
 func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (string, error) {
 	if args.Command == "" {
 		return "", fmt.Errorf("command is required")
@@ -1494,7 +1531,7 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (st
 		cmd.Env = curatedEnv()
 	}
 	cmd.Dir = e.sandboxRoot
-	output, err := cmd.CombinedOutput()
+	output, err := runCommandWithContext(ctx, cmd)
 	outStr := string(output)
 	if len(outStr) > maxShellOutputSize {
 		outStr = strings.ToValidUTF8(outStr[:maxShellOutputSize], "")
