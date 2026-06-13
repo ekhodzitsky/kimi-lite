@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -30,6 +31,11 @@ var (
 	binaryName = "kimi-lite"
 )
 
+const (
+	outputFormatText = "text"
+	outputFormatJSON = "json"
+)
+
 type flags struct {
 	configPath   string
 	model        string
@@ -37,6 +43,8 @@ type flags struct {
 	continueLast bool
 	sessionID    string
 	debug        bool
+	prompt       string
+	outputFormat string
 }
 
 // appRunner is the interface for the application layer, allowing mocking in tests.
@@ -46,6 +54,7 @@ type appRunner interface {
 	ContinueLastSession(ctx context.Context) (*api.Session, error)
 	StartSession(ctx context.Context) (*api.Session, error)
 	Run(ctx context.Context, session *api.Session) error
+	RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
 	ExportSession(ctx context.Context, sessionID string) (*api.SessionExport, error)
 	ImportSession(ctx context.Context, export *api.SessionExport) (*api.Session, error)
 	Close() error
@@ -58,6 +67,9 @@ var newApp = func(cfg *api.Config, debug bool) (appRunner, error) {
 
 // writeDefaultConfig ensures the default config exists. Swapped in tests.
 var writeDefaultConfig = config.WriteDefaultConfig
+
+// stdout is the writer used by non-interactive prompt mode. Swapped in tests.
+var stdout io.Writer = os.Stdout
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -94,6 +106,8 @@ persistence, and MCP integration.`, binaryName),
 	rootCmd.Flags().BoolVar(&f.yolo, "yolo", false, "auto-approve all tool calls")
 	rootCmd.Flags().BoolVar(&f.continueLast, "continue", false, "resume last session in current directory")
 	rootCmd.Flags().StringVar(&f.sessionID, "session", "", "resume specific session by ID")
+	rootCmd.Flags().StringVarP(&f.prompt, "prompt", "p", "", "run a single prompt non-interactively and print the response")
+	rootCmd.Flags().StringVar(&f.outputFormat, "output-format", outputFormatText, "output format for non-interactive mode: text or json")
 	rootCmd.PersistentFlags().BoolVar(&f.debug, "debug", false, "enable debug logging")
 
 	rootCmd.AddCommand(newExportCmd(&f))
@@ -215,6 +229,11 @@ func run(ctx context.Context, f flags) error {
 		}
 	}
 
+	// Non-interactive prompt mode: skip TUI and stream one turn.
+	if f.prompt != "" {
+		return runPrompt(ctx, application, session, f)
+	}
+
 	// Print startup banner
 	fmt.Printf("[%s] v%s | model: %s\n", binaryName, version, cfg.LLM.Model)
 	if f.continueLast || f.sessionID != "" {
@@ -223,6 +242,86 @@ func run(ctx context.Context, f flags) error {
 
 	// Run the TUI
 	return application.Run(ctx, session)
+}
+
+// runPrompt executes a single turn without the TUI and prints the result.
+func runPrompt(ctx context.Context, application appRunner, session *api.Session, f flags) error {
+	// Non-interactive mode must not block on approval requests.
+	application.SetYolo(true)
+
+	if f.outputFormat != outputFormatText && f.outputFormat != outputFormatJSON {
+		return fmt.Errorf("unsupported output format %q, expected %q or %q", f.outputFormat, outputFormatText, outputFormatJSON)
+	}
+
+	eventCh, err := application.RunTurn(ctx, session.ID, f.prompt)
+	if err != nil {
+		return fmt.Errorf("run turn: %w", err)
+	}
+
+	enc := json.NewEncoder(stdout)
+	for event := range eventCh {
+		switch event.Type {
+		case api.TurnEventContent:
+			if f.outputFormat == outputFormatJSON {
+				if err := enc.Encode(promptEventJSON{
+					Type:    "content",
+					Content: event.Content,
+				}); err != nil {
+					return fmt.Errorf("encode content event: %w", err)
+				}
+				continue
+			}
+			fmt.Fprint(stdout, event.Content)
+
+		case api.TurnEventToolResult:
+			if f.outputFormat == outputFormatJSON {
+				if err := enc.Encode(promptEventJSON{
+					Type:   "tool_result",
+					Result: event.Result,
+				}); err != nil {
+					return fmt.Errorf("encode tool result event: %w", err)
+				}
+			}
+
+		case api.TurnEventApprovalRequest:
+			return fmt.Errorf("tool call %q requires approval; run with --yolo or use interactive mode", event.ToolCalls[0].Name)
+
+		case api.TurnEventError:
+			if event.Error == nil {
+				continue
+			}
+			if f.outputFormat == outputFormatJSON {
+				if err := enc.Encode(promptEventJSON{
+					Type:  "error",
+					Error: event.Error.Error(),
+				}); err != nil {
+					return fmt.Errorf("encode error event: %w", err)
+				}
+			}
+			return fmt.Errorf("turn error: %w", event.Error)
+
+		case api.TurnEventDone:
+			if f.outputFormat == outputFormatJSON {
+				if err := enc.Encode(promptEventJSON{Type: "done"}); err != nil {
+					return fmt.Errorf("encode done event: %w", err)
+				}
+			}
+		}
+	}
+
+	if f.outputFormat == outputFormatText {
+		fmt.Fprintln(stdout)
+	}
+	return nil
+}
+
+// promptEventJSON is a JSON-serializable representation of a turn event for
+// non-interactive prompt output.
+type promptEventJSON struct {
+	Type    string         `json:"type"`
+	Content string         `json:"content,omitempty"`
+	Error   string         `json:"error,omitempty"`
+	Result  api.ToolResult `json:"result,omitempty"`
 }
 
 func runExport(ctx context.Context, sessionID, outPath, configPath string) error {
