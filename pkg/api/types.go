@@ -358,14 +358,15 @@ type ConfigProvider interface {
 
 // Config holds the complete application configuration.
 type Config struct {
-	LLM         LLMConfig        `mapstructure:"llm"`
-	Behavior    BehaviorConfig   `mapstructure:"behavior"`
-	Permission  PermissionConfig `mapstructure:"permission"`
-	Session     SessionConfig    `mapstructure:"session"`
-	MCP         MCPConfig        `mapstructure:"mcp"`
-	WebSearch   WebSearchConfig  `mapstructure:"web_search"`
-	UI          UIConfig         `mapstructure:"ui"`
-	Keybindings KeybindingConfig `mapstructure:"keybindings"`
+	LLM         LLMConfig                  `mapstructure:"llm"`
+	Behavior    BehaviorConfig             `mapstructure:"behavior"`
+	Permission  PermissionConfig           `mapstructure:"permission"`
+	Session     SessionConfig              `mapstructure:"session"`
+	MCP         MCPConfig                  `mapstructure:"mcp"`
+	WebSearch   WebSearchConfig            `mapstructure:"web_search"`
+	UI          UIConfig                   `mapstructure:"ui"`
+	Keybindings KeybindingConfig           `mapstructure:"keybindings"`
+	MCPServers  map[string]MCPServerConfig `mapstructure:"mcp_servers"`
 }
 
 // LLMConfig holds LLM provider configuration.
@@ -425,6 +426,36 @@ type PermissionConfig struct {
 type SessionConfig struct {
 	DBPath     string `mapstructure:"db_path"`
 	MaxHistory int    `mapstructure:"max_history"`
+}
+
+// MCPTransport values.
+const (
+	// MCPTransportStdio uses a local subprocess over stdin/stdout.
+	MCPTransportStdio = "stdio"
+	// MCPTransportHTTP uses JSON-RPC over HTTP POST.
+	MCPTransportHTTP = "http"
+)
+
+// MCPServerConfig holds direct configuration for a single MCP server.
+type MCPServerConfig struct {
+	// Common fields.
+	Enabled          bool     `mapstructure:"enabled"`
+	Transport        string   `mapstructure:"transport"`
+	StartupTimeoutMs int      `mapstructure:"startup_timeout_ms"`
+	ToolTimeoutMs    int      `mapstructure:"tool_timeout_ms"`
+	EnabledTools     []string `mapstructure:"enabled_tools"`
+	DisabledTools    []string `mapstructure:"disabled_tools"`
+
+	// Stdio transport fields.
+	Command string            `mapstructure:"command"`
+	Args    []string          `mapstructure:"args"`
+	Env     map[string]string `mapstructure:"env"`
+	CWD     string            `mapstructure:"cwd"`
+
+	// HTTP transport fields.
+	URL               string            `mapstructure:"url"`
+	Headers           map[string]string `mapstructure:"headers"`
+	BearerTokenEnvVar string            `mapstructure:"bearer_token_env_var"`
 }
 
 // MCPConfig holds MCP integration settings.

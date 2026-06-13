@@ -48,6 +48,16 @@ max_history = 50
 guard_command = "mcp-guard"
 guard_config = "/tmp/mcp.toml"
 
+[mcp_servers.test]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+enabled = true
+startup_timeout_ms = 10000
+tool_timeout_ms = 30000
+enabled_tools = ["read_file"]
+disabled_tools = ["write_file"]
+
 [web_search]
 endpoint = "https://search.example.com"
 api_key = "search-key"
@@ -152,6 +162,35 @@ approve_always = "a"
 	// ShowTokenCount is intentionally false in the TOML; assert it decoded correctly.
 	if cfg.UI.ShowTokenCount {
 		t.Error("expected ui.show_token_count to be false")
+	}
+
+	// MCPServers
+	if len(cfg.MCPServers) == 0 {
+		t.Fatal("expected mcp_servers to be populated")
+	}
+	srv, ok := cfg.MCPServers["test"]
+	if !ok {
+		t.Fatal("expected mcp_servers.test")
+	}
+	if srv.Transport != api.MCPTransportStdio {
+		t.Errorf("expected mcp_servers.test.transport = stdio, got %q", srv.Transport)
+	}
+	if srv.Command != "npx" {
+		t.Errorf("expected mcp_servers.test.command = npx, got %q", srv.Command)
+	}
+	if len(srv.Args) == 0 {
+		t.Error("expected mcp_servers.test.args to be non-empty")
+	}
+	if !srv.Enabled {
+		t.Error("expected mcp_servers.test.enabled to be true")
+	}
+	assertPositive("mcp_servers.test.startup_timeout_ms", srv.StartupTimeoutMs)
+	assertPositive("mcp_servers.test.tool_timeout_ms", srv.ToolTimeoutMs)
+	if len(srv.EnabledTools) == 0 {
+		t.Error("expected mcp_servers.test.enabled_tools to be non-empty")
+	}
+	if len(srv.DisabledTools) == 0 {
+		t.Error("expected mcp_servers.test.disabled_tools to be non-empty")
 	}
 
 	// Keybindings

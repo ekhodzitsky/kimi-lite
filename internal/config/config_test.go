@@ -544,6 +544,147 @@ func TestValidateLLM(t *testing.T) {
 	}
 }
 
+func TestValidate_MCPServers(t *testing.T) {
+	t.Parallel()
+
+	validStdio := DefaultConfig()
+	validStdio.MCPServers = map[string]api.MCPServerConfig{
+		"fs": {
+			Enabled:   true,
+			Transport: api.MCPTransportStdio,
+			Command:   "npx",
+			Args:      []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+		},
+	}
+	if err := Validate(validStdio); err != nil {
+		t.Fatalf("expected valid stdio server, got: %v", err)
+	}
+
+	validHTTP := DefaultConfig()
+	validHTTP.MCPServers = map[string]api.MCPServerConfig{
+		"remote": {
+			Enabled:   true,
+			Transport: api.MCPTransportHTTP,
+			URL:       "https://example.com/mcp",
+		},
+	}
+	if err := Validate(validHTTP); err != nil {
+		t.Fatalf("expected valid http server, got: %v", err)
+	}
+
+	noCommand := DefaultConfig()
+	noCommand.MCPServers = map[string]api.MCPServerConfig{
+		"fs": {Enabled: true, Transport: api.MCPTransportStdio, Command: ""},
+	}
+	if err := Validate(noCommand); err == nil || !strings.Contains(err.Error(), "command") {
+		t.Fatalf("expected command validation error, got: %v", err)
+	}
+
+	badTransport := DefaultConfig()
+	badTransport.MCPServers = map[string]api.MCPServerConfig{
+		"x": {Enabled: true, Transport: "ws", Command: "cmd"},
+	}
+	if err := Validate(badTransport); err == nil || !strings.Contains(err.Error(), "transport") {
+		t.Fatalf("expected transport validation error, got: %v", err)
+	}
+
+	emptyURL := DefaultConfig()
+	emptyURL.MCPServers = map[string]api.MCPServerConfig{
+		"x": {Enabled: true, Transport: api.MCPTransportHTTP, URL: ""},
+	}
+	if err := Validate(emptyURL); err == nil || !strings.Contains(err.Error(), "url") {
+		t.Fatalf("expected url validation error, got: %v", err)
+	}
+
+	nonLocalHTTP := DefaultConfig()
+	nonLocalHTTP.MCPServers = map[string]api.MCPServerConfig{
+		"x": {Enabled: true, Transport: api.MCPTransportHTTP, URL: "http://example.com/mcp"},
+	}
+	if err := Validate(nonLocalHTTP); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("expected https validation error, got: %v", err)
+	}
+}
+
+func TestLoader_MCPServers(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := `
+[mcp_servers.fs]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+enabled = true
+startup_timeout_ms = 10000
+tool_timeout_ms = 30000
+enabled_tools = ["read_file"]
+disabled_tools = ["write_file"]
+
+[mcp_servers.remote]
+transport = "http"
+url = "https://example.com/mcp"
+enabled = true
+headers = { X-Custom = "value" }
+bearer_token_env_var = "MCP_TOKEN"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewLoader()
+	loader.SetConfigFile(configPath)
+	cfg, err := loader.Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	fs, ok := cfg.MCPServers["fs"]
+	if !ok {
+		t.Fatal("expected mcp_servers.fs")
+	}
+	if fs.Transport != api.MCPTransportStdio {
+		t.Errorf("fs.transport = %q, want stdio", fs.Transport)
+	}
+	if fs.Command != "npx" {
+		t.Errorf("fs.command = %q, want npx", fs.Command)
+	}
+	if len(fs.Args) != 3 || fs.Args[0] != "-y" {
+		t.Errorf("fs.args = %v, unexpected", fs.Args)
+	}
+	if fs.StartupTimeoutMs != 10000 {
+		t.Errorf("fs.startup_timeout_ms = %d, want 10000", fs.StartupTimeoutMs)
+	}
+	if fs.ToolTimeoutMs != 30000 {
+		t.Errorf("fs.tool_timeout_ms = %d, want 30000", fs.ToolTimeoutMs)
+	}
+	if len(fs.EnabledTools) != 1 || fs.EnabledTools[0] != "read_file" {
+		t.Errorf("fs.enabled_tools = %v, want [read_file]", fs.EnabledTools)
+	}
+	if len(fs.DisabledTools) != 1 || fs.DisabledTools[0] != "write_file" {
+		t.Errorf("fs.disabled_tools = %v, want [write_file]", fs.DisabledTools)
+	}
+
+	remote, ok := cfg.MCPServers["remote"]
+	if !ok {
+		t.Fatal("expected mcp_servers.remote")
+	}
+	if remote.URL != "https://example.com/mcp" {
+		t.Errorf("remote.url = %q, want https://example.com/mcp", remote.URL)
+	}
+	var headerVal string
+	for k, v := range remote.Headers {
+		if strings.EqualFold(k, "X-Custom") {
+			headerVal = v
+			break
+		}
+	}
+	if headerVal != "value" {
+		t.Errorf("remote.headers = %v, want X-Custom=value", remote.Headers)
+	}
+	if remote.BearerTokenEnvVar != "MCP_TOKEN" {
+		t.Errorf("remote.bearer_token_env_var = %q, want MCP_TOKEN", remote.BearerTokenEnvVar)
+	}
+}
+
 func TestValidate_AccumulatesErrors(t *testing.T) {
 	cfg := api.Config{
 		LLM: api.LLMConfig{
