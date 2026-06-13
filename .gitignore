@@ -33,6 +33,9 @@ bench.*.txt
 .env
 .env.local
 
+# Worktrees
+.worktrees/
+
 # Development artifacts / internal docs that shouldn't be public
 SECURITY_AUDIT*.md
 docs/audits/
