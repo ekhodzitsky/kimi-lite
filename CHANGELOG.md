@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Raw markdown toggle** — press `r` while the viewport is focused to toggle raw/rendered markdown for assistant messages.
+- **MCP read-only auto-approval** — read-only MCP tools (as annotated by the server) are now eligible for auto-approval in `auto` mode.
+- **Tool-aware compaction** — `/compact` now includes tool-call names/arguments and tool-result content in the summary so tool history is not flattened.
+
+### Changed
+
+- **Approval dialog** — file-edit approvals show an in-memory unified diff preview before yes/no/always.
+
 ## [0.2.4] - 2026-06-13
 
 ### Changed
