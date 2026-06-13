@@ -234,3 +234,42 @@ func TestApprovalGate_GlobRule(t *testing.T) {
 		t.Fatalf("expected ApprovalYes, got %v", decision)
 	}
 }
+
+func TestApprovalGate_RiskEvaluator_HighRisk(t *testing.T) {
+	t.Parallel()
+
+	gate := NewApprovalGate(ModeAuto, []string{"shell"}, func(string) bool { return true }, nil)
+	gate.SetRiskEvaluator(NewRiskEvaluator(nil, "/tmp"), api.RiskLevelMedium)
+
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "shell", Arguments: `{"command":"rm -rf /"}`})
+	if auto {
+		t.Fatal("expected shell to require approval")
+	}
+	if decision != api.ApprovalNo {
+		t.Fatalf("expected ApprovalNo, got %v", decision)
+	}
+}
+
+func TestApprovalGate_RiskEvaluator_LowRiskReadOnly(t *testing.T) {
+	t.Parallel()
+
+	gate := NewApprovalGate(ModeAuto, []string{"read_file"}, func(name string) bool { return name == "read_file" }, nil)
+	gate.SetRiskEvaluator(NewRiskEvaluator(nil, "/tmp"), api.RiskLevelMedium)
+
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "read_file", Arguments: `{"path":"/tmp/file.txt"}`})
+	if !auto || decision != api.ApprovalYes {
+		t.Fatalf("expected auto-approval, got decision=%v auto=%v", decision, auto)
+	}
+}
+
+func TestApprovalGate_RiskEvaluator_Yolo(t *testing.T) {
+	t.Parallel()
+
+	gate := NewApprovalGate(ModeYolo, []string{}, func(string) bool { return false }, nil)
+	gate.SetRiskEvaluator(NewRiskEvaluator(nil, "/tmp"), api.RiskLevelMedium)
+
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "shell", Arguments: `{"command":"rm -rf /"}`})
+	if !auto || decision != api.ApprovalYes {
+		t.Fatalf("expected yolo approval, got decision=%v auto=%v", decision, auto)
+	}
+}
