@@ -46,6 +46,13 @@ jobs:
       - name: Test with race detector
         run: go test -race -coverprofile=coverage.out ./...
 
+      - name: Fuzz smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go test -run=^$ -fuzz=FuzzReadChunk -fuzztime=10s ./internal/llm
+          go test -run=^$ -fuzz=FuzzIsBlockedHost -fuzztime=10s ./internal/netutil
+          go test -run=^$ -fuzz=FuzzValidatePath -fuzztime=10s ./internal/core
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
