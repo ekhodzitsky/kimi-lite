@@ -632,6 +632,54 @@ func TestStatusBarStates(t *testing.T) {
 	}
 }
 
+func TestStatusBar_ShowsContextUsageAfterTurn(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.UI.ShowTokenCount = true
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+	m.SetContextStats(0, 1000)
+
+	// Simulate a completed assistant turn that added a message with content.
+	m.messages = append(m.messages, &msgcomp.Message{
+		Type:    msgcomp.TypeAssistant,
+		Content: strings.Repeat("word ", 100), // 500 chars -> ~125 tokens
+	})
+
+	m.updateContextStats()
+
+	bar := m.statusBar()
+	if !strings.Contains(bar, "ctx:") {
+		t.Fatalf("status bar should show ctx usage, got %q", bar)
+	}
+	// The percentage must be non-zero after a non-empty turn.
+	if strings.Contains(bar, "ctx: 0%") {
+		t.Errorf("status bar should show non-zero ctx usage, got %q", bar)
+	}
+}
+
+func TestStatusBar_HidesContextUsageWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.UI.ShowTokenCount = false
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+	m.SetContextStats(50, 100)
+
+	bar := m.statusBar()
+	if strings.Contains(bar, "ctx:") {
+		t.Errorf("status bar should omit ctx field when ShowTokenCount=false, got %q", bar)
+	}
+}
+
 func TestStreamChunkWithToolCalls(t *testing.T) {
 	t.Parallel()
 
