@@ -1083,7 +1083,7 @@ func isBlockedHost(hostname string) bool {
 		return true
 	}
 	// IPv6 fe80::/10 (link-local unicast).
-	if len(ip) == net.IPv6len && ip[0] == 0xfe && ip[1]>>2 == 0x80>>2 {
+	if len(ip) == net.IPv6len && ip[0] == 0xfe && (ip[1]&0xc0) == 0x80 {
 		return true
 	}
 	return false

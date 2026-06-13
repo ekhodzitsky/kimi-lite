@@ -124,6 +124,19 @@ func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message,
 	}
 }
 
+// SetMetricsCollector propagates the collector to primary and fallback clients
+// that support metrics collection.
+func (c *FallbackClient) SetMetricsCollector(collector api.MetricsCollector) {
+	if mc, ok := c.primary.(interface{ SetMetricsCollector(api.MetricsCollector) }); ok {
+		mc.SetMetricsCollector(collector)
+	}
+	if c.fallback != nil {
+		if mc, ok := c.fallback.(interface{ SetMetricsCollector(api.MetricsCollector) }); ok {
+			mc.SetMetricsCollector(collector)
+		}
+	}
+}
+
 // Models returns the union of primary and fallback model lists,
 // deduplicated by ModelInfo.Name with primary-first ordering.
 func (c *FallbackClient) Models() []api.ModelInfo {

@@ -69,20 +69,30 @@ func (s *Server) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 	var wg sync.WaitGroup
 
 	for {
+		type readResult struct {
+			line []byte
+			err  error
+		}
+		readCh := make(chan readResult, 1)
+		go func() {
+			l, e := reader.ReadBytes('\n')
+			readCh <- readResult{line: l, err: e}
+		}()
+
+		var line []byte
 		select {
 		case <-ctx.Done():
 			wg.Wait()
 			return fmt.Errorf("context cancelled: %w", ctx.Err())
-		default:
-		}
-
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			wg.Wait()
-			if errors.Is(err, io.EOF) {
-				return nil
+		case res := <-readCh:
+			line = res.line
+			if res.err != nil {
+				wg.Wait()
+				if errors.Is(res.err, io.EOF) {
+					return nil
+				}
+				return fmt.Errorf("read stdin: %w", res.err)
 			}
-			return fmt.Errorf("read stdin: %w", err)
 		}
 
 		// Remove trailing newline/CR for cleaner logging and parsing.

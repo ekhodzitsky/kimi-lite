@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/sidebar"
@@ -152,7 +153,7 @@ type Model struct {
 	// Approval callbacks (wired by app layer)
 	autoApproveSetter  func(string)
 	approvalModeSetter func(int)
-	approvalMode       int // 1=ModeAuto, 2=ModeYolo
+	approvalMode       int // core.ModeAuto or core.ModeYolo; zero value is core.ModeManual
 
 	// Streaming state
 	streamCh       <-chan api.TurnEvent
@@ -633,10 +634,10 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	case m.config.Keybindings.Yolo:
 		if m.approvalModeSetter != nil {
 			m.mu.Lock()
-			if m.approvalMode == 1 {
-				m.approvalMode = 2
+			if m.approvalMode == int(core.ModeAuto) {
+				m.approvalMode = int(core.ModeYolo)
 			} else {
-				m.approvalMode = 1
+				m.approvalMode = int(core.ModeAuto)
 			}
 			mode := m.approvalMode
 			m.mu.Unlock()
@@ -1178,7 +1179,7 @@ func (m *Model) statusBar() string {
 	parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf(" %s ", modelName)))
 	parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf("[%s]", stateStr)))
 
-	if approvalMode == 2 {
+	if approvalMode == int(core.ModeYolo) {
 		parts = append(parts, m.styles.StatusBar.Render(" YOLO "))
 	}
 
