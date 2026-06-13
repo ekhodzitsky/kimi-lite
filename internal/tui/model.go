@@ -907,6 +907,11 @@ func (m *Model) renderApprovalDialog(background string) string {
 // height cells before the dialog is painted on top, so the rendered output is
 // stable even on narrow terminals or when the dialog is larger than the
 // background. Wide runes (CJK/emoji) are handled via ansi.Cut.
+//
+// Note: lipgloss.PlaceOverlay is not available in the pinned version, so the
+// overlay is implemented manually with explicit cell-level cuts. The endX==width
+// boundary is handled by cutCells, which returns an empty string when the slice
+// range is empty.
 func overlayDialog(background string, dialog string, width int, height int) string {
 	bgLines := strings.Split(background, "\n")
 
@@ -954,19 +959,27 @@ func overlayDialog(background string, dialog string, width int, height int) stri
 		}
 
 		bgLine := bgLines[y]
-
-		var leftPart, rightPart string
-		if startX > 0 {
-			leftPart = ansi.Cut(bgLine, 0, startX)
-		}
-		if endX < width {
-			rightPart = ansi.Cut(bgLine, endX, width)
-		}
+		leftPart := cutCells(bgLine, 0, startX)
+		rightPart := cutCells(bgLine, endX, width)
 
 		bgLines[y] = leftPart + dLine + rightPart
 	}
 
 	return strings.Join(bgLines, "\n")
+}
+
+// cutCells returns the substring of s covering the half-open cell range
+// [start, end). It returns an empty string when start >= end or end <= 0,
+// ensuring callers do not need special-case handling for boundary values
+// such as endX == width or startX == 0.
+func cutCells(s string, start, end int) string {
+	if start >= end || end <= 0 {
+		return ""
+	}
+	if start < 0 {
+		start = 0
+	}
+	return ansi.Cut(s, start, end)
 }
 
 func (m *Model) statusBar() string {
