@@ -6,20 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // updateGolden, when true, regenerates the golden files instead of comparing.
 var updateGolden = flag.Bool("update", false, "update golden files")
-
-// TestMain pins the lipgloss color profile to ASCII so that golden-file
-// comparisons are deterministic across terminals and CI environments.
-func TestMain(m *testing.M) {
-	flag.Parse()
-	lipgloss.SetColorProfile(termenv.Ascii)
-	os.Exit(m.Run())
-}
 
 // goldenPath returns the path to a golden file for the named snapshot.
 func goldenPath(t *testing.T, name string) string {
@@ -28,11 +19,14 @@ func goldenPath(t *testing.T, name string) string {
 }
 
 // compareGolden compares the rendered output against the named golden file.
-// Run with -update to regenerate golden files.
+// Run with -update to regenerate golden files. ANSI escape sequences are
+// stripped before comparison so snapshots stay deterministic regardless of
+// the terminal's color profile.
 func compareGolden(t *testing.T, name, got string) {
 	t.Helper()
 	path := goldenPath(t, name)
 
+	got = ansi.Strip(got)
 	if *updateGolden {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("mkdir golden dir: %v", err)
@@ -47,7 +41,7 @@ func compareGolden(t *testing.T, name, got string) {
 	if err != nil {
 		t.Fatalf("read golden file %s: %v", path, err)
 	}
-	want := string(wantBytes)
+	want := ansi.Strip(string(wantBytes))
 	if got != want {
 		t.Errorf("golden mismatch for %q\n--- got ---\n%s\n--- want ---\n%s", name, got, want)
 	}
