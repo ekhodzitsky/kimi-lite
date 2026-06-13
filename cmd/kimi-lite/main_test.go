@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -21,6 +22,11 @@ type mockApp struct {
 	startSessionCalled bool
 	runSession         *api.Session
 	runCalled          bool
+	runTurnSessionID   string
+	runTurnInput       string
+	runTurnCalled      bool
+	runTurnReturn      <-chan api.TurnEvent
+	runTurnErr         error
 
 	resumeSessionReturn *api.Session
 	continueLastReturn  *api.Session
@@ -52,6 +58,17 @@ func (m *mockApp) Run(_ context.Context, session *api.Session) error {
 	m.runCalled = true
 	m.runSession = session
 	return m.runErr
+}
+func (m *mockApp) RunTurn(_ context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	m.runTurnCalled = true
+	m.runTurnSessionID = sessionID
+	m.runTurnInput = input
+	if m.runTurnReturn == nil {
+		ch := make(chan api.TurnEvent)
+		close(ch)
+		return ch, m.runTurnErr
+	}
+	return m.runTurnReturn, m.runTurnErr
 }
 func (m *mockApp) ExportSession(_ context.Context, _ string) (*api.SessionExport, error) {
 	return m.exportReturn, nil
@@ -514,5 +531,212 @@ model = "kimi-k2.5"
 	}
 	if !mock.startSessionCalled {
 		t.Error("expected StartSession to be called despite writeDefaultConfig error")
+	}
+}
+
+func TestPromptFlag_TextOutput(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	ch := make(chan api.TurnEvent, 4)
+	ch <- api.TurnEvent{Type: api.TurnEventContent, Content: "Hello, "}
+	ch <- api.TurnEvent{Type: api.TurnEventContent, Content: "world!"}
+	ch <- api.TurnEvent{Type: api.TurnEventDone}
+	close(ch)
+
+	mock := &mockApp{
+		startSessionReturn: &api.Session{ID: "sess-prompt", Path: "/tmp"},
+		runTurnReturn:      ch,
+	}
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return mock, nil }
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	cmd := newRootCmd()
+	var buf bytes.Buffer
+	oldStdout := stdout
+	stdout = &buf
+	defer func() { stdout = oldStdout }()
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--prompt", "say hello", "--config", configPath})
+	err := cmd.Execute()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.startSessionCalled {
+		t.Error("expected StartSession to be called")
+	}
+	if !mock.setYoloCalled {
+		t.Error("expected yolo to be enabled for prompt mode")
+	}
+	if mock.runTurnInput != "say hello" {
+		t.Errorf("expected input %q, got %q", "say hello", mock.runTurnInput)
+	}
+	if mock.runCalled {
+		t.Error("expected TUI Run NOT to be called")
+	}
+	if buf.String() != "Hello, world!\n" {
+		t.Errorf("expected stdout %q, got %q", "Hello, world!\n", buf.String())
+	}
+}
+
+func TestPromptFlag_JSONOutput(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	ch := make(chan api.TurnEvent, 4)
+	ch <- api.TurnEvent{Type: api.TurnEventContent, Content: "hi"}
+	ch <- api.TurnEvent{Type: api.TurnEventToolResult, Result: api.ToolResult{CallID: "call-1", Name: "read_file", Output: "data"}}
+	ch <- api.TurnEvent{Type: api.TurnEventDone}
+	close(ch)
+
+	mock := &mockApp{
+		startSessionReturn: &api.Session{ID: "sess-json", Path: "/tmp"},
+		runTurnReturn:      ch,
+	}
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return mock, nil }
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	cmd := newRootCmd()
+	var buf bytes.Buffer
+	oldStdout := stdout
+	stdout = &buf
+	defer func() { stdout = oldStdout }()
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--prompt", "go", "--output-format", "json", "--config", configPath})
+	err := cmd.Execute()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 JSON lines, got %d: %q", len(lines), buf.String())
+	}
+	for _, line := range lines {
+		var ev promptEventJSON
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("invalid JSON line %q: %v", line, err)
+		}
+	}
+}
+
+func TestPromptFlag_ApprovalRequestErrors(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	ch := make(chan api.TurnEvent, 2)
+	ch <- api.TurnEvent{Type: api.TurnEventApprovalRequest, ToolCalls: []api.ToolCall{{ID: "call-1", Name: "write_file"}}}
+	close(ch)
+
+	mock := &mockApp{
+		startSessionReturn: &api.Session{ID: "sess-approval", Path: "/tmp"},
+		runTurnReturn:      ch,
+	}
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return mock, nil }
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	cmd := newRootCmd()
+	var buf bytes.Buffer
+	oldStdout := stdout
+	stdout = &buf
+	defer func() { stdout = oldStdout }()
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--prompt", "edit file", "--config", configPath})
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("expected error for approval request in prompt mode")
+	}
+	if !strings.Contains(err.Error(), "requires approval") {
+		t.Errorf("expected approval error, got: %v", err)
+	}
+}
+
+func TestPromptFlag_InvalidOutputFormat(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	mock := &mockApp{
+		startSessionReturn: &api.Session{ID: "sess-fmt", Path: "/tmp"},
+	}
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return mock, nil }
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	cmd := newRootCmd()
+	var buf bytes.Buffer
+	oldStdout := stdout
+	stdout = &buf
+	defer func() { stdout = oldStdout }()
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--prompt", "go", "--output-format", "xml", "--config", configPath})
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("expected error for invalid output format")
+	}
+	if !strings.Contains(err.Error(), "unsupported output format") {
+		t.Errorf("expected unsupported format error, got: %v", err)
 	}
 }

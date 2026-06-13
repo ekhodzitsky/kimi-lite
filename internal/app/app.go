@@ -188,6 +188,12 @@ func (a *App) ContinueLastSession(ctx context.Context) (*api.Session, error) {
 	return a.sessionManager.ContinueLast(ctx, wd)
 }
 
+// RunTurn executes a single turn for the given session and input.
+// It returns a channel that streams turn events.
+func (a *App) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return a.turnManager.RunTurn(ctx, sessionID, input)
+}
+
 // Run initializes the TUI and starts the Bubble Tea program.
 func (a *App) Run(ctx context.Context, session *api.Session) error {
 	// Create TUI model
