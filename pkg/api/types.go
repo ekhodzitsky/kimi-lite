@@ -358,15 +358,21 @@ type ConfigProvider interface {
 
 // Config holds the complete application configuration.
 type Config struct {
-	LLM         LLMConfig                  `mapstructure:"llm"`
-	Behavior    BehaviorConfig             `mapstructure:"behavior"`
-	Permission  PermissionConfig           `mapstructure:"permission"`
-	Session     SessionConfig              `mapstructure:"session"`
-	MCP         MCPConfig                  `mapstructure:"mcp"`
-	WebSearch   WebSearchConfig            `mapstructure:"web_search"`
-	UI          UIConfig                   `mapstructure:"ui"`
-	Keybindings KeybindingConfig           `mapstructure:"keybindings"`
-	MCPServers  map[string]MCPServerConfig `mapstructure:"mcp_servers"`
+	LLM             LLMConfig                  `mapstructure:"llm"`
+	Behavior        BehaviorConfig             `mapstructure:"behavior"`
+	Permission      PermissionConfig           `mapstructure:"permission"`
+	Session         SessionConfig              `mapstructure:"session"`
+	MCP             MCPConfig                  `mapstructure:"mcp"`
+	WebSearch       WebSearchConfig            `mapstructure:"web_search"`
+	UI              UIConfig                   `mapstructure:"ui"`
+	Keybindings     KeybindingConfig           `mapstructure:"keybindings"`
+	Hooks           []HookConfig               `mapstructure:"hooks"`
+	MCPServers      map[string]MCPServerConfig `mapstructure:"mcp_servers"`
+	Providers       map[string]ProviderConfig  `mapstructure:"providers"`
+	Models          map[string]ModelAlias      `mapstructure:"models"`
+	DefaultProvider string                     `mapstructure:"default_provider"`
+	DefaultModel    string                     `mapstructure:"default_model"`
+	PprofAddr       string                     `mapstructure:"pprof_addr"`
 }
 
 // LLMConfig holds LLM provider configuration.
@@ -379,6 +385,45 @@ type LLMConfig struct {
 	Fallback *LLMConfig    `mapstructure:"fallback"`
 }
 
+// ProviderType identifies the protocol adapter for an LLM provider.
+type ProviderType string
+
+const (
+	// ProviderTypeOpenAI is the OpenAI chat completions API.
+	ProviderTypeOpenAI ProviderType = "openai"
+	// ProviderTypeAnthropic is the Anthropic Messages API.
+	ProviderTypeAnthropic ProviderType = "anthropic"
+	// ProviderTypeKimi is the Moonshot/Kimi OpenAI-compatible API.
+	ProviderTypeKimi ProviderType = "kimi"
+	// ProviderTypeGoogleGenAI is the Google GenAI API.
+	ProviderTypeGoogleGenAI ProviderType = "google-genai"
+	// ProviderTypeOpenAIResponses is the OpenAI Responses API.
+	ProviderTypeOpenAIResponses ProviderType = "openai_responses"
+	// ProviderTypeVertexAI is the Google Vertex AI API.
+	ProviderTypeVertexAI ProviderType = "vertexai"
+)
+
+// ProviderConfig holds configuration for a single LLM provider.
+type ProviderConfig struct {
+	Type          string            `mapstructure:"type"`
+	APIKey        string            `json:"-" mapstructure:"api_key"`
+	BaseURL       string            `mapstructure:"base_url"`
+	DefaultModel  string            `mapstructure:"default_model"`
+	CustomHeaders map[string]string `mapstructure:"custom_headers"`
+	Env           map[string]string `mapstructure:"env"`
+}
+
+// ModelAlias maps a short alias to a concrete provider/model pair.
+type ModelAlias struct {
+	Provider       string   `mapstructure:"provider"`
+	Model          string   `mapstructure:"model"`
+	MaxContextSize int      `mapstructure:"max_context_size"`
+	MaxOutputSize  int      `mapstructure:"max_output_size"`
+	Capabilities   []string `mapstructure:"capabilities"`
+	DisplayName    string   `mapstructure:"display_name"`
+	ReasoningKey   string   `mapstructure:"reasoning_key"`
+}
+
 // BehaviorConfig holds behavior settings.
 type BehaviorConfig struct {
 	AutoApprove       []string      `mapstructure:"auto_approve"`
@@ -388,6 +433,7 @@ type BehaviorConfig struct {
 	AllowShell        bool          `mapstructure:"allow_shell"`
 	CompactKeepRecent int           `mapstructure:"compact_keep_recent"`
 	PassEnv           bool          `mapstructure:"pass_env"`
+	Skills            []string      `mapstructure:"skills"`
 }
 
 // PermissionDecision is the action a permission rule takes.
@@ -419,7 +465,36 @@ type PermissionRule struct {
 
 // PermissionConfig holds the permission rule list.
 type PermissionConfig struct {
-	Rules []PermissionRule `mapstructure:"rules"`
+	Rules         []PermissionRule `mapstructure:"rules"`
+	RiskThreshold RiskLevel        `mapstructure:"risk_threshold"`
+	RiskRules     []RiskRule       `mapstructure:"risk_rules"`
+}
+
+// RiskLevel describes the risk of a tool call.
+type RiskLevel string
+
+// Risk level values.
+const (
+	RiskLevelLow    RiskLevel = "low"
+	RiskLevelMedium RiskLevel = "medium"
+	RiskLevelHigh   RiskLevel = "high"
+)
+
+// Valid reports whether the risk level is one of the known values.
+func (r RiskLevel) Valid() bool {
+	switch r {
+	case RiskLevelLow, RiskLevelMedium, RiskLevelHigh:
+		return true
+	}
+	return false
+}
+
+// RiskRule overrides the default risk level for a matching tool call.
+type RiskRule struct {
+	Tool    string    `mapstructure:"tool" json:"tool"`
+	Path    string    `mapstructure:"path" json:"path,omitempty"`
+	Level   RiskLevel `mapstructure:"level" json:"level"`
+	Message string    `mapstructure:"message" json:"message,omitempty"`
 }
 
 // SessionConfig holds session persistence settings.
@@ -497,6 +572,112 @@ type UIConfig struct {
 	Theme          string `mapstructure:"theme"`
 	ShowTokenCount bool   `mapstructure:"show_token_count"`
 	Editor         string `mapstructure:"editor"`
+}
+
+// SubagentType identifies a built-in subagent.
+type SubagentType string
+
+// Built-in subagent types.
+const (
+	SubagentCoder   SubagentType = "coder"
+	SubagentExplore SubagentType = "explore"
+	SubagentPlan    SubagentType = "plan"
+)
+
+// SubagentRequest describes a single subagent invocation.
+type SubagentRequest struct {
+	Type         SubagentType  `json:"type"`
+	Prompt       string        `json:"prompt"`
+	Timeout      time.Duration `json:"timeout"`
+	SandboxRoot  string        `json:"sandbox_root"`
+	AllowedTools []string      `json:"allowed_tools,omitempty"`
+	MaxRounds    int           `json:"max_rounds"`
+}
+
+// SubagentResult is the outcome of a subagent run.
+type SubagentResult struct {
+	Output   string        `json:"output"`
+	Error    string        `json:"error,omitempty"`
+	Rounds   int           `json:"rounds"`
+	Duration time.Duration `json:"duration"`
+}
+
+// SubagentRunner executes subagent requests.
+type SubagentRunner interface {
+	// Run executes a subagent and returns its result.
+	Run(ctx context.Context, req SubagentRequest) (*SubagentResult, error)
+}
+
+// HookEvent identifies a point in the agent lifecycle where a hook may run.
+type HookEvent string
+
+// Hook events.
+const (
+	HookSessionStart     HookEvent = "session_start"
+	HookSessionEnd       HookEvent = "session_end"
+	HookTurnStart        HookEvent = "turn_start"
+	HookTurnEnd          HookEvent = "turn_end"
+	HookToolCall         HookEvent = "tool_call"
+	HookToolResult       HookEvent = "tool_result"
+	HookApprovalRequest  HookEvent = "approval_request"
+	HookApprovalDecision HookEvent = "approval_decision"
+)
+
+// String returns the string representation of the hook event.
+func (e HookEvent) String() string { return string(e) }
+
+// HookConfig configures a single lifecycle hook.
+type HookConfig struct {
+	Event           HookEvent         `mapstructure:"event"`
+	Command         string            `mapstructure:"command"`
+	Args            []string          `mapstructure:"args"`
+	Env             map[string]string `mapstructure:"env"`
+	Timeout         time.Duration     `mapstructure:"timeout"`
+	ContinueOnError bool              `mapstructure:"continue_on_error"`
+}
+
+// HookData is the payload passed to a hook command.
+type HookData struct {
+	Event      HookEvent
+	SessionID  string
+	TurnID     string
+	ToolName   string
+	ToolArgs   string
+	ToolResult string
+	Decision   string
+	Error      string
+}
+
+// HookRunner executes lifecycle hooks for a given event.
+type HookRunner interface {
+	Run(ctx context.Context, data HookData) error
+}
+
+// MetricsCollector collects counters and latency observations.
+type MetricsCollector interface {
+	// IncCounter increments a counter metric.
+	IncCounter(name string, tags ...string)
+	// RecordLatency records a latency observation.
+	RecordLatency(name string, d time.Duration, tags ...string)
+	// RecordError increments an error counter.
+	RecordError(name string)
+}
+
+// NoopMetricsCollector is a MetricsCollector that discards all observations.
+type NoopMetricsCollector struct{}
+
+// IncCounter does nothing.
+func (NoopMetricsCollector) IncCounter(string, ...string) {}
+
+// RecordLatency does nothing.
+func (NoopMetricsCollector) RecordLatency(string, time.Duration, ...string) {}
+
+// RecordError does nothing.
+func (NoopMetricsCollector) RecordError(string) {}
+
+// TokenEstimator estimates the number of tokens consumed by a message list.
+type TokenEstimator interface {
+	Estimate(messages []Message) int
 }
 
 // KeybindingConfig holds keybinding settings.

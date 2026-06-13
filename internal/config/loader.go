@@ -52,6 +52,10 @@ func NewLoader() *Loader {
 	v.SetDefault("mcp.guard_command", defaults.MCP.GuardCommand)
 	v.SetDefault("mcp.guard_config", defaults.MCP.GuardConfig)
 	v.SetDefault("mcp_servers", map[string]api.MCPServerConfig{})
+	v.SetDefault("providers", map[string]api.ProviderConfig{})
+	v.SetDefault("models", map[string]api.ModelAlias{})
+	v.SetDefault("default_provider", "")
+	v.SetDefault("default_model", "")
 	v.SetDefault("web_search.endpoint", defaults.WebSearch.Endpoint)
 	v.SetDefault("web_search.api_key", defaults.WebSearch.APIKey)
 	v.SetDefault("web_search.timeout", defaults.WebSearch.Timeout)
@@ -71,6 +75,7 @@ func NewLoader() *Loader {
 	v.SetDefault("keybindings.external_editor", defaults.Keybindings.ExternalEditor)
 	v.SetDefault("ui.editor", defaults.UI.Editor)
 	v.SetDefault("permission.rules", []api.PermissionRule{})
+	v.SetDefault("hooks", []api.HookConfig{})
 
 	return &Loader{v: v}
 }
@@ -101,6 +106,17 @@ func (l *Loader) Load() (*api.Config, error) {
 		cfg.LLM.Fallback.APIKey = resolveEnvVar(cfg.LLM.Fallback.APIKey)
 	}
 	cfg.WebSearch.APIKey = resolveEnvVar(cfg.WebSearch.APIKey)
+
+	for name, p := range cfg.Providers {
+		p.APIKey = resolveEnvVar(p.APIKey)
+		for k, v := range p.Env {
+			p.Env[k] = resolveEnvVar(v)
+		}
+		for k, v := range p.CustomHeaders {
+			p.CustomHeaders[k] = resolveEnvVar(v)
+		}
+		cfg.Providers[name] = p
+	}
 
 	// Expand paths
 	cfg.Session.DBPath = expandPath(cfg.Session.DBPath)
@@ -216,10 +232,15 @@ compact_keep_recent = 2
 [permission]
 # Permission rules override the default auto-approve behavior for read-only tools.
 # decision can be "allow", "deny", or "ask". scope can be "user", "session", or "turn".
+risk_threshold = "medium"
 # [[permission.rules]]
 # tool = "read_file"
 # decision = "ask"
 # scope = "user"
+# [[permission.risk_rules]]
+# tool = "shell"
+# level = "high"
+# message = "shell commands always require approval"
 
 [session]
 db_path = "~/.local/share/kimi-lite/sessions.db"
@@ -245,6 +266,27 @@ guard_config = "~/.config/mcp-guard/mcp-guard.toml"
 # url = "https://localhost:3000/mcp"
 # enabled = true
 # bearer_token_env_var = "MCP_API_TOKEN"
+
+# Multi-provider LLM configuration (optional). When providers is populated,
+# default_provider selects which provider to use and default_model can be a
+# raw model name or a key from the [models] table below.
+# [providers.openai]
+# type = "openai"
+# api_key = "$OPENAI_API_KEY"
+# base_url = "https://api.openai.com/v1"
+# default_model = "gpt-4o"
+# [providers.openai.custom_headers]
+# X-Custom = "value"
+#
+# [models.gpt4o]
+# provider = "openai"
+# model = "gpt-4o"
+# max_context_size = 128000
+# max_output_size = 4096
+# capabilities = ["vision"]
+#
+# default_provider = "openai"
+# default_model = "gpt4o"
 
 [web_search]
 # endpoint = "https://api.example.com/search"

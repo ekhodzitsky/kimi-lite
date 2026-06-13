@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseTurnState(t *testing.T) {
@@ -252,5 +253,85 @@ func TestSessionExport_VersionConstant(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"version":"1.0"`) {
 		t.Errorf("expected version 1.0 in export JSON, got %s", string(data))
+	}
+}
+
+func TestNoopMetricsCollector(t *testing.T) {
+	t.Parallel()
+	var c MetricsCollector = NoopMetricsCollector{}
+	c.IncCounter("x")
+	c.RecordLatency("y", time.Second)
+	c.RecordError("z")
+}
+
+func TestHookEvent_String(t *testing.T) {
+	t.Parallel()
+	if HookToolCall.String() != "tool_call" {
+		t.Fatalf("unexpected string: %q", HookToolCall.String())
+	}
+}
+
+func TestSubagentResult_JSONRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := SubagentResult{
+		Output:   "the answer",
+		Error:    "",
+		Rounds:   3,
+		Duration: time.Second,
+	}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var parsed SubagentResult
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if parsed.Output != original.Output {
+		t.Errorf("Output = %q, want %q", parsed.Output, original.Output)
+	}
+	if parsed.Rounds != original.Rounds {
+		t.Errorf("Rounds = %d, want %d", parsed.Rounds, original.Rounds)
+	}
+	if parsed.Duration != original.Duration {
+		t.Errorf("Duration = %v, want %v", parsed.Duration, original.Duration)
+	}
+}
+
+func TestRiskLevel_Valid(t *testing.T) {
+	t.Parallel()
+
+	for _, lvl := range []RiskLevel{RiskLevelLow, RiskLevelMedium, RiskLevelHigh} {
+		if !lvl.Valid() {
+			t.Errorf("expected %q to be valid", lvl)
+		}
+	}
+	if (RiskLevel("extreme")).Valid() {
+		t.Error("expected invalid level to be false")
+	}
+}
+
+func TestRiskRule_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	rule := RiskRule{
+		Tool:    "write_file",
+		Path:    "*.go",
+		Level:   RiskLevelMedium,
+		Message: "writing Go source",
+	}
+	data, err := json.Marshal(rule)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got RiskRule
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got != rule {
+		t.Errorf("round-trip failed: %+v != %+v", got, rule)
 	}
 }

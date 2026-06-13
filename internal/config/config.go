@@ -51,6 +51,88 @@ func validateLLM(prefix string, c api.LLMConfig) error {
 	return nil
 }
 
+func validateProviderType(t string) bool {
+	switch t {
+	case string(api.ProviderTypeOpenAI),
+		string(api.ProviderTypeAnthropic),
+		string(api.ProviderTypeKimi),
+		string(api.ProviderTypeGoogleGenAI),
+		string(api.ProviderTypeOpenAIResponses),
+		string(api.ProviderTypeVertexAI):
+		return true
+	default:
+		return false
+	}
+}
+
+func validateProviders(cfg *api.Config) error {
+	if len(cfg.Providers) == 0 {
+		return nil
+	}
+
+	var errs []error
+	if cfg.DefaultProvider == "" {
+		errs = append(errs, fmt.Errorf("default_provider must be set when providers is configured"))
+	} else if _, ok := cfg.Providers[cfg.DefaultProvider]; !ok {
+		errs = append(errs, fmt.Errorf("default_provider %q not found in providers", cfg.DefaultProvider))
+	}
+
+	for name, p := range cfg.Providers {
+		prefix := fmt.Sprintf("providers.%s", name)
+		if p.Type == "" {
+			errs = append(errs, fmt.Errorf("%s.type must not be empty", prefix))
+		} else if !validateProviderType(p.Type) {
+			errs = append(errs, fmt.Errorf("%s.type %q is not a supported provider type", prefix, p.Type))
+		}
+		if p.BaseURL == "" {
+			errs = append(errs, fmt.Errorf("%s.base_url must not be empty", prefix))
+		} else if err := validateURL(prefix+".base_url", p.BaseURL, false); err != nil {
+			errs = append(errs, err)
+		}
+		if p.APIKey == "" {
+			errs = append(errs, fmt.Errorf("%s.api_key must not be empty", prefix))
+		}
+		if p.DefaultModel == "" {
+			errs = append(errs, fmt.Errorf("%s.default_model must not be empty", prefix))
+		}
+	}
+
+	for name, m := range cfg.Models {
+		prefix := fmt.Sprintf("models.%s", name)
+		if m.Model == "" {
+			errs = append(errs, fmt.Errorf("%s.model must not be empty", prefix))
+		}
+		if m.Provider == "" {
+			errs = append(errs, fmt.Errorf("%s.provider must not be empty", prefix))
+		} else if _, ok := cfg.Providers[m.Provider]; !ok {
+			errs = append(errs, fmt.Errorf("%s.provider %q not found in providers", prefix, m.Provider))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func validateHooks(cfg *api.Config) error {
+	var errs []error
+	for i, h := range cfg.Hooks {
+		prefix := fmt.Sprintf("hooks[%d]", i)
+		switch h.Event {
+		case api.HookSessionStart, api.HookSessionEnd, api.HookTurnStart, api.HookTurnEnd,
+			api.HookToolCall, api.HookToolResult, api.HookApprovalRequest, api.HookApprovalDecision:
+			// ok
+		default:
+			errs = append(errs, fmt.Errorf("%s.event %q is not a supported hook event", prefix, h.Event))
+		}
+		if h.Command == "" {
+			errs = append(errs, fmt.Errorf("%s.command must not be empty", prefix))
+		}
+		if h.Timeout < 0 {
+			errs = append(errs, fmt.Errorf("%s.timeout must not be negative", prefix))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func validateMCPServer(name string, c api.MCPServerConfig) error {
 	if !c.Enabled {
 		return nil
@@ -91,6 +173,8 @@ func DefaultConfig() *api.Config {
 			BaseURL:  "https://api.moonshot.cn/v1",
 			Timeout:  60 * time.Second,
 		},
+		Providers: map[string]api.ProviderConfig{},
+		Models:    map[string]api.ModelAlias{},
 		Behavior: api.BehaviorConfig{
 			AutoApprove: []string{
 				"read_file",
@@ -108,7 +192,8 @@ func DefaultConfig() *api.Config {
 			PassEnv:           false,
 		},
 		Permission: api.PermissionConfig{
-			Rules: []api.PermissionRule{},
+			Rules:         []api.PermissionRule{},
+			RiskThreshold: api.RiskLevelMedium,
 		},
 		Session: api.SessionConfig{
 			DBPath:     "~/.local/share/kimi-lite/sessions.db",
@@ -141,6 +226,7 @@ func DefaultConfig() *api.Config {
 			ApproveAlways:  "a",
 			ExternalEditor: "ctrl+g",
 		},
+		Hooks: []api.HookConfig{},
 	}
 }
 
@@ -154,6 +240,9 @@ func Validate(cfg *api.Config) error {
 		if err := validateLLM("llm.fallback", *cfg.LLM.Fallback); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if err := validateProviders(cfg); err != nil {
+		errs = append(errs, err)
 	}
 	if cfg.Behavior.ShellTimeout <= 0 {
 		errs = append(errs, fmt.Errorf("behavior.shell_timeout must be positive"))
@@ -190,10 +279,25 @@ func Validate(cfg *api.Config) error {
 			errs = append(errs, fmt.Errorf("%s.scope must be one of user, session, turn, got %q", prefix, r.Scope))
 		}
 	}
+	if cfg.Permission.RiskThreshold != "" && !cfg.Permission.RiskThreshold.Valid() {
+		errs = append(errs, fmt.Errorf("permission.risk_threshold must be one of low, medium, high, got %q", cfg.Permission.RiskThreshold))
+	}
+	for i, r := range cfg.Permission.RiskRules {
+		prefix := fmt.Sprintf("permission.risk_rules[%d]", i)
+		if r.Tool == "" {
+			errs = append(errs, fmt.Errorf("%s.tool must not be empty", prefix))
+		}
+		if !r.Level.Valid() {
+			errs = append(errs, fmt.Errorf("%s.level must be one of low, medium, high, got %q", prefix, r.Level))
+		}
+	}
 	for name, srv := range cfg.MCPServers {
 		if err := validateMCPServer(name, srv); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if err := validateHooks(cfg); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

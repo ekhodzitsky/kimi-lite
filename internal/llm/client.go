@@ -34,13 +34,15 @@ var ErrEmptyResponse = errors.New("empty response from API")
 
 // Client implements api.LLMClient for OpenAI-compatible APIs.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	endpoint   string
-	apiKey     string
-	model      string
-	timeout    time.Duration
-	maxRetries int
+	httpClient   *http.Client
+	baseURL      string
+	endpoint     string
+	apiKey       string
+	model        string
+	timeout      time.Duration
+	maxRetries   int
+	extraHeaders http.Header
+	metrics      api.MetricsCollector
 }
 
 // NewClient creates a new LLM client from configuration.
@@ -67,17 +69,39 @@ func NewClient(cfg api.LLMConfig, httpClient *http.Client) *Client {
 		model:      cfg.Model,
 		timeout:    timeout,
 		maxRetries: defaultRetries,
+		metrics:    api.NoopMetricsCollector{},
+	}
+}
+
+// SetMetricsCollector sets the metrics collector.
+func (c *Client) SetMetricsCollector(m api.MetricsCollector) {
+	if m == nil {
+		m = api.NoopMetricsCollector{}
+	}
+	c.metrics = m
+}
+
+// SetHeaders replaces any custom headers sent with each request.
+func (c *Client) SetHeaders(headers map[string]string) {
+	c.extraHeaders = make(http.Header, len(headers))
+	for k, v := range headers {
+		c.extraHeaders.Set(k, v)
 	}
 }
 
 // Chat sends messages to the LLM and returns the complete response.
 func (c *Client) Chat(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+	start := time.Now()
+	c.metrics.IncCounter("llm.chat")
+
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
 	reqBody := c.buildChatRequest(messages, tools, false)
 	respBody, err := c.doRequest(ctx, reqBody)
 	if err != nil {
+		c.metrics.RecordError("llm.chat")
+		c.metrics.RecordLatency("llm.chat.latency", time.Since(start))
 		return nil, fmt.Errorf("chat request failed: %w", err)
 	}
 
@@ -100,6 +124,8 @@ func (c *Client) Chat(ctx context.Context, messages []api.Message, tools []api.T
 	if msg.FinishReason == "length" || msg.FinishReason == "content_filter" {
 		slog.Warn("LLM response truncated", "finish_reason", msg.FinishReason)
 	}
+
+	c.metrics.RecordLatency("llm.chat.latency", time.Since(start))
 
 	if len(choice.ToolCalls) > 0 {
 		msg.ToolCalls = make([]api.ToolCall, 0, len(choice.ToolCalls))
@@ -143,16 +169,22 @@ func sortedToolCalls(accumulator map[int]*rawToolCall) []api.ToolCall {
 // Callers should check chunk.Error for stream errors.
 // The streaming goroutine owns the HTTP response body and closes it via defer body.Close().
 func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+	start := time.Now()
+	c.metrics.IncCounter("llm.stream")
+
 	ctx, cancel := context.WithCancel(ctx)
 
 	reqBody := c.buildChatRequest(messages, tools, true)
 	body, err := c.doRequestStream(ctx, reqBody)
 	if err != nil {
+		c.metrics.RecordError("llm.stream")
+		c.metrics.RecordLatency("llm.stream.latency", time.Since(start))
 		cancel()
 		return nil, fmt.Errorf("chat stream request failed: %w", err)
 	}
 
 	ch := make(chan api.StreamChunk, 64)
+	c.metrics.RecordLatency("llm.stream.latency", time.Since(start))
 	go func() {
 		defer close(ch)
 		defer cancel()
@@ -309,6 +341,11 @@ func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream boo
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		if stream {
 			req.Header.Set("Accept", "text/event-stream")
+		}
+		for k, vals := range c.extraHeaders {
+			for _, v := range vals {
+				req.Header.Add(k, v)
+			}
 		}
 
 		resp, err := c.httpClient.Do(req)
