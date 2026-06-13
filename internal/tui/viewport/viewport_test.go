@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 )
@@ -50,11 +50,11 @@ func TestSetSize(t *testing.T) {
 	if m.height != 30 {
 		t.Errorf("height = %d, want 30", m.height)
 	}
-	if m.vp.Width != 100 {
-		t.Errorf("vp.Width = %d, want 100", m.vp.Width)
+	if m.vp.Width() != 100 {
+		t.Errorf("vp.Width = %d, want 100", m.vp.Width())
 	}
-	if m.vp.Height != 30 {
-		t.Errorf("vp.Height = %d, want 30", m.vp.Height)
+	if m.vp.Height() != 30 {
+		t.Errorf("vp.Height = %d, want 30", m.vp.Height())
 	}
 }
 
@@ -137,28 +137,28 @@ func TestKeyNavigation(t *testing.T) {
 	m.GotoBottom()
 
 	// Page up
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	vm := updated.(*Model)
 	if vm.autoScroll {
 		t.Error("autoScroll should be false after page up")
 	}
 
 	// Page down to bottom
-	updated, _ = vm.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	updated, _ = vm.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	vm = updated.(*Model)
 	if !vm.AtBottom() {
 		t.Error("should be at bottom after page down from near bottom")
 	}
 
 	// Home
-	updated, _ = vm.Update(tea.KeyMsg{Type: tea.KeyHome})
+	updated, _ = vm.Update(tea.KeyPressMsg{Code: tea.KeyHome})
 	vm = updated.(*Model)
 	if vm.autoScroll {
 		t.Error("autoScroll should be false after home")
 	}
 
 	// End
-	updated, _ = vm.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	updated, _ = vm.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
 	vm = updated.(*Model)
 	if !vm.autoScroll {
 		t.Error("autoScroll should be true after end")
@@ -175,14 +175,14 @@ func TestMouseScroll(t *testing.T) {
 	m.GotoBottom()
 
 	// Scroll up
-	updated, _ := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress})
+	updated, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
 	vm := updated.(*Model)
 	if vm.autoScroll {
 		t.Error("autoScroll should be false after scroll up")
 	}
 
 	// Scroll down to bottom
-	updated, _ = vm.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	updated, _ = vm.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
 	vm = updated.(*Model)
 	if !vm.AtBottom() {
 		t.Error("should be at bottom after scroll down")
@@ -199,7 +199,7 @@ func TestScrollIndicatorVisible(t *testing.T) {
 	m.GotoTop()
 
 	view := m.View()
-	if !strings.Contains(view, "▼") {
+	if !strings.Contains(view.Content, "▼") {
 		t.Error("View should contain scroll indicator when not at bottom")
 	}
 
@@ -207,4 +207,5 @@ func TestScrollIndicatorVisible(t *testing.T) {
 	view = m.View()
 	// When at bottom, the indicator logic may still show it depending on viewport internals
 	// We just verify View() doesn't panic
+	_ = view.Content
 }
