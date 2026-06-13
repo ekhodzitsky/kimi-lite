@@ -380,3 +380,33 @@ func TestSafeGlamourRender_FallbackOnError(t *testing.T) {
 		t.Errorf("expected raw content fallback, got %q", got)
 	}
 }
+
+func TestGoldenMessageViewUser(t *testing.T) {
+	st := styles.New("dark")
+	m := NewUserMessage("Hello, assistant!", st)
+	m.SetWidth(60)
+	compareGolden(t, "message_user", m.View())
+}
+
+func TestGoldenMessageViewAssistant(t *testing.T) {
+	st := styles.New("dark")
+	m := NewAssistantMessage("## Summary\n\nThis is **bold** and `code`.", st)
+	m.SetWidth(60)
+	compareGolden(t, "message_assistant", m.View())
+}
+
+func TestGoldenMessageViewToolCall(t *testing.T) {
+	st := styles.New("dark")
+	call := api.ToolCall{ID: "call_1", Name: "read_file", Arguments: `{"path": "/tmp/test"}`}
+	m := NewToolCallMessage(call, st)
+	m.Expanded = true
+	m.SetWidth(60)
+	compareGolden(t, "message_toolcall", m.View())
+}
+
+func TestGoldenMessageViewError(t *testing.T) {
+	st := styles.New("dark")
+	m := NewErrorMessage(errors.New("something went wrong"), st)
+	m.SetWidth(60)
+	compareGolden(t, "message_error", m.View())
+}
