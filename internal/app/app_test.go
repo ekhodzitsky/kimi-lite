@@ -963,6 +963,49 @@ func TestApp_New_MCPServers_AggregateTools(t *testing.T) {
 	}
 }
 
+func TestApp_New_MCPReadOnlyAutoApprove(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	dbPath := filepath.Join(tmpDir, "sessions.db")
+
+	originalFactory := newMCPClientForServer
+	defer func() { newMCPClientForServer = originalFactory }()
+	newMCPClientForServer = func(cfg api.MCPServerConfig) (api.MCPClient, error) {
+		return &fakeAppMCPClient{tools: []api.ToolDefinition{
+			{Name: "read_file", Description: "Read", Annotations: api.ToolAnnotations{ReadOnlyHint: true}},
+			{Name: "write_file", Description: "Write", Annotations: api.ToolAnnotations{ReadOnlyHint: false}},
+		}}, nil
+	}
+
+	cfg := testAppConfig(dbPath)
+	cfg.Behavior.AutoApprove = []string{"read_file", "mcp_read_file", "mcp_write_file"}
+	cfg.MCPServers = map[string]api.MCPServerConfig{
+		"local": {
+			Enabled:   true,
+			Transport: api.MCPTransportStdio,
+			Command:   "fake",
+		},
+	}
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	// Read-only MCP tool in auto_approve is kept and auto-approved.
+	decision, auto := a.approvalGate.ShouldAutoApprove(api.ToolCall{Name: "mcp_read_file"})
+	if !auto || decision != api.ApprovalYes {
+		t.Fatalf("expected mcp_read_file to be auto-approved, got decision=%v auto=%v", decision, auto)
+	}
+
+	// Non-read-only MCP tool in auto_approve is dropped (validation falls back to manual).
+	decision, auto = a.approvalGate.ShouldAutoApprove(api.ToolCall{Name: "mcp_write_file"})
+	if auto {
+		t.Fatalf("expected mcp_write_file to require manual approval, got decision=%v auto=%v", decision, auto)
+	}
+}
+
 func testAppConfig(dbPath string) *api.Config {
 	return &api.Config{
 		LLM: api.LLMConfig{

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-06-13
+
+### Added
+
+- **MCP read-only auto-approval regression test** — added end-to-end coverage verifying that read-only MCP tools listed in `behavior.auto_approve` are validated against `ToolExecutor.IsReadOnly` and auto-approved, while non-read-only MCP tools are dropped.
+
 ## [0.2.8] - 2026-06-13
 
 ### Added
