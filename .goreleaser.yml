@@ -56,11 +56,10 @@ sboms:
 
 signs:
   - cmd: cosign
-    env:
-      - COSIGN_EXPERIMENTAL=1
     certificate: '${artifact}.pem'
     args:
       - sign-blob
+      - '--yes'
       - '--output-certificate=${certificate}'
       - '--output-signature=${signature}'
       - '${artifact}'
@@ -84,16 +83,3 @@ release:
     name: kimi-lite
   draft: false
   prerelease: auto
-
-brews:
-  - name: kimi-lite
-    repository:
-      owner: ekhodzitsky
-      name: homebrew-tap
-    directory: Formula
-    homepage: https://github.com/ekhodzitsky/kimi-lite
-    description: Lightweight AI coding CLI
-    license: MIT
-    test: |
-      system "#{bin}/kimi-lite", "--version"
-    commit_msg_template: "Brew formula update for {{ .ProjectName }} version {{ .Tag }}"
