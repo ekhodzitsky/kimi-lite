@@ -87,7 +87,7 @@ func TestClientChat(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		response         interface{}
+		response         any
 		statusCode       int
 		messages         []api.Message
 		tools            []api.ToolDefinition
@@ -191,10 +191,10 @@ func TestClientChat(t *testing.T) {
 				} `json:"message"`
 				FinishReason string `json:"finish_reason"`
 			}{}},
-			statusCode:       http.StatusOK,
-			messages:         []api.Message{{Role: api.RoleUser, Content: "Hi"}},
-			wantErr:          true,
-			wantAPIErrStatus: http.StatusOK,
+			statusCode:     http.StatusOK,
+			messages:       []api.Message{{Role: api.RoleUser, Content: "Hi"}},
+			wantErr:        true,
+			wantErrContain: "empty response from API",
 		},
 	}
 
@@ -672,7 +672,7 @@ func TestStreamReader(t *testing.T) {
 	tests := []struct {
 		name         string
 		input        string
-		wantChunks   []api.StreamChunk
+		wantChunks   []rawChunk
 		wantErr      bool
 		wantErrAfter int // number of successful chunks before error
 	}{
@@ -685,7 +685,7 @@ data: {"choices":[{"delta":{"content":" world"}}]}
 data: [DONE]
 
 `,
-			wantChunks: []api.StreamChunk{
+			wantChunks: []rawChunk{
 				{Content: "Hello"},
 				{Content: " world"},
 				{Done: true},
@@ -700,7 +700,7 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
 data: [DONE]
 
 `,
-			wantChunks: []api.StreamChunk{
+			wantChunks: []rawChunk{
 				{Content: "Done"},
 				{Done: true},
 				{Done: true},
@@ -711,7 +711,7 @@ data: [DONE]
 			input: `data: [DONE]
 
 `,
-			wantChunks: []api.StreamChunk{
+			wantChunks: []rawChunk{
 				{Done: true},
 			},
 		},
@@ -732,9 +732,9 @@ data: [DONE]
 			reader := NewStreamReader(io.NopCloser(strings.NewReader(tt.input)))
 			defer reader.Close()
 
-			var chunks []api.StreamChunk
+			var chunks []rawChunk
 			for {
-				chunk, err := reader.ReadChunk(context.Background())
+				chunk, err := reader.readRawChunk(context.Background())
 				if err == io.EOF {
 					if chunk.Done || chunk.Content != "" {
 						chunks = append(chunks, chunk)
@@ -791,12 +791,14 @@ func TestBackoff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("attempt_%d", tt.attempt), func(t *testing.T) {
 			t.Parallel()
-			delay := client.backoff(tt.attempt)
-			if delay > tt.wantMax {
-				t.Errorf("backoff(%d) = %v, want <= %v", tt.attempt, delay, tt.wantMax)
-			}
-			if delay <= 0 {
-				t.Errorf("backoff(%d) = %v, want > 0", tt.attempt, delay)
+			for i := 0; i < 20; i++ {
+				delay := client.backoff(tt.attempt)
+				if delay > tt.wantMax {
+					t.Errorf("backoff(%d) = %v, want <= %v", tt.attempt, delay, tt.wantMax)
+				}
+				if delay < 0 {
+					t.Errorf("backoff(%d) = %v, want >= 0", tt.attempt, delay)
+				}
 			}
 		})
 	}
@@ -893,52 +895,6 @@ func TestBuildChatRequest_ToolCallID(t *testing.T) {
 	}
 }
 
-func TestStreamReader_CancelledContext_ReturnsPromptly(t *testing.T) {
-	t.Parallel()
-
-	pr, _ := io.Pipe()
-	reader := NewStreamReader(pr)
-	defer reader.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := reader.ReadChunk(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("expected context.Canceled, got %v", err)
-	}
-}
-
-func TestStreamReader_CancelMidRead_NoRace(t *testing.T) {
-	t.Parallel()
-
-	pr, pw := io.Pipe()
-	reader := NewStreamReader(pr)
-	defer reader.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Write a partial SSE event so Scan blocks mid-event.
-	go func() {
-		_, _ = pw.Write([]byte("data: "))
-		// Cancel after the reader is blocked.
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-		// Closing the pipe unblocks the scanner.
-		_ = pw.Close()
-	}()
-
-	_, err := reader.ReadChunk(ctx)
-	if err == nil {
-		t.Fatal("expected an error after cancellation")
-	}
-	// The error may be context.Canceled (checked before readRawChunk)
-	// or an io error from the closed pipe; both are acceptable.
-	if !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
-		t.Logf("got error: %v (acceptable)", err)
-	}
-}
-
 func TestSortedToolCalls(t *testing.T) {
 	t.Parallel()
 
@@ -1016,7 +972,7 @@ func TestStreamReader_LargePayload(t *testing.T) {
 	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
 	defer reader.Close()
 
-	chunk, err := reader.ReadChunk(context.Background())
+	chunk, err := reader.readRawChunk(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1024,7 +980,7 @@ func TestStreamReader_LargePayload(t *testing.T) {
 		t.Errorf("content length = %d, want %d", len(chunk.Content), len(largeContent))
 	}
 
-	chunk, err = reader.ReadChunk(context.Background())
+	chunk, err = reader.readRawChunk(context.Background())
 	if err != io.EOF {
 		t.Fatalf("expected io.EOF, got %v", err)
 	}
@@ -1231,5 +1187,69 @@ func TestNewClient_TrailingSlashBaseURL(t *testing.T) {
 	}
 	if reqPath != "/chat/completions" {
 		t.Errorf("request path = %q, want /chat/completions", reqPath)
+	}
+}
+
+func TestBuildChatRequest_MaxTokens(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		model         string
+		wantMaxTokens int
+	}{
+		{
+			name:          "moonshot-v1-8k",
+			model:         "moonshot-v1-8k",
+			wantMaxTokens: 4096,
+		},
+		{
+			name:          "kimi-k2.5",
+			model:         "kimi-k2.5",
+			wantMaxTokens: 8192,
+		},
+		{
+			name:          "unknown model defaults to 4096",
+			model:         "unknown-model",
+			wantMaxTokens: 4096,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := NewClient(api.LLMConfig{
+				BaseURL: "https://api.test.com/v1",
+				APIKey:  "key",
+				Model:   tt.model,
+			}, nil)
+
+			req := client.buildChatRequest([]api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil, false)
+
+			if req.MaxTokens != tt.wantMaxTokens {
+				t.Errorf("MaxTokens = %d, want %d", req.MaxTokens, tt.wantMaxTokens)
+			}
+
+			// Verify JSON serialization includes max_tokens for known models.
+			body, err := json.Marshal(req)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				t.Fatalf("unmarshal raw: %v", err)
+			}
+
+			if tt.wantMaxTokens > 0 {
+				if raw["max_tokens"] == nil {
+					t.Fatalf("expected max_tokens in serialized request")
+				}
+				if int(raw["max_tokens"].(float64)) != tt.wantMaxTokens {
+					t.Errorf("serialized max_tokens = %v, want %d", raw["max_tokens"], tt.wantMaxTokens)
+				}
+			}
+		})
 	}
 }

@@ -15,7 +15,7 @@ func TestNew(t *testing.T) {
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 
 	if m == nil {
 		t.Fatal("New() returned nil")
@@ -33,7 +33,7 @@ func TestInit(t *testing.T) {
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 	cmd := m.Init()
 	if cmd == nil {
 		t.Error("Init() should return a non-nil command")
@@ -45,7 +45,7 @@ func TestSendMessage(t *testing.T) {
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 	m.SetWidth(80)
 
 	m.SetValue("hello world")
@@ -74,7 +74,7 @@ func TestSendEmptyMessage(t *testing.T) {
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 	m.SetWidth(80)
 
 	m.SetValue("   ")
@@ -95,7 +95,7 @@ func TestNewline(t *testing.T) {
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 	m.SetWidth(80)
 
 	m.SetValue("line1")
@@ -116,7 +116,7 @@ func TestHistoryNavigationUpDown(t *testing.T) {
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 	m.SetWidth(80)
 
 	// Send three messages
@@ -164,7 +164,7 @@ func TestHistoryPreservesDraft(t *testing.T) {
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 	m.SetWidth(80)
 
 	m.SetValue("sent")
@@ -190,7 +190,7 @@ func TestFocusBlur(t *testing.T) {
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 
 	cmd := m.Focus()
 	if cmd == nil {
@@ -206,7 +206,7 @@ func TestReset(t *testing.T) {
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 	m.SetWidth(80)
 
 	m.SetValue("something")
@@ -233,12 +233,29 @@ func TestConfigurableKeyMap(t *testing.T) {
 	}
 }
 
+func TestConfigurableKeyMapHelp(t *testing.T) {
+	t.Parallel()
+
+	cfg := api.KeybindingConfig{
+		Send:    "ctrl+s",
+		Newline: "ctrl+j",
+	}
+	km := ConfigurableKeyMap(cfg)
+
+	if km.Send.Help().Desc == "" {
+		t.Error("Send binding should have non-empty help description")
+	}
+	if km.Newline.Help().Desc == "" {
+		t.Error("Newline binding should have non-empty help description")
+	}
+}
+
 func TestSetWidth(t *testing.T) {
 	t.Parallel()
 
 	st := styles.New("dark")
 	km := DefaultKeyMap()
-	m := New(st, km)
+	m := New(st, km, 100)
 	m.SetWidth(100)
 	view := m.View()
 	if view == "" {

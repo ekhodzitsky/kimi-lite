@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -19,70 +20,6 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
-// StreamChunkMsg carries a chunk from the LLM stream.
-type StreamChunkMsg struct {
-	Chunk api.StreamChunk
-}
-
-// ToolCallMsg signals that tool calls were received.
-type ToolCallMsg struct {
-	Calls []api.ToolCall
-}
-
-// ToolResultMsg carries a tool execution result.
-type ToolResultMsg struct {
-	Result api.ToolResult
-}
-
-// ErrorMsg carries an error to display.
-type ErrorMsg struct {
-	Err error
-}
-
-// StateChangeMsg signals a turn state change.
-type StateChangeMsg struct {
-	State api.TurnState
-}
-
-// ApprovalRequestMsg requests user approval for tool calls.
-type ApprovalRequestMsg struct {
-	Calls     []api.ToolCall
-	RequestID int64
-}
-
-// ApprovalResponseMsg carries the user's approval decision.
-type ApprovalResponseMsg struct {
-	Decision api.ApprovalDecision
-	CallID   string
-}
-
-// SendMessageMsg is emitted by the root model to the app layer.
-type SendMessageMsg struct {
-	Content string
-}
-
-// CompactMsg signals the app to compact the session.
-type CompactMsg struct{}
-
-// ClearMsg signals the app to clear messages.
-type ClearMsg struct{}
-
-// SessionsMsg signals the app to list sessions.
-type SessionsMsg struct{}
-
-// GoalMsg signals the app to set a goal.
-type GoalMsg struct {
-	Content string
-}
-
-// BTWMsg signals a btw message.
-type BTWMsg struct {
-	Content string
-}
-
-// CheckpointMsg signals the app to create a checkpoint.
-type CheckpointMsg struct{}
-
 // focusedComponent tracks which TUI component has keyboard focus.
 type focusedComponent int
 
@@ -93,19 +30,68 @@ const (
 )
 
 const (
-	statusHeight         = 1
-	minContentWidth      = 20
-	minViewportHeight    = 5
+	statusHeight      = 1
+	minContentWidth   = 20
+	minViewportHeight = 5
+	// viewportWidthPadding accounts for sidebar border + content padding.
 	viewportWidthPadding = 4
+	minInputHeight       = 3
+
+	resizeDebounce = 80 * time.Millisecond
 )
 
 // inputHeight returns the current rendered height of the input component.
 func (m *Model) inputHeight() int {
 	h := m.input.Height()
-	if h < 3 {
-		return 3
+	if h < minInputHeight {
+		return minInputHeight
 	}
 	return h
+}
+
+// layoutRect holds computed geometry for a single frame.
+type layoutRect struct {
+	sbWidth      int
+	contentWidth int
+	vpWidth      int
+	vpHeight     int
+	inputHeight  int
+	statusY      int
+}
+
+// eq reports whether two layouts have identical geometry.
+func (r layoutRect) eq(o layoutRect) bool {
+	return r.sbWidth == o.sbWidth &&
+		r.contentWidth == o.contentWidth &&
+		r.vpWidth == o.vpWidth &&
+		r.vpHeight == o.vpHeight &&
+		r.inputHeight == o.inputHeight &&
+		r.statusY == o.statusY
+}
+
+// layout computes all geometry once, folding in min-content/min-viewport clamps.
+func (m *Model) layout() layoutRect {
+	sbWidth := 0
+	if m.sidebar.Visible() {
+		sbWidth = m.sidebar.Width()
+	}
+	contentWidth := m.width - sbWidth
+	if contentWidth < minContentWidth {
+		contentWidth = minContentWidth
+	}
+	inputHeight := m.inputHeight()
+	vpHeight := m.height - statusHeight - inputHeight
+	if vpHeight < minViewportHeight {
+		vpHeight = minViewportHeight
+	}
+	return layoutRect{
+		sbWidth:      sbWidth,
+		contentWidth: contentWidth,
+		vpWidth:      contentWidth - viewportWidthPadding,
+		vpHeight:     vpHeight,
+		inputHeight:  inputHeight,
+		statusY:      vpHeight + inputHeight,
+	}
 }
 
 // turnManager is the interface needed from core.TurnManager.
@@ -145,8 +131,10 @@ type Model struct {
 	width  int
 	height int
 
-	pendingApprovals  []api.ToolCall
 	approvalRequestID int64
+
+	// Direct approval state (used by approval dialog and response handling)
+	pendingApprovals  []api.ToolCall
 	approvalIndex     int
 	approvalDecisions map[string]api.ApprovalDecision
 
@@ -158,19 +146,34 @@ type Model struct {
 	mcpClient      api.MCPClient
 	store          api.Store
 
+	// Approval callbacks (wired by app layer)
+	autoApproveSetter  func(string)
+	approvalModeSetter func(int)
+	approvalMode       int // 1=ModeAuto, 2=ModeYolo
+
 	// Streaming state
-	streamCh     <-chan api.TurnEvent
-	streamCancel context.CancelFunc
+	streamCh       <-chan api.TurnEvent
+	streamCancel   context.CancelFunc
+	streamCanceled bool // true after cancel/error until a new stream starts
 
 	// Focus management
 	focused focusedComponent
 
-	// Context propagation
+	// appCtx is the program-scoped context that tea.Cmd closures derive from
+	// because Bubble Tea's Update signature precludes per-call context passing.
 	appCtx context.Context
 
-	// Cached rendered content for O(1) viewport updates
-	renderedContent        strings.Builder
-	lastAssistantRenderPos int // byte position in renderedContent where the last assistant message starts
+	// renderBuffer owns renderedContent and incremental-render bookkeeping.
+	rb *renderBuffer
+
+	// lastLayout is the most recent layout for which the transcript was rebuilt.
+	lastLayout layoutRect
+	// pendingResize tracks whether a debounced rebuild is already scheduled.
+	pendingResize bool
+	// resizeGen increments for each scheduled debounced rebuild.
+	resizeGen int
+	// rebuildCount is used by tests to verify the number of full transcript rebuilds.
+	rebuildCount int
 
 	mu sync.RWMutex
 }
@@ -179,7 +182,7 @@ type Model struct {
 func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model, error) {
 	st := styles.New(cfg.UI.Theme)
 
-	inp := input.New(st, input.ConfigurableKeyMap(cfg.Keybindings))
+	inp := input.New(st, input.ConfigurableKeyMap(cfg.Keybindings), cfg.Session.MaxHistory)
 	vp := viewport.New(st)
 
 	sb, err := sidebar.New(st, session.Path)
@@ -188,19 +191,20 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 	}
 
 	m := &Model{
-		styles:        st,
-		config:        cfg,
-		input:         inp,
-		vp:            vp,
-		sidebar:       sb,
-		messages:      make([]*msgcomp.Message, 0),
-		state:         api.TurnIdle,
-		session:       session,
-		contextMax:    0,
-		modelName:     cfg.LLM.Model,
-		approvalIndex: -1,
-		focused:       focusInput,
-		appCtx:        appCtx,
+		styles:       st,
+		config:       cfg,
+		input:        inp,
+		vp:           vp,
+		sidebar:      sb,
+		messages:     make([]*msgcomp.Message, 0),
+		state:        api.TurnIdle,
+		session:      session,
+		contextMax:   0,
+		modelName:    cfg.LLM.Model,
+		focused:      focusInput,
+		appCtx:       appCtx,
+		rb:           newRenderBuffer(),
+		approvalMode: 1,
 	}
 	m.updateLayout()
 	return m, nil
@@ -248,6 +252,27 @@ func (m *Model) SetStore(st api.Store) {
 	m.store = st
 }
 
+// SetAutoApproveSetter wires the callback for adding a tool to auto-approve.
+func (m *Model) SetAutoApproveSetter(fn func(string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.autoApproveSetter = fn
+}
+
+// SetApprovalModeSetter wires the callback for toggling the approval mode.
+func (m *Model) SetApprovalModeSetter(fn func(int)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.approvalModeSetter = fn
+}
+
+// SetApprovalMode sets the current approval mode display value.
+func (m *Model) SetApprovalMode(mode int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.approvalMode = mode
+}
+
 // Init implements tea.Model.
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
@@ -269,7 +294,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.updateLayout()
+		l := m.layout()
+		m.applyLayoutSizes(l)
+		if !m.pendingResize && !l.eq(m.lastLayout) {
+			m.pendingResize = true
+			m.resizeGen++
+			g := m.resizeGen
+			cmds = append(cmds, tea.Tick(resizeDebounce, func(time.Time) tea.Msg {
+				return debouncedResizeMsg{gen: g}
+			}))
+		}
+
+	case debouncedResizeMsg:
+		if msg.gen == m.resizeGen {
+			m.pendingResize = false
+			m.updateLayout()
+		}
 
 	case StreamChunkMsg:
 		cmds = append(cmds, m.handleStreamChunk(msg.Chunk)...)
@@ -287,14 +327,50 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StateChangeMsg:
 		m.setState(msg.State)
 
+	case CompactResultMsg:
+		if msg.Count == 0 {
+			m.addMessage(msgcomp.NewUserMessage("Nothing to compact", m.styles))
+		} else {
+			m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Compacted %d messages into a summary", msg.Count), m.styles))
+		}
+		m.setState(api.TurnIdle)
+
 	case ApprovalRequestMsg:
 		m.pendingApprovals = msg.Calls
 		m.approvalRequestID = msg.RequestID
 		m.approvalIndex = 0
 		m.setState(api.TurnWaitingApproval)
+		cmds = append(cmds, m.readStreamChunk())
 
 	case ApprovalResponseMsg:
 		cmds = append(cmds, m.handleApprovalResponse(msg)...)
+
+	case SessionsMsg:
+		cmds = append(cmds, m.handleSessions()...)
+
+	case CheckpointMsg:
+		if m.gitProvider != nil {
+			if err := m.gitProvider.Commit(m.appCtx, ""); err != nil {
+				m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("checkpoint failed: %w", err), m.styles))
+			} else {
+				m.addMessage(msgcomp.NewUserMessage("Checkpoint created.", m.styles))
+			}
+		} else {
+			m.addMessage(msgcomp.NewUserMessage("No git provider available.", m.styles))
+		}
+		m.setState(api.TurnIdle)
+
+	case MCPListMsg:
+		if msg.Tools == nil {
+			m.addMessage(msgcomp.NewUserMessage("No MCP tools connected.", m.styles))
+		} else if len(msg.Tools) == 0 {
+			m.addMessage(msgcomp.NewUserMessage("No MCP tools available.", m.styles))
+		} else {
+			for _, t := range msg.Tools {
+				m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("MCP tool: %s — %s", t.Name, t.Description), m.styles))
+			}
+		}
+		m.setState(api.TurnIdle)
 
 	case input.SendMsg:
 		cmds = append(cmds, m.handleSend(msg.Content)...)
@@ -306,73 +382,36 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Update focused child component for KeyMsg; all children for other messages
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		keyStr := keyMsg.String()
-		isTab := keyStr == "tab" || keyStr == "shift+tab"
+		isTab := keyStr == m.config.Keybindings.FocusNext || keyStr == m.config.Keybindings.FocusPrev
 		if !isTab {
 			switch m.focused {
 			case focusInput:
-				inpModel, cmd := m.input.Update(msg)
-				switch im := inpModel.(type) {
-				case *input.Model:
-					m.input = im
-				}
-				cmds = append(cmds, cmd)
+				cmds = append(cmds, m.input.UpdateMsg(msg))
 			case focusViewport:
-				vpModel, cmd := m.vp.Update(msg)
-				switch vm := vpModel.(type) {
-				case *viewport.Model:
-					m.vp = vm
-				}
-				cmds = append(cmds, cmd)
+				cmds = append(cmds, m.vp.UpdateMsg(msg))
 			case focusSidebar:
 				if m.sidebar.Visible() {
-					sbModel, cmd := m.sidebar.Update(msg)
-					switch sm := sbModel.(type) {
-					case *sidebar.Model:
-						m.sidebar = sm
-					}
-					cmds = append(cmds, cmd)
+					cmds = append(cmds, m.sidebar.UpdateMsg(msg))
 				}
 			}
 		}
 	} else {
-		var cmd tea.Cmd
-		inpModel, cmd := m.input.Update(msg)
-		switch im := inpModel.(type) {
-		case *input.Model:
-			m.input = im
-		}
-		cmds = append(cmds, cmd)
-
-		var vpModel tea.Model
-		vpModel, cmd = m.vp.Update(msg)
-		switch vm := vpModel.(type) {
-		case *viewport.Model:
-			m.vp = vm
-		}
-		cmds = append(cmds, cmd)
-
-		var sbModel tea.Model
-		sbModel, cmd = m.sidebar.Update(msg)
-		switch sm := sbModel.(type) {
-		case *sidebar.Model:
-			m.sidebar = sm
-		}
-		cmds = append(cmds, cmd)
+		cmds = append(cmds, m.input.UpdateMsg(msg))
+		cmds = append(cmds, m.vp.UpdateMsg(msg))
+		cmds = append(cmds, m.sidebar.UpdateMsg(msg))
 	}
 
 	// Update messages - do not pass KeyMsg to message components (mouse only)
 	if _, ok := msg.(tea.KeyMsg); !ok {
-		for i, msgModel := range m.messages {
-			updated, msgCmd := msgModel.Update(msg)
-			switch um := updated.(type) {
-			case *msgcomp.Message:
-				m.messages[i] = um
-			}
-			cmds = append(cmds, msgCmd)
+		for i := range m.messages {
+			cmds = append(cmds, m.messages[i].UpdateMsg(msg))
 		}
 	}
 
-	m.refreshViewport()
+	if m.rb.isDirty() {
+		m.refreshViewport()
+		m.rb.markClean()
+	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -428,6 +467,19 @@ func (m *Model) SetContextStats(used, max int) {
 	m.contextMax = max
 }
 
+// updateContextStats estimates token usage from the current message history
+// using a chars/4 heuristic and updates the displayed stats.
+func (m *Model) updateContextStats() {
+	if m.contextMax <= 0 {
+		return
+	}
+	totalChars := 0
+	for _, msg := range m.messages {
+		totalChars += len(msg.Content)
+	}
+	m.SetContextStats(totalChars/4, m.contextMax)
+}
+
 // SetToolCount updates the tool count.
 func (m *Model) SetToolCount(n int) {
 	m.mu.Lock()
@@ -454,13 +506,13 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) []tea.Cmd {
 	// Approval dialog takes precedence when waiting for approval
 	if m.state == api.TurnWaitingApproval {
 		switch msg.String() {
-		case "y":
+		case m.config.Keybindings.ApproveYes:
 			cmds = append(cmds, m.approveCurrent(api.ApprovalYes))
 			return cmds
-		case "n":
+		case m.config.Keybindings.ApproveNo:
 			cmds = append(cmds, m.approveCurrent(api.ApprovalNo))
 			return cmds
-		case "a":
+		case m.config.Keybindings.ApproveAlways:
 			cmds = append(cmds, m.approveCurrent(api.ApprovalAlways))
 			return cmds
 		}
@@ -481,10 +533,11 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) []tea.Cmd {
 			m.mu.Lock()
 			m.streamCh = nil
 			m.streamCancel = nil
+			m.streamCanceled = true
 			m.mu.Unlock()
 			m.setState(api.TurnIdle)
 		}
-	case "ctrl+b":
+	case m.config.Keybindings.ToggleSidebar:
 		m.sidebar.Toggle()
 		m.updateLayout()
 		if !m.sidebar.Visible() && m.focused == focusSidebar {
@@ -493,13 +546,25 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) []tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 		}
-	case "tab":
+	case m.config.Keybindings.FocusNext:
 		if cmd := m.cycleFocus(1); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-	case "shift+tab":
+	case m.config.Keybindings.FocusPrev:
 		if cmd := m.cycleFocus(-1); cmd != nil {
 			cmds = append(cmds, cmd)
+		}
+	case m.config.Keybindings.Yolo:
+		if m.approvalModeSetter != nil {
+			m.mu.Lock()
+			if m.approvalMode == 1 {
+				m.approvalMode = 2
+			} else {
+				m.approvalMode = 1
+			}
+			mode := m.approvalMode
+			m.mu.Unlock()
+			m.approvalModeSetter(mode)
 		}
 	}
 
@@ -540,21 +605,16 @@ func (m *Model) handleMouseMsg(msg tea.MouseMsg) {
 		return
 	}
 
-	sbWidth := 0
-	if m.sidebar.Visible() {
-		sbWidth = m.sidebar.Width()
-	}
+	l := m.layout()
 
-	if m.sidebar.Visible() && msg.X < sbWidth {
+	if m.sidebar.Visible() && msg.X < l.sbWidth {
 		m.focused = focusSidebar
 		return
 	}
 
-	vpHeight := m.height - statusHeight - m.inputHeight()
-
-	if msg.Y >= vpHeight && msg.Y < vpHeight+m.inputHeight() {
+	if msg.Y >= l.vpHeight && msg.Y < l.statusY {
 		m.focused = focusInput
-	} else if msg.Y < vpHeight {
+	} else if msg.Y < l.vpHeight {
 		m.focused = focusViewport
 	}
 }
@@ -585,6 +645,7 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 		m.mu.Lock()
 		m.streamCancel = cancel
 		m.streamCh = nil
+		m.streamCanceled = false
 		m.mu.Unlock()
 		streamCh, err := m.turnManager.RunTurn(ctx, m.session.ID, content)
 		if err != nil {
@@ -606,6 +667,29 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 	return cmds
 }
 
+func (m *Model) handleSessions() []tea.Cmd {
+	var cmds []tea.Cmd
+	if m.store != nil && m.session != nil {
+		sessions, err := m.store.ListSessions(m.appCtx, m.session.Path, 0)
+		if err != nil {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("list sessions: %w", err), m.styles))
+		} else if len(sessions) == 0 {
+			m.addMessage(msgcomp.NewUserMessage("No sessions found.", m.styles))
+		} else {
+			for _, s := range sessions {
+				m.addMessage(msgcomp.NewUserMessage(
+					fmt.Sprintf("Session: %s (%s) — updated %s", s.ID, s.Path, s.UpdatedAt.Format("2006-01-02 15:04")),
+					m.styles,
+				))
+			}
+		}
+	} else {
+		m.addMessage(msgcomp.NewUserMessage("No sessions available.", m.styles))
+	}
+	m.setState(api.TurnIdle)
+	return cmds
+}
+
 // readStreamChunk returns a command that reads the next event from the stream.
 func (m *Model) readStreamChunk() tea.Cmd {
 	ch := m.streamCh // capture at command creation time
@@ -624,68 +708,30 @@ func (m *Model) readStreamChunk() tea.Cmd {
 			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true, ToolCalls: event.ToolCalls}}
 		case api.TurnEventError:
 			return ErrorMsg{Err: event.Error}
+		case api.TurnEventApprovalRequest:
+			return ApprovalRequestMsg{Calls: event.ToolCalls, RequestID: event.RequestID}
+		case api.TurnEventToolResult:
+			return ToolResultMsg{Result: event.Result}
 		default:
 			return nil
 		}
 	}
 }
 
-func (m *Model) handleCommand(content string) tea.Cmd {
-	parts := strings.Fields(content)
-	if len(parts) == 0 {
-		return nil
-	}
-	cmd := parts[0]
-	args := strings.TrimSpace(strings.TrimPrefix(content, cmd))
-
-	switch cmd {
-	case "/compact":
-		m.addMessage(msgcomp.NewUserMessage("Compacting session...", m.styles))
-		return func() tea.Msg {
-			if m.compressor != nil && m.store != nil && m.session != nil {
-				_, err := m.compressor.Compact(m.appCtx, m.store, m.session.ID, 2)
-				if err != nil {
-					return ErrorMsg{Err: err}
-				}
-				return StateChangeMsg{State: api.TurnIdle}
-			}
-			return CompactMsg{}
-		}
-	case "/clear":
-		if m.state == api.TurnStreaming || m.state == api.TurnThinking {
-			return nil
-		}
-		m.clearMessages()
-		if m.sessionManager != nil && m.session != nil {
-			_ = m.sessionManager.ClearMessages(m.appCtx, m.session.ID)
-		}
-		return func() tea.Msg { return ClearMsg{} }
-	case "/sessions":
-		m.addMessage(msgcomp.NewUserMessage("Listing sessions...", m.styles))
-		return func() tea.Msg { return SessionsMsg{} }
-	case "/goal":
-		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Goal set: %s", args), m.styles))
-		return func() tea.Msg { return GoalMsg{Content: args} }
-	case "/btw":
-		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("BTW: %s", args), m.styles))
-		return func() tea.Msg { return BTWMsg{Content: args} }
-	case "/checkpoint":
-		m.addMessage(msgcomp.NewUserMessage("Creating checkpoint...", m.styles))
-		return func() tea.Msg { return CheckpointMsg{} }
-	default:
-		m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("unknown command: %s", cmd), m.styles))
-		return nil
-	}
-}
-
 func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 	var cmds []tea.Cmd
+
+	// Guard against stale buffered chunks after stream cancellation.
+	if !chunk.Done && m.streamCh == nil && m.streamCanceled {
+		return cmds
+	}
 
 	if chunk.Error != nil {
 		m.addMessage(msgcomp.NewErrorMessage(chunk.Error, m.styles))
 		m.setState(api.TurnError)
 		m.streamCh = nil
-		m.lastAssistantRenderPos = 0
+		m.streamCanceled = true
+		m.rb.setLastBlockStart(0)
 		return cmds
 	}
 
@@ -693,17 +739,21 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 		if m.state != api.TurnError {
 			m.setState(api.TurnIdle)
 		}
-		m.streamCh = nil
 		if lastMsg := m.lastAssistantMessage(); lastMsg != nil {
 			lastMsg.SetStreaming(false)
 		}
 		// Rebuild renderedContent since the last assistant message may now be glamour-rendered
 		m.rebuildRenderedContent()
+		// Estimate token usage after turn completes.
+		m.updateContextStats()
 		if len(chunk.ToolCalls) > 0 {
+			// Do not clear streamCh yet; more events may come from the turn manager.
 			cmds = append(cmds, func() tea.Msg {
 				return ToolCallMsg{Calls: chunk.ToolCalls}
 			})
+			return cmds
 		}
+		m.streamCh = nil
 		return cmds
 	}
 
@@ -717,7 +767,8 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 		lastMsg = msgcomp.NewAssistantMessage("", m.styles)
 		lastMsg.SetStreaming(true)
 		m.messages = append(m.messages, lastMsg)
-		m.lastAssistantRenderPos = m.renderedContent.Len()
+		m.rb.setLastBlockStart(m.rb.len())
+		m.rb.updateLastBlock(lastMsg.View())
 	} else if m.messages[len(m.messages)-1] != lastMsg {
 		// Last assistant is not the most recent message; fall back to full rebuild
 		lastMsg.AppendContent(chunk.Content)
@@ -725,25 +776,19 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 		m.rebuildRenderedContent()
 		cmds = append(cmds, m.readStreamChunk())
 		return cmds
-	} else if m.lastAssistantRenderPos == 0 {
+	} else if m.rb.lastBlockStart() == 0 {
 		// After a full rebuild (e.g., resize), recompute the assistant's start position
-		m.lastAssistantRenderPos = m.renderedContent.Len() - len(lastMsg.View())
-		if m.lastAssistantRenderPos < 0 {
-			m.lastAssistantRenderPos = 0
+		m.rb.setLastBlockStart(m.rb.len() - len(lastMsg.View()))
+		if m.rb.lastBlockStart() < 0 {
+			m.rb.setLastBlockStart(0)
 		}
 	}
 
 	lastMsg.AppendContent(chunk.Content)
 	lastMsg.SetWidth(m.vpWidth())
 
-	// Incremental update: truncate back to lastAssistantRenderPos and re-render just the last message
-	current := m.renderedContent.String()
-	if len(current) > m.lastAssistantRenderPos {
-		truncated := current[:m.lastAssistantRenderPos]
-		m.renderedContent.Reset()
-		m.renderedContent.WriteString(truncated)
-	}
-	m.renderedContent.WriteString(lastMsg.View())
+	// Incremental update: truncate back to lastBlockStart and re-render just the last message
+	m.rb.updateLastBlock(lastMsg.View())
 
 	// Continue polling for the next chunk
 	cmds = append(cmds, m.readStreamChunk())
@@ -752,23 +797,27 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 }
 
 func (m *Model) handleToolCalls(calls []api.ToolCall) []tea.Cmd {
-	var cmds []tea.Cmd
+	cmds := make([]tea.Cmd, 0, 1)
 	for _, call := range calls {
 		m.addMessage(msgcomp.NewToolCallMessage(call, m.styles))
 	}
 	m.toolCount += len(calls)
 	m.setState(api.TurnToolCalls)
+	cmds = append(cmds, m.readStreamChunk())
 	return cmds
 }
 
 func (m *Model) handleToolResult(result api.ToolResult) []tea.Cmd {
-	var cmds []tea.Cmd
+	cmds := make([]tea.Cmd, 0, 1)
 	for _, msg := range m.messages {
 		if msg.Type == msgcomp.TypeToolCall && msg.ToolCall.ID == result.CallID {
 			msg.SetToolResult(result)
 			break
 		}
 	}
+	// Re-render the tool call message so the result is visible in the viewport.
+	m.rebuildRenderedContent()
+	cmds = append(cmds, m.readStreamChunk())
 	return cmds
 }
 
@@ -783,12 +832,16 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 		approvals := make(map[string]api.ApprovalDecision)
 		for _, call := range m.pendingApprovals {
 			approvals[call.ID] = api.ApprovalYes
+			if m.autoApproveSetter != nil {
+				m.autoApproveSetter(call.Name)
+			}
 		}
 		m.pendingApprovals = nil
 		m.approvalIndex = -1
 		m.approvalDecisions = nil
 		m.setState(api.TurnThinking)
 		cmds = append(cmds, m.resumeWithApprovals(approvals))
+		cmds = append(cmds, m.readStreamChunk())
 		return cmds
 	}
 
@@ -809,6 +862,7 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 		m.approvalDecisions = nil
 		m.setState(api.TurnThinking)
 		cmds = append(cmds, m.resumeWithApprovals(approvals))
+		cmds = append(cmds, m.readStreamChunk())
 	}
 
 	return cmds
@@ -843,26 +897,22 @@ func (m *Model) resumeWithApprovals(approvals map[string]api.ApprovalDecision) t
 func (m *Model) addMessage(msg *msgcomp.Message) {
 	msg.SetWidth(m.vpWidth())
 	m.messages = append(m.messages, msg)
-	m.renderedContent.WriteString(msg.View())
-	m.renderedContent.WriteString("\n\n")
+	m.rb.appendBlock(msg.View())
 }
 
 func (m *Model) clearMessages() {
 	m.messages = make([]*msgcomp.Message, 0)
-	m.renderedContent.Reset()
-	m.lastAssistantRenderPos = 0
+	m.rb.reset()
 	m.vp.SetContent("")
 }
 
 func (m *Model) rebuildRenderedContent() {
-	m.renderedContent.Reset()
+	blocks := make([]string, len(m.messages))
 	for i, msg := range m.messages {
-		m.renderedContent.WriteString(msg.View())
-		if i < len(m.messages)-1 {
-			m.renderedContent.WriteString("\n\n")
-		}
+		blocks[i] = msg.View()
 	}
-	m.lastAssistantRenderPos = 0
+	m.rb.rebuild(blocks)
+	m.rebuildCount++
 }
 
 func (m *Model) lastAssistantMessage() *msgcomp.Message {
@@ -875,7 +925,7 @@ func (m *Model) lastAssistantMessage() *msgcomp.Message {
 }
 
 func (m *Model) refreshViewport() {
-	m.vp.SetContent(m.renderedContent.String())
+	m.vp.SetContent(m.rb.String())
 }
 
 func (m *Model) renderApprovalDialog(background string) string {
@@ -887,8 +937,12 @@ func (m *Model) renderApprovalDialog(background string) string {
 	var b strings.Builder
 	b.WriteString("Tool call requires approval\n\n")
 	fmt.Fprintf(&b, "Tool: %s\n", call.Name)
-	fmt.Fprintf(&b, "Arguments: %s\n", call.Arguments)
-	b.WriteString("\n[y] yes  [n] no  [a] always")
+	if diff := toolCallDiff(call, m.session.Path); diff != "" {
+		fmt.Fprintf(&b, "\n%s\n", diff)
+	} else {
+		fmt.Fprintf(&b, "Arguments: %s\n", call.Arguments)
+	}
+	fmt.Fprintf(&b, "\n[%s] yes  [%s] no  [%s] always", m.config.Keybindings.ApproveYes, m.config.Keybindings.ApproveNo, m.config.Keybindings.ApproveAlways)
 
 	dialog := m.styles.ApprovalDialog.Render(b.String())
 	return overlayDialog(background, dialog, m.width, m.height)
@@ -947,29 +1001,20 @@ func (m *Model) statusBar() string {
 	contextUsed := m.contextUsed
 	contextMax := m.contextMax
 	toolCount := m.toolCount
+	approvalMode := m.approvalMode
 	m.mu.RUnlock()
 
-	var stateStr string
-	switch state {
-	case api.TurnIdle:
-		stateStr = "idle"
-	case api.TurnThinking:
-		stateStr = "thinking"
-	case api.TurnStreaming:
-		stateStr = "streaming"
-	case api.TurnToolCalls:
-		stateStr = "tools"
-	case api.TurnWaitingApproval:
-		stateStr = "approval"
-	case api.TurnError:
-		stateStr = "error"
-	}
+	stateStr := state.ShortString()
 
-	var parts []string
+	parts := make([]string, 0, 5)
 	parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf(" %s ", modelName)))
 	parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf("[%s]", stateStr)))
 
-	if contextMax > 0 {
+	if approvalMode == 2 {
+		parts = append(parts, m.styles.StatusBar.Render(" YOLO "))
+	}
+
+	if m.config.UI.ShowTokenCount && contextMax > 0 {
 		pct := float64(contextUsed) / float64(contextMax) * 100
 		parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf("ctx: %.0f%%", pct)))
 	}
@@ -983,44 +1028,32 @@ func (m *Model) statusBar() string {
 }
 
 func (m *Model) updateLayout() {
-	sbWidth := 0
-	if m.sidebar.Visible() {
-		sbWidth = m.sidebar.Width()
-	}
-	contentWidth := m.width - sbWidth
-	if contentWidth < minContentWidth {
-		contentWidth = minContentWidth
+	l := m.layout()
+	m.applyLayoutSizes(l)
+
+	// If the layout geometry has not changed, the transcript is still valid.
+	if l.eq(m.lastLayout) {
+		return
 	}
 
-	m.sidebar.SetSize(sbWidth, m.height-1)
-
-	vpHeight := m.height - statusHeight - m.inputHeight()
-	if vpHeight < minViewportHeight {
-		vpHeight = minViewportHeight
-	}
-	m.vp.SetSize(contentWidth, vpHeight)
-	m.input.SetWidth(contentWidth)
-
-	// Invalidate renderedContent on resize and rebuild with updated widths
-	vpW := m.vpWidth()
 	for _, msg := range m.messages {
-		msg.SetWidth(vpW)
+		msg.SetWidth(l.vpWidth)
 	}
 	m.rebuildRenderedContent()
+	m.lastLayout = l
+}
+
+// applyLayoutSizes updates child component sizes without rebuilding the transcript.
+func (m *Model) applyLayoutSizes(l layoutRect) {
+	m.sidebar.SetSize(l.sbWidth, m.height-1)
+	m.vp.SetSize(l.contentWidth, l.vpHeight)
+	m.input.SetWidth(l.contentWidth)
 }
 
 func (m *Model) contentWidth() int {
-	sbWidth := 0
-	if m.sidebar.Visible() {
-		sbWidth = m.sidebar.Width()
-	}
-	w := m.width - sbWidth
-	if w < minContentWidth {
-		w = minContentWidth
-	}
-	return w
+	return m.layout().contentWidth
 }
 
 func (m *Model) vpWidth() int {
-	return m.contentWidth() - viewportWidthPadding
+	return m.layout().vpWidth
 }

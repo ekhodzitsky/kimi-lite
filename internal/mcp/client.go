@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
@@ -37,10 +38,10 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("connect transport: %w", err)
 	}
 
-	initParams := map[string]interface{}{
+	initParams := map[string]any{
 		"protocolVersion": "2024-11-05",
-		"capabilities":    map[string]interface{}{},
-		"clientInfo": map[string]interface{}{
+		"capabilities":    map[string]any{},
+		"clientInfo": map[string]any{
 			"name":    clientName,
 			"version": clientVersion,
 		},
@@ -58,6 +59,15 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err := json.Unmarshal(resp.Result, &initResult); err != nil {
 		_ = c.transport.Close()
 		return fmt.Errorf("unmarshal initialize response: %w", err)
+	}
+
+	if initResult.ProtocolVersion == "" {
+		_ = c.transport.Close()
+		return fmt.Errorf("mcp initialize: server returned empty protocol version")
+	}
+	if initResult.ProtocolVersion != "2024-11-05" {
+		_ = c.transport.Close()
+		return fmt.Errorf("mcp initialize: unsupported protocol version %q", initResult.ProtocolVersion)
 	}
 
 	if err := c.transport.Notify(ctx, "notifications/initialized", nil); err != nil {
@@ -86,8 +96,8 @@ func (c *Client) ListTools(ctx context.Context) ([]api.ToolDefinition, error) {
 }
 
 // CallTool invokes an MCP tool with the given name and arguments.
-func (c *Client) CallTool(ctx context.Context, name string, args map[string]interface{}) (string, error) {
-	params := map[string]interface{}{
+func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	params := map[string]any{
 		"name":      name,
 		"arguments": args,
 	}
@@ -98,24 +108,53 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]inte
 	}
 
 	var result struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		IsError bool `json:"isError"`
+		Content []json.RawMessage `json:"content"`
+		IsError bool              `json:"isError"`
 	}
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		return "", fmt.Errorf("unmarshal tools/call response: %w", err)
 	}
 
 	var output string
-	for _, c := range result.Content {
-		if c.Type == "text" {
-			output += c.Text
+	for _, raw := range result.Content {
+		var item struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil {
+			continue
+		}
+		switch item.Type {
+		case "text":
+			if output != "" {
+				output += "\n"
+			}
+			output += item.Text
+		default:
+			if output != "" {
+				output += "\n"
+			}
+			var withURI struct {
+				Resource struct {
+					URI string `json:"uri"`
+				} `json:"resource"`
+			}
+			uri := ""
+			if err := json.Unmarshal(raw, &withURI); err == nil && withURI.Resource.URI != "" {
+				uri = withURI.Resource.URI
+			}
+			if uri != "" {
+				output += "[" + item.Type + ": " + uri + "]"
+			} else {
+				output += "[" + item.Type + "]"
+			}
 		}
 	}
 
 	if result.IsError {
+		if strings.TrimSpace(output) == "" {
+			output = "tool returned an error with no text content"
+		}
 		return output, fmt.Errorf("tool %s returned error: %s", name, output)
 	}
 

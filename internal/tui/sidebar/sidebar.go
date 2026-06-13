@@ -28,6 +28,7 @@ type TreeNode struct {
 	Expanded bool
 	Children []*TreeNode
 	Selected bool
+	Depth    int
 }
 
 // ToggleMsg is sent when the sidebar visibility is toggled.
@@ -95,10 +96,16 @@ func (m *Model) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	cmd := m.UpdateMsg(msg)
+	return m, cmd
+}
+
+// UpdateMsg processes a message and returns the resulting command.
+func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if !m.visible {
-			return m, nil
+			return nil
 		}
 		switch msg.String() {
 		case "up":
@@ -110,19 +117,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "right":
 			m.expandCurrent()
 		case "enter":
-			return m, m.selectCurrent()
+			return m.selectCurrent()
 		case " ":
 			m.toggleCurrent()
 		}
 	case tea.MouseMsg:
 		if !m.visible {
-			return m, nil
+			return nil
 		}
 		if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
 			m.handleClick(msg.Y)
 		}
 	}
-	return m, nil
+	return nil
 }
 
 // View implements tea.Model.
@@ -195,6 +202,7 @@ func (m *Model) rebuildFlat() {
 }
 
 func (m *Model) traverse(node *TreeNode, depth int) {
+	node.Depth = depth
 	m.flat = append(m.flat, node)
 	if node.Expanded {
 		for _, child := range node.Children {
@@ -204,7 +212,7 @@ func (m *Model) traverse(node *TreeNode, depth int) {
 }
 
 func (m *Model) renderNode(node *TreeNode, isCursor bool) string {
-	prefix := strings.Repeat("  ", m.depth(node))
+	prefix := strings.Repeat("  ", node.Depth)
 	icon := "📄"
 	if node.IsDir {
 		if node.Expanded {
@@ -226,17 +234,6 @@ func (m *Model) renderNode(node *TreeNode, isCursor bool) string {
 		return m.styles.SidebarSelected.Render("  " + line)
 	}
 	return m.styles.SidebarItem.Render("  " + line)
-}
-
-func (m *Model) depth(node *TreeNode) int {
-	if node.Path == m.root {
-		return 0
-	}
-	rel, _ := filepath.Rel(m.root, node.Path)
-	if rel == "." {
-		return 0
-	}
-	return strings.Count(rel, string(filepath.Separator))
 }
 
 func (m *Model) moveCursor(delta int) {

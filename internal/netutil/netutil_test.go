@@ -2,12 +2,11 @@ package netutil
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestIsBlockedHost(t *testing.T) {
@@ -49,54 +48,26 @@ func TestIsBlockedHost(t *testing.T) {
 }
 
 func TestSecureTransport_DialContext_ResolvesOnce(t *testing.T) {
+	t.Parallel()
+
 	var lookupCount atomic.Int32
 
-	// Mock resolver that returns a public IP.
 	mockLookup := func(ctx context.Context, host string) ([]string, error) {
 		lookupCount.Add(1)
-		return []string{"93.184.216.34"}, nil // example.com IP
+		return []string{"93.184.216.34"}, nil
 	}
 
-	dialer := &net.Dialer{
-		Timeout:   100 * time.Millisecond,
-		KeepAlive: 30 * time.Second,
+	fakeDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c1, _ := net.Pipe()
+		return c1, nil
 	}
 
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-
-			ips, err := mockLookup(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("no IPs resolved for host %s", host)
-			}
-
-			for _, ip := range ips {
-				if IsBlockedHost(ip) {
-					return nil, fmt.Errorf("blocked host: resolved IP %s for %s is blocked", ip, host)
-				}
-			}
-
-			// Dial the specific validated IP to avoid a second resolution.
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0], port))
-		},
-	}
-
-	// We can't actually dial 93.184.216.34 in tests, but we can verify the
-	// lookup count and that the address is formed correctly by inspecting
-	// the error from the dial attempt.
+	transport := secureTransport(mockLookup, fakeDial)
 	conn, err := transport.DialContext(context.Background(), "tcp", "example.com:80")
 	if err != nil {
-		// Expected: connection to a fake/mock IP will fail, but the transport
-		// logic should have performed exactly one lookup.
-		_ = conn
+		t.Fatalf("unexpected dial error: %v", err)
 	}
+	defer conn.Close()
 
 	if lookupCount.Load() != 1 {
 		t.Fatalf("expected 1 DNS lookup, got %d", lookupCount.Load())
@@ -104,47 +75,27 @@ func TestSecureTransport_DialContext_ResolvesOnce(t *testing.T) {
 }
 
 func TestSecureTransport_DialContext_DialsValidatedIP(t *testing.T) {
+	t.Parallel()
+
 	var dialedAddr string
 
-	// Mock resolver that returns a specific IP.
 	mockLookup := func(ctx context.Context, host string) ([]string, error) {
 		return []string{"93.184.216.34"}, nil
 	}
 
-	dialer := &net.Dialer{
-		Timeout:   100 * time.Millisecond,
-		KeepAlive: 30 * time.Second,
+	fakeDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialedAddr = addr
+		c1, _ := net.Pipe()
+		return c1, nil
 	}
 
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			h, p, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-
-			ips, err := mockLookup(ctx, h)
-			if err != nil {
-				return nil, err
-			}
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("no IPs resolved for host %s", h)
-			}
-
-			for _, ip := range ips {
-				if IsBlockedHost(ip) {
-					return nil, fmt.Errorf("blocked host: resolved IP %s for %s is blocked", ip, h)
-				}
-			}
-
-			dialedAddr = net.JoinHostPort(ips[0], p)
-			return dialer.DialContext(ctx, network, dialedAddr)
-		},
+	transport := secureTransport(mockLookup, fakeDial)
+	conn, err := transport.DialContext(context.Background(), "tcp", "example.com:80")
+	if err != nil {
+		t.Fatalf("unexpected dial error: %v", err)
 	}
+	defer conn.Close()
 
-	_, _ = transport.DialContext(context.Background(), "tcp", "example.com:80")
-
-	// The dialed address should be an IP:port, not a hostname.
 	if dialedAddr == "" {
 		t.Fatal("expected dialedAddr to be set")
 	}
@@ -157,5 +108,100 @@ func TestSecureTransport_DialContext_DialsValidatedIP(t *testing.T) {
 	}
 	if ip != "93.184.216.34" {
 		t.Fatalf("expected dialed IP 93.184.216.34, got %q", ip)
+	}
+}
+
+func TestSecureHTTPClient_CheckRedirect_BlocksPrivateHost(t *testing.T) {
+	t.Parallel()
+
+	client := SecureHTTPClient()
+
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1/", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	err = client.CheckRedirect(req, []*http.Request{req})
+	if err == nil {
+		t.Fatal("expected redirect to blocked host to be rejected")
+	}
+	if !strings.Contains(err.Error(), "blocked host") {
+		t.Fatalf("expected blocked host error, got: %v", err)
+	}
+}
+
+func TestSecureHTTPClient_CheckRedirect_AllowsPublicHost(t *testing.T) {
+	t.Parallel()
+
+	client := SecureHTTPClient()
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.com/", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	err = client.CheckRedirect(req, []*http.Request{req})
+	if err != nil {
+		t.Fatalf("expected public host redirect to be allowed, got: %v", err)
+	}
+}
+
+func TestSecureHTTPClient_CheckRedirect_TooManyHops(t *testing.T) {
+	t.Parallel()
+
+	client := SecureHTTPClient()
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.com/", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	via := make([]*http.Request, 3)
+	for i := range via {
+		via[i] = req
+	}
+
+	err = client.CheckRedirect(req, via)
+	if err == nil {
+		t.Fatal("expected too many redirects error")
+	}
+	if !strings.Contains(err.Error(), "too many redirects") {
+		t.Fatalf("expected too many redirects error, got: %v", err)
+	}
+}
+
+func TestSecureTransport_BlocksDirectPrivateIP(t *testing.T) {
+	t.Parallel()
+
+	transport := SecureTransport()
+	_, err := transport.DialContext(context.Background(), "tcp", "127.0.0.1:80")
+	if err == nil {
+		t.Fatal("expected blocked direct private IP")
+	}
+	if !strings.Contains(err.Error(), "blocked host") {
+		t.Fatalf("expected blocked host error, got: %v", err)
+	}
+}
+
+func TestSecureTransport_DialContext_InvalidAddr(t *testing.T) {
+	t.Parallel()
+
+	transport := SecureTransport()
+	_, err := transport.DialContext(context.Background(), "tcp", "not-a-valid-address")
+	if err == nil {
+		t.Fatal("expected error for invalid address")
+	}
+}
+
+func TestSecureTransport_DialContext_BlocksLocalhost(t *testing.T) {
+	t.Parallel()
+
+	transport := SecureTransport()
+	_, err := transport.DialContext(context.Background(), "tcp", "localhost:80")
+	if err == nil {
+		t.Fatal("expected localhost to be blocked")
+	}
+	if !strings.Contains(err.Error(), "blocked host") {
+		t.Fatalf("expected blocked host error, got: %v", err)
 	}
 }

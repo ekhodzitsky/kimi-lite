@@ -4,11 +4,18 @@ package store
 import (
 	"context"
 	"database/sql"
-	_ "embed"
+	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
+	"os"
+	"path"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -17,8 +24,94 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
-//go:embed migrations/001_initial.sql
-var initialSchema string
+// ErrSessionNotFound is returned when a session does not exist.
+var ErrSessionNotFound = errors.New("session not found")
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+type migration struct {
+	version int
+	name    string
+	content string
+}
+
+// parseMigrationVersion extracts the numeric prefix from a migration filename
+// such as "001_initial.sql".
+func parseMigrationVersion(name string) (int, bool) {
+	parts := strings.SplitN(name, "_", 2)
+	if len(parts) < 2 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(parts[0])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// runMigrations reads numbered *.sql files from fsys/dir, sorts them by their
+// numeric prefix, and applies any migration whose version is greater than the
+// current PRAGMA user_version. Each migration runs inside a transaction and
+// updates user_version in the same connection.
+func runMigrations(db *sql.DB, fsys fs.FS, dir string) error {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return fmt.Errorf("read migrations dir: %w", err)
+	}
+
+	var migrations []migration
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		version, ok := parseMigrationVersion(entry.Name())
+		if !ok {
+			continue
+		}
+		content, err := fs.ReadFile(fsys, path.Join(dir, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
+		}
+		migrations = append(migrations, migration{
+			version: version,
+			name:    entry.Name(),
+			content: string(content),
+		})
+	}
+
+	sort.Slice(migrations, func(i, j int) bool {
+		return migrations[i].version < migrations[j].version
+	})
+
+	var currentVersion int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&currentVersion); err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+
+	for _, m := range migrations {
+		if m.version <= currentVersion {
+			continue
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin tx for migration %d: %w", m.version, err)
+		}
+		if _, err := tx.Exec(m.content); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("run migration %d (%s): %w", m.version, m.name, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, m.version)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("set user_version %d: %w", m.version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d: %w", m.version, err)
+		}
+	}
+
+	return nil
+}
 
 // SQLite implements api.Store using SQLite.
 type SQLite struct {
@@ -26,18 +119,28 @@ type SQLite struct {
 }
 
 // sqliteDSN builds a properly escaped SQLite connection string.
+//
+// Connection-scoped PRAGMAs are passed through the driver-specific _pragma DSN
+// key so they are applied to every new connection, instead of being set
+// post-open on whatever pooled connection happens to be in use.
 func sqliteDSN(dbPath string) string {
-	q := url.Values{}
-	q.Set("_fk", "1")
-	// Connection-scoped PRAGMAs via the driver _pragma DSN key.
-	q.Add("_pragma", "busy_timeout(5000)")
-	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "synchronous(NORMAL)")
 	if dbPath == ":memory:" {
-		q.Set("cache", "shared")
-		return dbPath + "?" + q.Encode()
+		// Intentional shared named in-memory database per the C61 spec.
+		// The exact DSN is required so concurrent callers share the same namespace.
+		// WAL mode is unsupported for :memory:, so it is omitted here.
+		q := url.Values{}
+		q.Add("_pragma", "busy_timeout(5000)")
+		q.Add("_pragma", "foreign_keys(1)")
+		return "file:kimi-mem?mode=memory&cache=shared&" + q.Encode()
 	}
-	u := url.URL{Scheme: "file", Path: dbPath, RawQuery: q.Encode()}
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	// synchronous(NORMAL) is a safe default companion to WAL and keeps write
+	// durability reasonable without the full WAL2 penalty.
+	q.Add("_pragma", "synchronous(NORMAL)")
+	u := &url.URL{Scheme: "file", Path: dbPath, RawQuery: q.Encode()}
 	dsn := u.String()
 	// url.URL adds "//" for relative paths, which SQLite interprets as an
 	// authority component. Strip it to produce the valid file:path form.
@@ -77,9 +180,14 @@ func migrateTurnsStateColumn(db *sql.DB) error {
 		return nil
 	}
 
-	_, err = db.Exec(`
-		ALTER TABLE turns RENAME TO turns_old;
-		CREATE TABLE turns (
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin turns migration tx: %w", err)
+	}
+
+	stmts := []string{
+		`ALTER TABLE turns RENAME TO turns_old;`,
+		`CREATE TABLE turns (
 			id         TEXT NOT NULL,
 			session_id TEXT NOT NULL,
 			state      TEXT NOT NULL,
@@ -92,13 +200,55 @@ func migrateTurnsStateColumn(db *sql.DB) error {
 			ended_at   DATETIME,
 			PRIMARY KEY (id, session_id),
 			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-		);
-		INSERT INTO turns SELECT * FROM turns_old;
-		DROP TABLE turns_old;
-		CREATE INDEX idx_turns_session_started ON turns(session_id, started_at);
-	`)
+		);`,
+		`INSERT INTO turns SELECT * FROM turns_old;`,
+		`DROP TABLE turns_old;`,
+		`CREATE INDEX idx_turns_session_started ON turns(session_id, started_at);`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("recreate turns table: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit turns migration: %w", err)
+	}
+	return nil
+}
+
+// migrateToolCallIDColumn adds the tool_call_id column to messages if it is
+// missing. It inspects the current schema so that real errors are returned.
+func migrateToolCallIDColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
-		return fmt.Errorf("recreate turns table: %w", err)
+		return fmt.Errorf("inspect messages table: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "tool_call_id" {
+			if err := rows.Close(); err != nil {
+				return fmt.Errorf("close table_info: %w", err)
+			}
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table_info: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close table_info: %w", err)
+	}
+
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN tool_call_id TEXT`); err != nil {
+		return fmt.Errorf("add tool_call_id column: %w", err)
 	}
 	return nil
 }
@@ -109,31 +259,30 @@ func NewSQLite(dbPath string) (*SQLite, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping sqlite: %w", err)
+	}
+	if dbPath != ":memory:" {
+		if err := os.Chmod(dbPath, 0600); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("set db permissions: %w", err)
+		}
+	}
+	// Keep the pool small: one connection for the WAL writer and one for
+	// concurrent readers; the PRAGMAs above apply to every connection.
 	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(2)
 
-	if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
+	if err := runMigrations(db, migrationFiles, "migrations"); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
-	}
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("enable wal mode: %w", err)
-	}
-	if _, err := db.Exec(`PRAGMA busy_timeout = 5000;`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("set busy timeout: %w", err)
-	}
-
-	if _, err := db.Exec(initialSchema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("run initial schema: %w", err)
+		return nil, fmt.Errorf("run migrations: %w", err)
 	}
 
 	// Migrate: add tool_call_id column if missing (schema v1 -> v2).
-	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN tool_call_id TEXT`); err != nil {
-		// SQLite returns an error if the column already exists; ignore it.
-		// We cannot use IF NOT EXISTS with ADD COLUMN, so we rely on the error.
-		_ = err
+	if err := migrateToolCallIDColumn(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate messages tool_call_id column: %w", err)
 	}
 
 	// Migrate: change turns.state from INTEGER to TEXT if needed (schema v2 -> v3).
@@ -186,7 +335,7 @@ func (s *SQLite) GetSession(ctx context.Context, id string) (*api.Session, error
 	var sess api.Session
 	if err := row.Scan(&sess.ID, &sess.Name, &sess.Path, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("session not found: %w", err)
+			return nil, fmt.Errorf("%w: %v", ErrSessionNotFound, err)
 		}
 		return nil, fmt.Errorf("select session: %w", err)
 	}
@@ -196,6 +345,9 @@ func (s *SQLite) GetSession(ctx context.Context, id string) (*api.Session, error
 
 // GetLastSession returns the most recently updated session for the given path.
 func (s *SQLite) GetLastSession(ctx context.Context, path string) (*api.Session, error) {
+	if path == "" {
+		return nil, fmt.Errorf("path is required")
+	}
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, name, path, created_at, updated_at FROM sessions WHERE path = ? ORDER BY updated_at DESC LIMIT 1`, path,
 	)
@@ -203,7 +355,7 @@ func (s *SQLite) GetLastSession(ctx context.Context, path string) (*api.Session,
 	var sess api.Session
 	if err := row.Scan(&sess.ID, &sess.Name, &sess.Path, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("session not found: %w", err)
+			return nil, fmt.Errorf("%w: %v", ErrSessionNotFound, err)
 		}
 		return nil, fmt.Errorf("select last session: %w", err)
 	}
@@ -213,18 +365,26 @@ func (s *SQLite) GetLastSession(ctx context.Context, path string) (*api.Session,
 
 // ListSessions returns all sessions for the given path ordered by updated_at desc.
 func (s *SQLite) ListSessions(ctx context.Context, path string, limit int) ([]api.Session, error) {
-	if limit <= 0 {
-		limit = 100
+	if path == "" {
+		return nil, fmt.Errorf("path is required")
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, path, created_at, updated_at FROM sessions WHERE path = ? ORDER BY updated_at DESC LIMIT ?`, path, limit,
-	)
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, name, path, created_at, updated_at FROM sessions WHERE path = ? ORDER BY updated_at DESC LIMIT ?`, path, limit,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, name, path, created_at, updated_at FROM sessions WHERE path = ? ORDER BY updated_at DESC`, path,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
-	var sessions []api.Session
+	sessions := make([]api.Session, 0, limit)
 	for rows.Next() {
 		var sess api.Session
 		if err := rows.Scan(&sess.ID, &sess.Name, &sess.Path, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
@@ -272,11 +432,26 @@ func (s *SQLite) AppendMessage(ctx context.Context, sessionID string, msg api.Me
 		return fmt.Errorf("marshal tool calls: %w", err)
 	}
 
-	if _, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, sessionID, string(msg.Role), msg.Content, msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
 	); err != nil {
 		return fmt.Errorf("insert message: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET updated_at = ? WHERE id = ?`,
+		time.Now().UTC(), sessionID,
+	); err != nil {
+		return fmt.Errorf("update session timestamp: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
 	}
 	return nil
 }
@@ -286,18 +461,23 @@ func (s *SQLite) GetMessages(ctx context.Context, sessionID string, limit int) (
 	if sessionID == "" {
 		return nil, fmt.Errorf("session ID is required")
 	}
-	if limit <= 0 {
-		limit = 1000
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, role, content, tool_call_id, tool_calls, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, role, content, tool_call_id, tool_calls, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC`, sessionID,
+		)
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, role, content, tool_call_id, tool_calls, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit,
-	)
 	if err != nil {
 		return nil, fmt.Errorf("get messages: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
-	var msgs []api.Message
+	msgs := make([]api.Message, 0, limit)
 	for rows.Next() {
 		var msg api.Message
 		var roleStr string
@@ -345,13 +525,18 @@ func (s *SQLite) ReplaceMessages(ctx context.Context, sessionID string, msgs []a
 		return fmt.Errorf("clear messages: %w", err)
 	}
 
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare insert: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
 	for _, msg := range msgs {
 		toolCallsJSON, err := json.Marshal(msg.ToolCalls)
 		if err != nil {
 			return fmt.Errorf("marshal tool calls: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		if _, err := stmt.ExecContext(ctx,
 			msg.ID, sessionID, string(msg.Role), msg.Content, msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
 		); err != nil {
 			return fmt.Errorf("insert message: %w", err)
@@ -383,7 +568,13 @@ func (s *SQLite) SaveTurn(ctx context.Context, sessionID string, turn api.Turn) 
 		endedAt = turn.EndedAt.UTC()
 	}
 
-	if _, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO turns (id, session_id, state, input, response, tool_calls, results, error, started_at, ended_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id, session_id) DO UPDATE SET
@@ -401,6 +592,15 @@ func (s *SQLite) SaveTurn(ctx context.Context, sessionID string, turn api.Turn) 
 	); err != nil {
 		return fmt.Errorf("upsert turn: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET updated_at = ? WHERE id = ?`,
+		time.Now().UTC(), sessionID,
+	); err != nil {
+		return fmt.Errorf("update session timestamp: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
 	return nil
 }
 
@@ -409,18 +609,23 @@ func (s *SQLite) GetTurns(ctx context.Context, sessionID string, limit int) ([]a
 	if sessionID == "" {
 		return nil, fmt.Errorf("session ID is required")
 	}
-	if limit <= 0 {
-		limit = 100
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, state, input, response, tool_calls, results, error, started_at, ended_at FROM turns WHERE session_id = ? ORDER BY started_at ASC LIMIT ?`, sessionID, limit,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, state, input, response, tool_calls, results, error, started_at, ended_at FROM turns WHERE session_id = ? ORDER BY started_at ASC`, sessionID,
+		)
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, state, input, response, tool_calls, results, error, started_at, ended_at FROM turns WHERE session_id = ? ORDER BY started_at ASC LIMIT ?`, sessionID, limit,
-	)
 	if err != nil {
 		return nil, fmt.Errorf("get turns: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
-	var turns []api.Turn
+	turns := make([]api.Turn, 0, limit)
 	for rows.Next() {
 		var turn api.Turn
 		var stateStr string
@@ -451,6 +656,21 @@ func (s *SQLite) GetTurns(ctx context.Context, sessionID string, limit int) ([]a
 		return nil, fmt.Errorf("iterate turns: %w", err)
 	}
 	return turns, nil
+}
+
+// CountTurns returns the number of turns for a session with the given state.
+func (s *SQLite) CountTurns(ctx context.Context, sessionID string, state api.TurnState) (int, error) {
+	if sessionID == "" {
+		return 0, fmt.Errorf("session ID is required")
+	}
+	var count int
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM turns WHERE session_id = ? AND state = ?`, sessionID, state.String(),
+	)
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("count turns: %w", err)
+	}
+	return count, nil
 }
 
 // Close closes the underlying database connection.

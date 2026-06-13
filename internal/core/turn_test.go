@@ -131,7 +131,6 @@ func TestTurnManager_RunTurn_WithToolCalls(t *testing.T) {
 		defs: []api.ToolDefinition{
 			{Name: "read_file", Description: "read"},
 		},
-		readOnlyTools: map[string]bool{"read_file": true},
 	}
 	approval := &mockApprovalGate{
 		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
@@ -185,6 +184,66 @@ func TestTurnManager_RunTurn_WithToolCalls(t *testing.T) {
 	}
 }
 
+func TestTurnManager_RunTurn_ShellNonZeroExitPreservesOutput(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Content: "Let me run a command"},
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "tc1", Name: "shell", Arguments: `{"command":"echo hi; exit 1"}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Content: "Done"},
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Run a command")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range outCh {
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	var toolMsg *api.Message
+	for i := range msgs {
+		if msgs[i].Role == api.RoleTool {
+			toolMsg = &msgs[i]
+			break
+		}
+	}
+	if toolMsg == nil {
+		t.Fatal("expected a tool message in store")
+	}
+	if !strings.Contains(toolMsg.Content, "hi") {
+		t.Errorf("tool message content = %q, want containing %q", toolMsg.Content, "hi")
+	}
+	if !strings.Contains(toolMsg.Content, "[exit status 1]") {
+		t.Errorf("tool message content = %q, want containing %q", toolMsg.Content, "[exit status 1]")
+	}
+}
+
 func TestTurnManager_RunTurn_ManualApproval(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -213,8 +272,7 @@ func TestTurnManager_RunTurn_ManualApproval(t *testing.T) {
 		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
 		},
-		defs:          []api.ToolDefinition{{Name: "write_file", Description: "write"}},
-		readOnlyTools: map[string]bool{},
+		defs: []api.ToolDefinition{{Name: "write_file", Description: "write"}},
 	}
 	approval := &mockApprovalGate{
 		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
@@ -306,6 +364,74 @@ func TestTurnManager_RunTurn_MaxTurns(t *testing.T) {
 	}
 }
 
+func TestTurnManager_RunTurn_MaxTurnsAbove100(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	// Seed 101 completed turns.
+	for i := 0; i < 101; i++ {
+		_ = store.SaveTurn(ctx, sess.ID, api.Turn{
+			ID:        fmt.Sprintf("t%d", i),
+			State:     api.TurnIdle,
+			StartedAt: time.Now().UTC(),
+		})
+	}
+
+	llm := &mockLLMClient{}
+	tools := &mockToolExecutor{}
+	approval := &mockApprovalGate{}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 100}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+
+	_, err := tm.RunTurn(ctx, sess.ID, "Hi")
+	if err == nil {
+		t.Fatal("expected error for max turns reached")
+	}
+	if !strings.Contains(err.Error(), "max turns") {
+		t.Errorf("error = %q, want max turns error", err.Error())
+	}
+}
+
+func TestTurnManager_RunTurn_MaxTurnsIgnoresErrored(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	_ = store.SaveTurn(ctx, sess.ID, api.Turn{ID: "t1", State: api.TurnIdle, StartedAt: time.Now().UTC()})
+	_ = store.SaveTurn(ctx, sess.ID, api.Turn{ID: "t2", State: api.TurnIdle, StartedAt: time.Now().UTC()})
+	_ = store.SaveTurn(ctx, sess.ID, api.Turn{ID: "t3", State: api.TurnError, StartedAt: time.Now().UTC()})
+
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "OK"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	tools := &mockToolExecutor{defs: []api.ToolDefinition{}}
+	approval := &mockApprovalGate{shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+		return api.ApprovalYes, true
+	}}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 3}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Hi")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range outCh {
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil || turn.State != api.TurnIdle {
+		t.Fatalf("expected turn to complete, got state %v", turn)
+	}
+}
+
 func TestTurnManager_RunTurn_StreamError(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -363,6 +489,20 @@ func TestTurnManager_RunTurn_StreamError(t *testing.T) {
 	}
 	if !strings.Contains(turn.Error, "stream broken") {
 		t.Errorf("error = %q, want stream broken", turn.Error)
+	}
+	if turn.Response != "Partial" {
+		t.Errorf("response = %q, want Partial", turn.Response)
+	}
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	var foundPartialAssistant bool
+	for _, m := range msgs {
+		if m.Role == api.RoleAssistant && m.Content == "Partial" {
+			foundPartialAssistant = true
+			break
+		}
+	}
+	if !foundPartialAssistant {
+		t.Errorf("expected partial assistant message appended, got messages: %+v", msgs)
 	}
 }
 
@@ -568,8 +708,7 @@ func TestTurnManager_ToolCallID_PreservedAcrossRounds(t *testing.T) {
 		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "file content"}, nil
 		},
-		defs:          []api.ToolDefinition{{Name: "read_file", Description: "read"}},
-		readOnlyTools: map[string]bool{"read_file": true},
+		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{
 		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
@@ -692,8 +831,7 @@ func TestTurnManager_RunTurn_StaleRequestIDIgnored(t *testing.T) {
 		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
 		},
-		defs:          []api.ToolDefinition{{Name: "shell", Description: "shell"}},
-		readOnlyTools: map[string]bool{},
+		defs: []api.ToolDefinition{{Name: "shell", Description: "shell"}},
 	}
 	approval := &mockApprovalGate{
 		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
@@ -797,7 +935,6 @@ func TestTurnManager_executeToolCalls_ContextCancellation(t *testing.T) {
 		defs: []api.ToolDefinition{
 			{Name: "read_file", Description: "read"},
 		},
-		readOnlyTools: map[string]bool{"read_file": true},
 	}
 	approval := &mockApprovalGate{
 		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
@@ -882,5 +1019,260 @@ func TestTurnManager_RunTurn_StreamErrorTypedEvent(t *testing.T) {
 	turn := tm.CurrentTurn()
 	if turn == nil || turn.State != api.TurnError {
 		t.Fatalf("expected turn state TurnError, got %v", turn)
+	}
+}
+
+// failingAppendStore wraps a mockStore and fails AppendMessage after a set
+// number of successful calls.
+type failingAppendStore struct {
+	*mockStore
+	failAfter int
+}
+
+func (m *failingAppendStore) AppendMessage(ctx context.Context, sessionID string, msg api.Message) error {
+	if m.failAfter == 0 {
+		return fmt.Errorf("injected append failure")
+	}
+	m.failAfter--
+	return m.mockStore.AppendMessage(ctx, sessionID, msg)
+}
+
+func TestTurnManager_RunTurn_AppendMessageFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	baseStore := newMockStore()
+	store := &failingAppendStore{mockStore: baseStore, failAfter: 2}
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Content: "Let me check"},
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "tc1", Name: "read_file", Arguments: `{"path":"/tmp/test.txt"}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Content: "Done"},
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "file content"}, nil
+		},
+		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	for range outCh {
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil {
+		t.Fatal("expected current turn")
+	}
+	if turn.State != api.TurnError {
+		t.Errorf("state = %d, want TurnError", turn.State)
+	}
+	if turn.Error == "" || !strings.Contains(turn.Error, "append message") {
+		t.Errorf("error = %q, want containing 'append message'", turn.Error)
+	}
+}
+
+func TestTurnManager_RunTurn_EmptyTrailingAssistantSkipped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Content: "Let me check"},
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "tc1", Name: "read_file", Arguments: `{"path":"/tmp/test.txt"}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			// Final round returns empty/whitespace content.
+			return streamChunks(
+				api.StreamChunk{Content: "   "},
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "file content"}, nil
+		},
+		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range outCh {
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	// user + assistant(with tool calls) + tool + no empty trailing assistant
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	if msgs[2].Role != api.RoleTool {
+		t.Errorf("msg[2].role = %q, want tool", msgs[2].Role)
+	}
+}
+
+func TestTurnManager_RunTurn_MaxToolRounds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			return streamChunks(
+				api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+					{ID: "tc1", Name: "read_file", Arguments: `{"path":"/tmp/test.txt"}`},
+				}},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
+		},
+		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 50, MaxToolRounds: 3}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	for range outCh {
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil {
+		t.Fatal("expected current turn")
+	}
+	if turn.State != api.TurnError {
+		t.Fatalf("expected TurnError, got %v", turn.State)
+	}
+	if !strings.Contains(turn.Error, "max tool rounds (3) exceeded") {
+		t.Errorf("error = %q, want max tool rounds (3) exceeded", turn.Error)
+	}
+}
+
+// spyStore wraps a mockStore and counts SaveTurn calls while recording
+// every turn that is persisted.
+type spyStore struct {
+	*mockStore
+	saveTurnCalls int
+	savedTurns    []api.Turn
+}
+
+func (s *spyStore) SaveTurn(ctx context.Context, sessionID string, turn api.Turn) error {
+	s.saveTurnCalls++
+	s.savedTurns = append(s.savedTurns, turn)
+	return s.mockStore.SaveTurn(ctx, sessionID, turn)
+}
+
+// saveCaptureLLM wraps a mockLLMClient and records how many SaveTurn calls
+// had occurred when ChatStream was first invoked.
+type saveCaptureLLM struct {
+	*mockLLMClient
+	spy                   *spyStore
+	saveTurnsAtChatStream int
+}
+
+func (c *saveCaptureLLM) ChatStream(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+	c.saveTurnsAtChatStream = c.spy.saveTurnCalls
+	return c.mockLLMClient.ChatStream(ctx, messages, tools)
+}
+
+func TestTurnManager_RunTurn_SingleSaveBeforeStream(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := &spyStore{mockStore: newMockStore()}
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	baseLLM := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "Hello"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	llm := &saveCaptureLLM{mockLLMClient: baseLLM, spy: store}
+
+	tools := &mockToolExecutor{defs: []api.ToolDefinition{}}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Hi")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	for range outCh {
+	}
+
+	// Exactly one SaveTurn must occur before the first ChatStream call.
+	if llm.saveTurnsAtChatStream != 1 {
+		t.Errorf("SaveTurn calls before first ChatStream = %d, want 1", llm.saveTurnsAtChatStream)
+	}
+
+	// The pre-stream persisted state must be TurnStreaming.
+	if len(store.savedTurns) < 1 {
+		t.Fatal("expected at least one saved turn")
+	}
+	if store.savedTurns[0].State != api.TurnStreaming {
+		t.Errorf("pre-stream turn state = %d, want TurnStreaming", store.savedTurns[0].State)
 	}
 }

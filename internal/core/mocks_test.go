@@ -185,6 +185,18 @@ func (m *mockStore) GetTurns(ctx context.Context, sessionID string, limit int) (
 	return turns, nil
 }
 
+func (m *mockStore) CountTurns(ctx context.Context, sessionID string, state api.TurnState) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, t := range m.turns[sessionID] {
+		if t.State == state {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (m *mockStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -213,21 +225,16 @@ func (m *mockLLMClient) Models() []api.ModelInfo {
 
 // mockToolExecutor is a test double for api.ToolExecutor.
 type mockToolExecutor struct {
-	executeFunc   func(ctx context.Context, call api.ToolCall) (api.ToolResult, error)
-	defs          []api.ToolDefinition
-	readOnlyTools map[string]bool
+	executeFunc func(ctx context.Context, call api.ToolCall) (api.ToolResult, error)
+	defs        []api.ToolDefinition
 }
 
 func (m *mockToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 	return m.executeFunc(ctx, call)
 }
 
-func (m *mockToolExecutor) Definitions() []api.ToolDefinition {
+func (m *mockToolExecutor) Definitions(ctx context.Context) []api.ToolDefinition {
 	return m.defs
-}
-
-func (m *mockToolExecutor) IsReadOnly(name string) bool {
-	return m.readOnlyTools[name]
 }
 
 // mockApprovalGate is a test double for api.ApprovalGate.
