@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -489,13 +490,26 @@ func TestBuiltInToolExecutor_Execute_Shell(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_Shell_Timeout(t *testing.T) {
 	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix process check")
+	}
+
 	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 100 * time.Millisecond})
 
+	// Embed a unique token in the command so we can look for a surviving shell
+	// process after the timeout. A properly enforced timeout must return well
+	// before the 5s sleep finishes and must not leave the shell alive.
+	marker := fmt.Sprintf("kimi-shell-timeout-%d", time.Now().UnixNano())
+	command := fmt.Sprintf("sleep 5 # %s", marker)
+
+	start := time.Now()
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
 		Name:      "shell",
-		Arguments: `{"command":"sleep 5"}`,
+		Arguments: fmt.Sprintf(`{"command":%q}`, command),
 	})
+	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -504,6 +518,15 @@ func TestBuiltInToolExecutor_Execute_Shell_Timeout(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "timed out") {
 		t.Errorf("expected timeout error to contain 'timed out', got: %q", result.Error)
+	}
+	if elapsed > 1*time.Second {
+		t.Fatalf("command took %v to return, want well under 1s", elapsed)
+	}
+
+	// Best-effort: confirm no shell process carrying our marker is still alive.
+	// pgrep may not be available everywhere, so ignore execution errors.
+	if out, _ := osexec.Command("pgrep", "-f", marker).CombinedOutput(); len(out) > 0 {
+		t.Fatalf("shell process still alive after timeout: %s", out)
 	}
 }
 
