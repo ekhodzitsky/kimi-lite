@@ -498,6 +498,9 @@ data: [DONE]
 				if chunk.Content != "" {
 					contents = append(contents, chunk.Content)
 				}
+				// OpenAI-style streams emit a Done chunk both for the
+				// finish_reason payload and for the trailing [DONE] sentinel;
+				// overwrite on each one so the final ToolCalls are captured.
 				if chunk.Done {
 					done = true
 					finalToolCalls = chunk.ToolCalls
