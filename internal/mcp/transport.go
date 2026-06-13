@@ -166,31 +166,33 @@ type StdioTransport struct {
 	command string
 	args    []string
 
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	pending   map[int64]chan *JSONRPCResponse
-	nextID    int64
-	closed    bool
-	wg        sync.WaitGroup
-	readErr   error
-	newCmd    func(name string, arg ...string) *exec.Cmd
-	writeMu   sync.Mutex
-	stderr    *boundedBuffer
-	cmdWaitCh chan struct{}
-	cmdErr    error
-	cmdWaited sync.Once
-	logger    *slog.Logger
+	mu           sync.Mutex
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	stdout       io.ReadCloser
+	pending      map[int64]chan *JSONRPCResponse
+	nextID       int64
+	closed       bool
+	wg           sync.WaitGroup
+	readErr      error
+	newCmd       func(name string, arg ...string) *exec.Cmd
+	writeMu      sync.Mutex
+	stderr       *boundedBuffer
+	cmdWaitCh    chan struct{}
+	cmdErr       error
+	cmdWaited    sync.Once
+	logger       *slog.Logger
+	closeTimeout time.Duration
 }
 
 // NewStdioTransport creates a new stdio transport for the given command.
 func NewStdioTransport(command string, args ...string) *StdioTransport {
 	return &StdioTransport{
-		command: command,
-		args:    args,
-		newCmd:  exec.Command,
-		logger:  slog.Default(),
+		command:      command,
+		args:         args,
+		newCmd:       exec.Command,
+		logger:       slog.Default(),
+		closeTimeout: 5 * time.Second,
 	}
 }
 
@@ -540,7 +542,11 @@ func (t *StdioTransport) Close() error {
 			}()
 		})
 
-		timer := time.AfterFunc(5*time.Second, func() {
+		grace := t.closeTimeout
+		if grace <= 0 {
+			grace = 5 * time.Second
+		}
+		timer := time.AfterFunc(grace, func() {
 			_ = cmd.Process.Kill() // ignore kill errors on cleanup
 		})
 		<-t.cmdWaitCh
