@@ -1083,11 +1083,15 @@ func (m *mockStore) Close() error { return nil }
 type fakeGitProvider struct {
 	commitCalled bool
 	commitMsg    string
+	diffOutput   string
+	diffErr      error
 	err          error
 }
 
-func (f *fakeGitProvider) Status(ctx context.Context) (string, error)            { return "", nil }
-func (f *fakeGitProvider) Diff(ctx context.Context, path string) (string, error) { return "", nil }
+func (f *fakeGitProvider) Status(ctx context.Context) (string, error) { return "", nil }
+func (f *fakeGitProvider) Diff(ctx context.Context, path string) (string, error) {
+	return f.diffOutput, f.diffErr
+}
 func (f *fakeGitProvider) Commit(ctx context.Context, message string) error {
 	f.commitCalled = true
 	f.commitMsg = message
@@ -1506,6 +1510,91 @@ func TestWindowSizeMsg_UnchangedDimensions_NoRebuild(t *testing.T) {
 	}
 	if m.pendingResize {
 		t.Error("pendingResize should be false for unchanged dimensions")
+	}
+}
+
+func TestDiffCommand_RendersGitDiffOutput(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.SetGitProvider(&fakeGitProvider{diffOutput: "+added line"})
+
+	updated, cmd := m.Update(input.SendMsg{Content: "/diff file.go"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected async command for /diff")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
+
+	view := model2.vp.View()
+	if !strings.Contains(view, "added line") {
+		t.Errorf("viewport should contain diff output, got %q", view)
+	}
+}
+
+func TestDiffCommand_NoGitProviderShowsError(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	updated, cmd := m.Update(input.SendMsg{Content: "/diff file.go"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected async command for /diff")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
+
+	view := model2.vp.View()
+	if !strings.Contains(view, "no git provider") {
+		t.Errorf("viewport should show no-git-provider error, got %q", view)
+	}
+}
+
+func TestDiffCommand_EmptyDiffShowsError(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.SetGitProvider(&fakeGitProvider{diffOutput: ""})
+
+	updated, cmd := m.Update(input.SendMsg{Content: "/diff file.go"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected async command for /diff")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
+
+	view := model2.vp.View()
+	if !strings.Contains(view, "no diff") {
+		t.Errorf("viewport should show no-diff message, got %q", view)
 	}
 }
 
