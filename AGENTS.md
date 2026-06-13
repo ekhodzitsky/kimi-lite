@@ -35,6 +35,7 @@ Key interfaces:
 - `ApprovalGate` — ShouldAutoApprove
 - `MCPClient` — Connect, ListTools, CallTool
 - `GitProvider` — Status, Diff, IsRepo
+- `WebSearcher` — Search
 
 ### `internal/config`
 Configuration loading from TOML files, environment variables, and CLI flags.
@@ -69,7 +70,7 @@ Business logic layer.
 
 - `SessionManager` — create, resume, list sessions
 - `TurnManager` — orchestrates input → LLM → tools → output
-- `BuiltInToolExecutor` — 9 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`) with sandboxed file access
+- `BuiltInToolExecutor` — 10 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`) with sandboxed file access; `web_search` is only registered when an `api.WebSearcher` provider is injected
   - Uses `os.OpenRoot` when `SandboxRoot` is configured; falls back to `O_NOFOLLOW` (`openFileNoFollow`) when no sandbox root is set
   - Blocks protected paths and sensitive system/secret trees
   - Performs hardlink-escape checks on sandboxed reads

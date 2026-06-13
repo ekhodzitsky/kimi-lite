@@ -51,6 +51,9 @@ func NewLoader() *Loader {
 	v.SetDefault("session.max_history", defaults.Session.MaxHistory)
 	v.SetDefault("mcp.guard_command", defaults.MCP.GuardCommand)
 	v.SetDefault("mcp.guard_config", defaults.MCP.GuardConfig)
+	v.SetDefault("web_search.endpoint", defaults.WebSearch.Endpoint)
+	v.SetDefault("web_search.api_key", defaults.WebSearch.APIKey)
+	v.SetDefault("web_search.timeout", defaults.WebSearch.Timeout)
 	v.SetDefault("ui.theme", defaults.UI.Theme)
 	v.SetDefault("ui.show_token_count", defaults.UI.ShowTokenCount)
 	v.SetDefault("keybindings.send", defaults.Keybindings.Send)
@@ -96,6 +99,7 @@ func (l *Loader) Load() (*api.Config, error) {
 	if cfg.LLM.Fallback != nil {
 		cfg.LLM.Fallback.APIKey = resolveEnvVar(cfg.LLM.Fallback.APIKey)
 	}
+	cfg.WebSearch.APIKey = resolveEnvVar(cfg.WebSearch.APIKey)
 
 	// Expand paths
 	cfg.Session.DBPath = expandPath(cfg.Session.DBPath)
@@ -200,7 +204,7 @@ base_url = "https://api.moonshot.cn/v1"
 timeout = "60s"
 
 [behavior]
-auto_approve = ["read_file", "grep", "glob", "fetch_url", "list_directory"]
+auto_approve = ["read_file", "grep", "glob", "fetch_url", "list_directory", "web_search"]
 shell_timeout = "30s"
 allow_shell = true
 pass_env = false
@@ -223,6 +227,11 @@ max_history = 100
 [mcp]
 guard_command = "mcp-guard"
 guard_config = "~/.config/mcp-guard/mcp-guard.toml"
+
+[web_search]
+# endpoint = "https://api.example.com/search"
+# api_key = "$WEB_SEARCH_API_KEY"
+timeout = "30s"
 
 [ui]
 theme = "dark"

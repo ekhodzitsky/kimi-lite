@@ -10,6 +10,32 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
+func validateURL(prefix, value string, allowEmpty bool) error {
+	if value == "" {
+		if allowEmpty {
+			return nil
+		}
+		return fmt.Errorf("%s must not be empty", prefix)
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid URL, got %q: %w", prefix, value, err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%s must be a valid URL with a host, got %q", prefix, value)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%s must be an http(s) URL, got %q", prefix, value)
+	}
+	if u.Scheme == "http" {
+		host := u.Hostname()
+		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+			return fmt.Errorf("%s must use https (or explicit localhost opt-in), got %q", prefix, value)
+		}
+	}
+	return nil
+}
+
 func validateLLM(prefix string, c api.LLMConfig) error {
 	if c.Timeout <= 0 {
 		return fmt.Errorf("%s.timeout must be positive", prefix)
@@ -18,21 +44,8 @@ func validateLLM(prefix string, c api.LLMConfig) error {
 		return fmt.Errorf("%s.model must not be empty", prefix)
 	}
 	if c.BaseURL != "" {
-		u, err := url.Parse(c.BaseURL)
-		if err != nil {
-			return fmt.Errorf("%s.base_url must be a valid URL, got %q: %w", prefix, c.BaseURL, err)
-		}
-		if u.Host == "" {
-			return fmt.Errorf("%s.base_url must be a valid URL with a host, got %q", prefix, c.BaseURL)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("%s.base_url must be an http(s) URL with a host, got %q", prefix, c.BaseURL)
-		}
-		if u.Scheme == "http" {
-			host := u.Hostname()
-			if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-				return fmt.Errorf("%s.base_url must use https (or explicit localhost opt-in), got %q", prefix, c.BaseURL)
-			}
+		if err := validateURL(prefix+".base_url", c.BaseURL, false); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -55,6 +68,7 @@ func DefaultConfig() *api.Config {
 				"glob",
 				"fetch_url",
 				"list_directory",
+				"web_search",
 			},
 			ShellTimeout:      30 * time.Second,
 			MaxTurns:          50,
@@ -73,6 +87,9 @@ func DefaultConfig() *api.Config {
 		MCP: api.MCPConfig{
 			GuardCommand: "mcp-guard",
 			GuardConfig:  "~/.config/mcp-guard/mcp-guard.toml",
+		},
+		WebSearch: api.WebSearchConfig{
+			Timeout: 30 * time.Second,
 		},
 		UI: api.UIConfig{
 			Theme:          "dark",
@@ -115,6 +132,14 @@ func Validate(cfg *api.Config) error {
 	}
 	if cfg.UI.Theme == "" {
 		errs = append(errs, fmt.Errorf("ui.theme must not be empty"))
+	}
+	if cfg.WebSearch.Endpoint != "" {
+		if err := validateURL("web_search.endpoint", cfg.WebSearch.Endpoint, false); err != nil {
+			errs = append(errs, err)
+		}
+		if cfg.WebSearch.Timeout <= 0 {
+			errs = append(errs, fmt.Errorf("web_search.timeout must be positive"))
+		}
 	}
 	for i, r := range cfg.Permission.Rules {
 		prefix := fmt.Sprintf("permission.rules[%d]", i)

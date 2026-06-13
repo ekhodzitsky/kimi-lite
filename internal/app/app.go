@@ -81,6 +81,16 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		sandboxRoot = "."
 	}
 
+	// Create web searcher if configured.
+	var webSearcher api.WebSearcher
+	if cfg.WebSearch.Endpoint != "" {
+		ws, err := core.NewHTTPWebSearcher(cfg.WebSearch.Endpoint, cfg.WebSearch.APIKey, nil, cfg.WebSearch.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("create web search provider: %w", err)
+		}
+		webSearcher = ws
+	}
+
 	// Create built-in tool executor (nil httpClient forces secure default).
 	// Protect the app's own config and DB paths regardless of sandbox.
 	configDir, _ := config.EnsureConfigDir()
@@ -91,6 +101,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		HTTPClient:     nil,
 		ProtectedPaths: []string{configPath, cfg.Session.DBPath},
 		PassEnv:        cfg.Behavior.PassEnv,
+		WebSearcher:    webSearcher,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create built-in tool executor: %w", err)
