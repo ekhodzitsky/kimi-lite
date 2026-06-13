@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -30,6 +31,22 @@ func NewClient(transport Transport) *Client {
 func NewClientFromConfig(cfg api.MCPConfig) *Client {
 	transport := NewStdioTransport(cfg.GuardCommand, cfg.GuardConfig)
 	return NewClient(transport)
+}
+
+// NewClientFromServerConfig creates a new MCP client from a direct server
+// configuration. It selects stdio or http transport based on cfg.Transport.
+func NewClientFromServerConfig(cfg api.MCPServerConfig, httpClient *http.Client) (*Client, error) {
+	switch cfg.Transport {
+	case api.MCPTransportStdio:
+		tr := NewStdioTransport(cfg.Command, cfg.Args...)
+		tr.SetEnv(cfg.Env)
+		tr.SetCWD(cfg.CWD)
+		return NewClient(tr), nil
+	case api.MCPTransportHTTP:
+		return NewClient(NewHTTPTransport(cfg.URL, cfg.Headers, cfg.BearerTokenEnvVar, httpClient)), nil
+	default:
+		return nil, fmt.Errorf("unsupported mcp transport %q", cfg.Transport)
+	}
 }
 
 // Connect establishes connection to mcp-guard and performs the MCP initialize handshake.

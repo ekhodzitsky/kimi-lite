@@ -51,6 +51,36 @@ func validateLLM(prefix string, c api.LLMConfig) error {
 	return nil
 }
 
+func validateMCPServer(name string, c api.MCPServerConfig) error {
+	if !c.Enabled {
+		return nil
+	}
+	switch c.Transport {
+	case api.MCPTransportStdio, api.MCPTransportHTTP:
+		// ok
+	default:
+		return fmt.Errorf("mcp_servers.%s.transport must be %q or %q, got %q", name, api.MCPTransportStdio, api.MCPTransportHTTP, c.Transport)
+	}
+	if c.Transport == api.MCPTransportStdio && c.Command == "" {
+		return fmt.Errorf("mcp_servers.%s.command must not be empty for stdio transport", name)
+	}
+	if c.Transport == api.MCPTransportHTTP {
+		if c.URL == "" {
+			return fmt.Errorf("mcp_servers.%s.url must not be empty for http transport", name)
+		}
+		if err := validateURL(fmt.Sprintf("mcp_servers.%s.url", name), c.URL, false); err != nil {
+			return err
+		}
+	}
+	if c.StartupTimeoutMs < 0 {
+		return fmt.Errorf("mcp_servers.%s.startup_timeout_ms must not be negative", name)
+	}
+	if c.ToolTimeoutMs < 0 {
+		return fmt.Errorf("mcp_servers.%s.tool_timeout_ms must not be negative", name)
+	}
+	return nil
+}
+
 // DefaultConfig returns the default configuration.
 func DefaultConfig() *api.Config {
 	return &api.Config{
@@ -88,6 +118,7 @@ func DefaultConfig() *api.Config {
 			GuardCommand: "mcp-guard",
 			GuardConfig:  "~/.config/mcp-guard/mcp-guard.toml",
 		},
+		MCPServers: map[string]api.MCPServerConfig{},
 		WebSearch: api.WebSearchConfig{
 			Timeout: 30 * time.Second,
 		},
@@ -157,6 +188,11 @@ func Validate(cfg *api.Config) error {
 			// ok
 		default:
 			errs = append(errs, fmt.Errorf("%s.scope must be one of user, session, turn, got %q", prefix, r.Scope))
+		}
+	}
+	for name, srv := range cfg.MCPServers {
+		if err := validateMCPServer(name, srv); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

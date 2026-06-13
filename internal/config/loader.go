@@ -51,6 +51,7 @@ func NewLoader() *Loader {
 	v.SetDefault("session.max_history", defaults.Session.MaxHistory)
 	v.SetDefault("mcp.guard_command", defaults.MCP.GuardCommand)
 	v.SetDefault("mcp.guard_config", defaults.MCP.GuardConfig)
+	v.SetDefault("mcp_servers", map[string]api.MCPServerConfig{})
 	v.SetDefault("web_search.endpoint", defaults.WebSearch.Endpoint)
 	v.SetDefault("web_search.api_key", defaults.WebSearch.APIKey)
 	v.SetDefault("web_search.timeout", defaults.WebSearch.Timeout)
@@ -227,6 +228,23 @@ max_history = 100
 [mcp]
 guard_command = "mcp-guard"
 guard_config = "~/.config/mcp-guard/mcp-guard.toml"
+
+# Direct MCP server configuration (optional). When mcp_servers is populated,
+# it takes precedence over the legacy mcp-guard integration above.
+# [[mcp_servers.example]] syntax is not supported; use [mcp_servers.example] tables.
+# [mcp_servers.filesystem]
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# enabled = true
+# startup_timeout_ms = 5000
+# tool_timeout_ms = 30000
+#
+# [mcp_servers.remote]
+# transport = "http"
+# url = "https://localhost:3000/mcp"
+# enabled = true
+# bearer_token_env_var = "MCP_API_TOKEN"
 
 [web_search]
 # endpoint = "https://api.example.com/search"

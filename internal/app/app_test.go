@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/git"
+	"github.com/ekhodzitsky/kimi-lite/internal/mcp"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -880,6 +883,82 @@ func turnsEqual(a, b api.Turn) bool {
 		return false
 	}
 	return toolCallSlicesEqual(a.ToolCalls, b.ToolCalls) && toolResultSlicesEqual(a.Results, b.Results)
+}
+
+type fakeAppMCPClient struct {
+	tools  []api.ToolDefinition
+	closed bool
+}
+
+func (f *fakeAppMCPClient) Connect(ctx context.Context) error { return nil }
+func (f *fakeAppMCPClient) ListTools(ctx context.Context) ([]api.ToolDefinition, error) {
+	return f.tools, nil
+}
+func (f *fakeAppMCPClient) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	return "ok", nil
+}
+func (f *fakeAppMCPClient) Close() error {
+	f.closed = true
+	return nil
+}
+
+func TestApp_New_MCPServers_AggregateTools(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	dbPath := filepath.Join(tmpDir, "sessions.db")
+
+	originalFactory := newMCPClientForServer
+	defer func() { newMCPClientForServer = originalFactory }()
+	newMCPClientForServer = func(cfg api.MCPServerConfig) (api.MCPClient, error) {
+		switch cfg.Transport {
+		case api.MCPTransportStdio:
+			return &fakeAppMCPClient{tools: []api.ToolDefinition{{Name: "read_file", Description: "Local read"}}}, nil
+		case api.MCPTransportHTTP:
+			return &fakeAppMCPClient{tools: []api.ToolDefinition{
+				{Name: "read_file", Description: "Remote read"},
+				{Name: "search", Description: "Remote search"},
+			}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected transport %q", cfg.Transport)
+		}
+	}
+
+	cfg := testAppConfig(dbPath)
+	cfg.MCPServers = map[string]api.MCPServerConfig{
+		"local": {
+			Enabled:   true,
+			Transport: api.MCPTransportStdio,
+			Command:   "fake",
+		},
+		"remote": {
+			Enabled:   true,
+			Transport: api.MCPTransportHTTP,
+			URL:       "https://example.com/mcp",
+		},
+	}
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	if _, ok := a.mcpClient.(*mcp.MultiClient); !ok {
+		t.Fatalf("expected *mcp.MultiClient, got %T", a.mcpClient)
+	}
+
+	defs := a.toolExecutor.Definitions(context.Background())
+	names := make([]string, 0, len(defs))
+	for _, d := range defs {
+		if strings.HasPrefix(d.Name, "mcp_") {
+			names = append(names, d.Name)
+		}
+	}
+	sort.Strings(names)
+	want := []string{"mcp_read_file", "mcp_remote_read_file", "mcp_search"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("mcp tool names = %v, want %v", names, want)
+	}
 }
 
 func testAppConfig(dbPath string) *api.Config {
