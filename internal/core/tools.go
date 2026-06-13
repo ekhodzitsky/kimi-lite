@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
@@ -54,6 +55,8 @@ type BuiltInToolExecutor struct {
 	passEnv        bool
 	root           *os.Root
 	webSearcher    api.WebSearcher
+	toolStore      map[string]any
+	toolStoreMu    sync.Mutex
 }
 
 // ToolExecutorConfig holds configuration for NewBuiltInToolExecutor.
@@ -123,6 +126,7 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 		"grep":           true,
 		"fetch_url":      true,
 		"list_directory": true,
+		"TodoList":       true,
 	}
 	if cfg.WebSearcher != nil {
 		readOnly["web_search"] = true
@@ -137,6 +141,7 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 		passEnv:        cfg.PassEnv,
 		root:           root,
 		webSearcher:    cfg.WebSearcher,
+		toolStore:      make(map[string]any),
 		readOnly:       readOnly,
 	}, nil
 }
@@ -363,6 +368,15 @@ type webSearchArgs struct {
 	IncludeContent bool   `json:"include_content"`
 }
 
+type todoItem struct {
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
+type todoListArgs struct {
+	Todos []todoItem `json:"todos"`
+}
+
 func decodeArgs[T any](raw string) (T, error) {
 	var v T
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
@@ -373,7 +387,7 @@ func decodeArgs[T any](raw string) (T, error) {
 
 // Definitions returns all available tool definitions.
 func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinition {
-	defs := make([]api.ToolDefinition, 0, 10)
+	defs := make([]api.ToolDefinition, 0, 11)
 
 	addDef := func(name, desc string, params map[string]any) {
 		p, err := marshalParams(params)
@@ -542,6 +556,30 @@ func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinitio
 			"required": []string{"query"},
 		})
 	}
+	addDef("TodoList", "Maintain a structured TODO list for tracking progress during multi-step tasks. Omit todos to read the current list; provide an empty array to clear it; otherwise pass the full replacement list.", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"todos": map[string]any{
+				"type":        "array",
+				"description": "The updated todo list. Omit to read the current todo list without making changes. Pass an empty array to clear the list.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"title": map[string]any{
+							"type":        "string",
+							"description": "Short, actionable title for the todo.",
+						},
+						"status": map[string]any{
+							"type":        "string",
+							"enum":        []string{"pending", "in_progress", "done"},
+							"description": "Current status of the todo.",
+						},
+					},
+					"required": []string{"title", "status"},
+				},
+			},
+		},
+	})
 
 	return defs
 }
@@ -658,6 +696,16 @@ func (e *BuiltInToolExecutor) Execute(ctx context.Context, call api.ToolCall) (a
 			result.Error = err.Error()
 		} else {
 			result.Output, err = e.execWebSearch(ctx, args)
+			if err != nil {
+				result.Error = err.Error()
+			}
+		}
+	case "TodoList":
+		args, err := decodeArgs[todoListArgs](call.Arguments)
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Output, err = e.execTodoList(args)
 			if err != nil {
 				result.Error = err.Error()
 			}
@@ -1416,6 +1464,49 @@ func indent(s, prefix string) string {
 		lines[i] = prefix + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+const todoListWriteReminder = "Ensure that you continue to use the todo list to track progress. Mark tasks done immediately after finishing them, and keep exactly one task in_progress when work is underway."
+
+func renderTodoList(todos []todoItem) string {
+	if len(todos) == 0 {
+		return "Todo list is empty."
+	}
+	lines := make([]string, 0, len(todos)+1)
+	lines = append(lines, "Current todo list:")
+	for _, t := range todos {
+		lines = append(lines, fmt.Sprintf("  [%s] %s", t.Status, t.Title))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (e *BuiltInToolExecutor) execTodoList(args todoListArgs) (string, error) {
+	e.toolStoreMu.Lock()
+	defer e.toolStoreMu.Unlock()
+
+	// Query mode: return current list without mutation.
+	if args.Todos == nil {
+		current, _ := e.toolStore["todo"].([]todoItem)
+		return renderTodoList(current), nil
+	}
+
+	// Validate and normalize statuses.
+	validStatuses := map[string]bool{"pending": true, "in_progress": true, "done": true}
+	for i, t := range args.Todos {
+		if strings.TrimSpace(t.Title) == "" {
+			return "", fmt.Errorf("todo at index %d has empty title", i)
+		}
+		if !validStatuses[t.Status] {
+			return "", fmt.Errorf("todo at index %d has invalid status %q (must be pending, in_progress, or done)", i, t.Status)
+		}
+	}
+
+	e.toolStore["todo"] = args.Todos
+
+	if len(args.Todos) == 0 {
+		return "Todo list cleared.", nil
+	}
+	return fmt.Sprintf("Todo list updated.\n%s\n\n%s", renderTodoList(args.Todos), todoListWriteReminder), nil
 }
 
 func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args fetchURLArgs) (string, error) {

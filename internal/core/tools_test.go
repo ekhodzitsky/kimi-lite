@@ -47,15 +47,15 @@ func TestBuiltInToolExecutor_Definitions(t *testing.T) {
 	t.Parallel()
 	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 	defs := exec.Definitions(context.Background())
-	if len(defs) != 9 {
-		t.Fatalf("expected 9 tool definitions, got %d", len(defs))
+	if len(defs) != 10 {
+		t.Fatalf("expected 10 tool definitions, got %d", len(defs))
 	}
 
 	names := make(map[string]bool)
 	for _, d := range defs {
 		names[d.Name] = true
 	}
-	expected := []string{"read_file", "write_file", "str_replace_file", "edit", "glob", "grep", "shell", "fetch_url", "list_directory"}
+	expected := []string{"read_file", "write_file", "str_replace_file", "edit", "glob", "grep", "shell", "fetch_url", "list_directory", "TodoList"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("missing tool definition: %s", name)
@@ -75,6 +75,7 @@ func TestBuiltInToolExecutor_IsReadOnly(t *testing.T) {
 		{"grep", true},
 		{"fetch_url", true},
 		{"list_directory", true},
+		{"TodoList", true},
 		{"write_file", false},
 		{"str_replace_file", false},
 		{"edit", false},
@@ -1886,8 +1887,8 @@ func TestBuiltInToolExecutor_Definitions_WebSearchRegisteredWhenProviderSet(t *t
 	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, WebSearcher: fake})
 
 	defs := exec.Definitions(context.Background())
-	if len(defs) != 10 {
-		t.Fatalf("expected 10 tool definitions, got %d", len(defs))
+	if len(defs) != 11 {
+		t.Fatalf("expected 11 tool definitions, got %d", len(defs))
 	}
 	found := false
 	for _, d := range defs {
@@ -1909,8 +1910,8 @@ func TestBuiltInToolExecutor_Definitions_WebSearchNotRegisteredWhenProviderMissi
 	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	defs := exec.Definitions(context.Background())
-	if len(defs) != 9 {
-		t.Fatalf("expected 9 tool definitions, got %d", len(defs))
+	if len(defs) != 10 {
+		t.Fatalf("expected 10 tool definitions, got %d", len(defs))
 	}
 	for _, d := range defs {
 		if d.Name == "web_search" {
@@ -2055,5 +2056,154 @@ func TestBuiltInToolExecutor_Execute_WebSearch_ProviderError(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "provider down") {
 		t.Errorf("expected provider error, got: %q", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_TodoList_ReadEmpty(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "TodoList",
+		Arguments: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if result.Output != "Todo list is empty." {
+		t.Errorf("output = %q, want %q", result.Output, "Todo list is empty.")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_TodoList_WriteAndRead(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "TodoList",
+		Arguments: `{"todos":[{"title":"Read tools.go","status":"done"},{"title":"Add TodoList tool","status":"in_progress"},{"title":"Add tests","status":"pending"}]}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "Todo list updated.") {
+		t.Errorf("expected update confirmation, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "[done] Read tools.go") {
+		t.Errorf("expected done item, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "[in_progress] Add TodoList tool") {
+		t.Errorf("expected in_progress item, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "[pending] Add tests") {
+		t.Errorf("expected pending item, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "Mark tasks done immediately after finishing them") {
+		t.Errorf("expected reminder, got: %q", result.Output)
+	}
+
+	// Read back the stored list.
+	result, err = exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_2",
+		Name:      "TodoList",
+		Arguments: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "[in_progress] Add TodoList tool") {
+		t.Errorf("read did not return stored list: %q", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_TodoList_Clear(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	_, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "TodoList",
+		Arguments: `{"todos":[{"title":"Task","status":"pending"}]}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_2",
+		Name:      "TodoList",
+		Arguments: `{"todos":[]}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if result.Output != "Todo list cleared." {
+		t.Errorf("output = %q, want %q", result.Output, "Todo list cleared.")
+	}
+
+	result, err = exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_3",
+		Name:      "TodoList",
+		Arguments: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Output != "Todo list is empty." {
+		t.Errorf("output = %q, want %q", result.Output, "Todo list is empty.")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_TodoList_InvalidStatus(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "TodoList",
+		Arguments: `{"todos":[{"title":"Task","status":"blocked"}]}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for invalid status")
+	}
+	if !strings.Contains(result.Error, "invalid status") {
+		t.Errorf("expected invalid status error, got: %q", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_TodoList_EmptyTitle(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "TodoList",
+		Arguments: `{"todos":[{"title":"   ","status":"pending"}]}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for empty title")
+	}
+	if !strings.Contains(result.Error, "empty title") {
+		t.Errorf("expected empty title error, got: %q", result.Error)
 	}
 }
