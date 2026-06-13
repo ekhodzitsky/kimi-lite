@@ -1538,3 +1538,79 @@ func TestStreamChunk_IncrementalRenderMatchesRebuild(t *testing.T) {
 		t.Errorf("incremental render does not match rebuild:\ngot:\n%s\n\nwant:\n%s", got, want)
 	}
 }
+
+type fakeMCPClient struct {
+	tools []api.ToolDefinition
+	err   error
+}
+
+func (f *fakeMCPClient) Connect(ctx context.Context) error { return nil }
+func (f *fakeMCPClient) Close() error                      { return nil }
+func (f *fakeMCPClient) ListTools(ctx context.Context) ([]api.ToolDefinition, error) {
+	return f.tools, f.err
+}
+func (f *fakeMCPClient) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	return "", nil
+}
+
+func TestMCPCommand_ListsTools(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.SetMCPClient(&fakeMCPClient{tools: []api.ToolDefinition{
+		{Name: "tool-a", Description: "first tool"},
+		{Name: "tool-b", Description: "second tool"},
+	}})
+
+	updated, cmd := m.Update(input.SendMsg{Content: "/mcp"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected async command for /mcp")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
+
+	view := model2.vp.View()
+	if !strings.Contains(view, "tool-a") {
+		t.Errorf("viewport should contain tool-a, got %q", view)
+	}
+	if !strings.Contains(view, "tool-b") {
+		t.Errorf("viewport should contain tool-b, got %q", view)
+	}
+}
+
+func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	updated, cmd := m.Update(input.SendMsg{Content: "/mcp"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected async command for /mcp")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
+
+	view := model2.vp.View()
+	if !strings.Contains(view, "No MCP tools connected") {
+		t.Errorf("viewport should show disconnected message, got %q", view)
+	}
+}
