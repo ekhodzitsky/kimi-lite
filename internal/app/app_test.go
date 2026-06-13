@@ -998,3 +998,50 @@ func TestApp_Close_FreshApp(t *testing.T) {
 		t.Errorf("Close() error: %v", err)
 	}
 }
+
+func TestApp_Run_AppendsSystemMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	app, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer app.Close()
+
+	ctx := context.Background()
+	session, err := app.StartSession(ctx)
+	if err != nil {
+		t.Fatalf("StartSession() error: %v", err)
+	}
+
+	runCalled := false
+	app.newProgram = func(model tea.Model, opts ...tea.ProgramOption) teaProgram {
+		runCalled = true
+		return &mockTeaProgram{err: nil}
+	}
+
+	if err := app.Run(ctx, session); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if !runCalled {
+		t.Fatal("fake program runner was not invoked")
+	}
+
+	msgs, err := app.store.GetMessages(ctx, session.ID, 0)
+	if err != nil {
+		t.Fatalf("GetMessages() error: %v", err)
+	}
+
+	var found bool
+	for _, msg := range msgs {
+		if msg.Role == api.RoleSystem && strings.Contains(msg.Content, "You are kimi-lite") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a system message containing the agent prompt, got %+v", msgs)
+	}
+}
