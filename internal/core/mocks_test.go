@@ -110,7 +110,8 @@ func (m *mockStore) UpdateSession(ctx context.Context, session *api.Session) err
 	if _, ok := m.sessions[session.ID]; !ok {
 		return fmt.Errorf("session not found")
 	}
-	session.UpdatedAt = time.Now().UTC()
+	m.serial++
+	session.UpdatedAt = time.Now().UTC().Add(time.Duration(m.serial) * time.Microsecond)
 	m.sessions[session.ID] = session
 	return nil
 }
@@ -129,7 +130,8 @@ func (m *mockStore) AppendMessage(ctx context.Context, sessionID string, msg api
 	defer m.mu.Unlock()
 	m.messages[sessionID] = append(m.messages[sessionID], msg)
 	if sess, ok := m.sessions[sessionID]; ok {
-		sess.UpdatedAt = time.Now().UTC()
+		m.serial++
+		sess.UpdatedAt = time.Now().UTC().Add(time.Duration(m.serial) * time.Microsecond)
 	}
 	return nil
 }
