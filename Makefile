@@ -20,6 +20,16 @@ test:
 coverage:
 	go tool cover -html=coverage.out
 
+coverage-gate: test
+	@echo "Checking coverage..."
+	@COVERAGE=$$(go tool cover -func=coverage.out | tail -1 | awk '{print $$3}' | tr -d '%'); \
+	MIN=$${MIN_COVERAGE:-70}; \
+	if awk "BEGIN {exit !($$COVERAGE < $$MIN)}"; then \
+		echo "Coverage $$COVERAGE% is below minimum $$MIN%"; \
+		exit 1; \
+	fi; \
+	echo "Coverage $$COVERAGE% meets minimum $$MIN%"
+
 lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
 
@@ -63,3 +73,15 @@ tidy-check:
 
 bench:
 	go test -bench=. -benchmem ./...
+
+bench-regression:
+	go test -bench=. -benchmem ./... > bench.new.txt
+	@if [ ! -f bench.baseline.txt ]; then \
+		cp bench.new.txt bench.baseline.txt; \
+		echo "Created bench.baseline.txt"; \
+	fi
+	go run ./scripts/benchregression bench.baseline.txt bench.new.txt 0.20
+
+fuzz:
+	go test -run=^$$ -fuzz=FuzzHeuristicTokenEstimator -fuzztime=5s ./internal/core
+	go test -run=^$$ -fuzz=FuzzRiskEvaluator -fuzztime=5s ./internal/core
