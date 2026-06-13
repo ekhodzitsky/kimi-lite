@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 )
@@ -94,14 +96,14 @@ func TestKeyboardNavigation(t *testing.T) {
 	initialCursor := m.cursor
 
 	// Move down
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	sm := updated.(*Model)
 	if sm.cursor == initialCursor && len(sm.flat) > 1 {
 		t.Error("cursor should move down")
 	}
 
 	// Move up
-	updated, _ = sm.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ = sm.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	sm = updated.(*Model)
 	if sm.cursor < 0 {
 		t.Error("cursor should not be negative")
@@ -138,7 +140,7 @@ func TestExpandCollapse(t *testing.T) {
 	}
 
 	// Collapse
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
 	sm := updated.(*Model)
 	sm.rebuildFlat()
 	if sm.flat[subdirIdx].Expanded {
@@ -146,7 +148,7 @@ func TestExpandCollapse(t *testing.T) {
 	}
 
 	// Expand
-	updated, _ = sm.Update(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ = sm.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	sm = updated.(*Model)
 	sm.rebuildFlat()
 	if !sm.flat[subdirIdx].Expanded {
@@ -176,7 +178,7 @@ func TestSelectFile(t *testing.T) {
 		}
 	}
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	sm := updated.(*Model)
 
 	if sm.selected == "" {
@@ -205,14 +207,14 @@ func TestView(t *testing.T) {
 	m.SetSize(30, 20)
 
 	view := m.View()
-	if view == "" {
+	if view.Content == "" {
 		t.Error("View() should not be empty")
 	}
 
 	// When hidden
 	m.Toggle()
 	view = m.View()
-	if view != "" {
+	if view.Content != "" {
 		t.Error("View() should be empty when hidden")
 	}
 }
@@ -253,12 +255,12 @@ func TestSidebarScroll_PastFoldUpdatesOffset(t *testing.T) {
 
 	view := m.View()
 	// flat[5] == node-4, which must be visible.
-	if !strings.Contains(view, "node-4") {
-		t.Errorf("View() should contain node-4, got %q", view)
+	if !strings.Contains(view.Content, "node-4") {
+		t.Errorf("View() should contain node-4, got %q", view.Content)
 	}
 	// flat[1] == node-0 scrolled out of view.
-	if strings.Contains(view, "node-0") {
-		t.Errorf("View() should not contain node-0 after scrolling, got %q", view)
+	if strings.Contains(view.Content, "node-0") {
+		t.Errorf("View() should not contain node-0 after scrolling, got %q", view.Content)
 	}
 }
 
@@ -300,9 +302,9 @@ func TestSidebarScroll_RespectsTitleLine(t *testing.T) {
 	m.height = 2 // title + 1 row
 
 	view := m.View()
-	lines := strings.Split(view, "\n")
+	lines := strings.Split(view.Content, "\n")
 	if len(lines) < 2 {
-		t.Fatalf("View() should have at least title + 1 row, got %q", view)
+		t.Fatalf("View() should have at least title + 1 row, got %q", view.Content)
 	}
 
 	// Only one item line should be rendered after the title.
@@ -316,7 +318,7 @@ func TestSidebarScroll_RespectsTitleLine(t *testing.T) {
 		}
 	}
 	if itemCount != 1 {
-		t.Errorf("expected 1 visible item row, got %d in %q", itemCount, view)
+		t.Errorf("expected 1 visible item row, got %d in %q", itemCount, view.Content)
 	}
 }
 
@@ -375,7 +377,7 @@ func TestRenderNodeDepth(t *testing.T) {
 	m.rebuildFlat()
 
 	for _, node := range m.flat {
-		line := m.renderNode(node, false)
+		line := ansi.Strip(m.renderNode(node, false))
 		expectedPrefix := strings.Repeat("  ", node.Depth)
 		if !strings.HasPrefix(line, "  "+expectedPrefix) {
 			// The renderNode prefixes with "  " then the depth spaces
