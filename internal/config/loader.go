@@ -296,6 +296,7 @@ timeout = "30s"
 [ui]
 theme = "dark"
 show_token_count = true
+editor = ""
 
 [keybindings]
 send = "enter"

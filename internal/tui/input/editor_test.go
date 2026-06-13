@@ -191,3 +191,55 @@ func TestConfigurableKeyMap_ExternalEditor(t *testing.T) {
 		t.Errorf("ExternalEditor keys = %v, want [ctrl+e]", km.ExternalEditor.Keys())
 	}
 }
+
+// TestExternalEditorCommandRoundTrip verifies the editor subprocess flow end to
+// end: a temp file is created with the current buffer, the configured editor
+// modifies it, and handleEditorFinished loads the result back into the input.
+func TestExternalEditorCommandRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("cp-based round-trip test is Unix-only")
+	}
+
+	// Prepare a fake editor that copies "source" content over the file argument.
+	want := "edited by external editor\n"
+	sourcePath, err := writeTempFile(want)
+	if err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	defer func() { _ = os.Remove(sourcePath) }()
+
+	m := New(styles.New("dark"), DefaultKeyMap(), 100)
+	m.SetValue("original buffer")
+
+	// Simulate the command that openExternalEditor would construct.
+	cmd, err := parseEditor(context.Background(), "cp "+sourcePath, "")
+	if err != nil {
+		t.Fatalf("parseEditor error = %v", err)
+	}
+
+	// Create the temp input file the same way the TUI does.
+	path, err := writeTempFile(m.Value())
+	if err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	// Run the editor against the temp file.
+	cmd.Args[len(cmd.Args)-1] = path
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("editor command error = %v", err)
+	}
+
+	// Finish handling should read the edited file back.
+	m.handleEditorFinished(editorFinishedMsg{path: path, err: nil})
+
+	if got := m.Value(); got != want {
+		t.Errorf("Value = %q, want %q", got, want)
+	}
+
+	// Temp file should have been cleaned up.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("temp file should be removed after handling editor finished")
+	}
+}
