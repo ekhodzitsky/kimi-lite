@@ -137,12 +137,14 @@ func (m *mockLLM) Models() []api.ModelInfo { return nil }
 type mockToolExecutor struct {
 	executeFunc func(ctx context.Context, call api.ToolCall) (api.ToolResult, error)
 	defs        []api.ToolDefinition
+	readOnly    map[string]bool
 }
 
 func (m *mockToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 	return m.executeFunc(ctx, call)
 }
 func (m *mockToolExecutor) Definitions(ctx context.Context) []api.ToolDefinition { return m.defs }
+func (m *mockToolExecutor) IsReadOnly(name string) bool                          { return m.readOnly[name] }
 
 type mockApprovalGate struct {
 	shouldAutoApprove func(call api.ToolCall) (api.ApprovalDecision, bool)

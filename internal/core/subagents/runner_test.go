@@ -286,3 +286,7 @@ func (f *fakeToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.
 func (f *fakeToolExecutor) Definitions(_ context.Context) []api.ToolDefinition {
 	return f.defs
 }
+
+func (f *fakeToolExecutor) IsReadOnly(name string) bool {
+	return false
+}

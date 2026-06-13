@@ -140,6 +140,88 @@ func TestToolExecutor_Definitions(t *testing.T) {
 	})
 }
 
+func TestToolExecutor_IsReadOnly(t *testing.T) {
+	t.Parallel()
+
+	t.Run("read-only hint is exposed", func(t *testing.T) {
+		t.Parallel()
+
+		client := &mockMCPClient{
+			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
+				return []api.ToolDefinition{
+					{Name: "read_file", Annotations: api.ToolAnnotations{ReadOnlyHint: true}},
+					{Name: "write_file", Annotations: api.ToolAnnotations{ReadOnlyHint: false}},
+				}, nil
+			},
+		}
+		exec := NewToolExecutor(client)
+		_ = exec.Definitions(context.Background())
+
+		if !exec.IsReadOnly("mcp_read_file") {
+			t.Error("expected mcp_read_file to be read-only")
+		}
+		if exec.IsReadOnly("mcp_write_file") {
+			t.Error("expected mcp_write_file not to be read-only")
+		}
+	})
+
+	t.Run("unknown tool returns false", func(t *testing.T) {
+		t.Parallel()
+
+		client := &mockMCPClient{
+			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
+				return []api.ToolDefinition{{Name: "read_file", Annotations: api.ToolAnnotations{ReadOnlyHint: true}}}, nil
+			},
+		}
+		exec := NewToolExecutor(client)
+		_ = exec.Definitions(context.Background())
+
+		if exec.IsReadOnly("mcp_unknown") {
+			t.Error("expected unknown tool not to be read-only")
+		}
+	})
+
+	t.Run("non-mcp prefix returns false", func(t *testing.T) {
+		t.Parallel()
+
+		client := &mockMCPClient{
+			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
+				return []api.ToolDefinition{{Name: "read_file", Annotations: api.ToolAnnotations{ReadOnlyHint: true}}}, nil
+			},
+		}
+		exec := NewToolExecutor(client)
+		_ = exec.Definitions(context.Background())
+
+		if exec.IsReadOnly("read_file") {
+			t.Error("expected non-prefixed name not to be read-only")
+		}
+	})
+
+	t.Run("falls back to cached read-only map", func(t *testing.T) {
+		t.Parallel()
+
+		callCount := 0
+		client := &mockMCPClient{
+			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
+				callCount++
+				if callCount == 1 {
+					return []api.ToolDefinition{
+						{Name: "read_file", Annotations: api.ToolAnnotations{ReadOnlyHint: true}},
+					}, nil
+				}
+				return nil, errors.New("network error")
+			},
+		}
+		exec := NewToolExecutor(client)
+		_ = exec.Definitions(context.Background())
+		_ = exec.Definitions(context.Background())
+
+		if !exec.IsReadOnly("mcp_read_file") {
+			t.Error("expected cached read-only hint to survive ListTools error")
+		}
+	})
+}
+
 func TestToolExecutor_Execute(t *testing.T) {
 	t.Parallel()
 

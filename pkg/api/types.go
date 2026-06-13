@@ -50,11 +50,17 @@ type ToolResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// ToolAnnotations carries optional behavioral metadata about a tool.
+type ToolAnnotations struct {
+	ReadOnlyHint bool `json:"readOnlyHint,omitempty"`
+}
+
 // ToolDefinition describes a tool available to the LLM.
 type ToolDefinition struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
+	Annotations ToolAnnotations `json:"annotations,omitempty"`
 }
 
 // Session represents a conversation session.
@@ -289,6 +295,9 @@ type ToolExecutor interface {
 	Execute(ctx context.Context, call ToolCall) (ToolResult, error)
 	// Definitions returns all available tool definitions.
 	Definitions(ctx context.Context) []ToolDefinition
+	// IsReadOnly reports whether the named tool is read-only and therefore
+	// safe to auto-approve in ModeAuto without user confirmation.
+	IsReadOnly(name string) bool
 }
 
 // ApprovalDecision represents the user's decision on a tool call.

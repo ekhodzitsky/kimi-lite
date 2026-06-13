@@ -229,6 +229,7 @@ func (m *mockLLMClient) Models() []api.ModelInfo {
 type mockToolExecutor struct {
 	executeFunc func(ctx context.Context, call api.ToolCall) (api.ToolResult, error)
 	defs        []api.ToolDefinition
+	readOnly    map[string]bool
 }
 
 func (m *mockToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
@@ -237,6 +238,10 @@ func (m *mockToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.
 
 func (m *mockToolExecutor) Definitions(ctx context.Context) []api.ToolDefinition {
 	return m.defs
+}
+
+func (m *mockToolExecutor) IsReadOnly(name string) bool {
+	return m.readOnly[name]
 }
 
 // mockApprovalGate is a test double for api.ApprovalGate.

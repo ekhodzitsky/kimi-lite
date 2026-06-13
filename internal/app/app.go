@@ -205,7 +205,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 
 	// Validate auto-approve entries: drop unknown or non-read-only tools.
 	isReadOnly := func(name string) bool {
-		return builtInExec.IsReadOnly(name)
+		return toolExec.IsReadOnly(name)
 	}
 	var validatedAutoApprove []string
 	for _, name := range cfg.Behavior.AutoApprove {

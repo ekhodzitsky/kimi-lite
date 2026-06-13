@@ -62,3 +62,12 @@ func (c *CompositeToolExecutor) Execute(ctx context.Context, call api.ToolCall) 
 	}
 	return exec.Execute(ctx, call)
 }
+
+// IsReadOnly delegates to the child executor that owns the named tool.
+func (c *CompositeToolExecutor) IsReadOnly(name string) bool {
+	exec, ok := c.toolMap[name]
+	if !ok {
+		return false
+	}
+	return exec.IsReadOnly(name)
+}

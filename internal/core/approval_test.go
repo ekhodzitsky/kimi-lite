@@ -93,6 +93,21 @@ func TestApprovalGate_ModeAuto_MCPTool(t *testing.T) {
 	}
 }
 
+func TestApprovalGate_ModeAuto_ReadOnlyMCPTool(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeAuto, []string{"mcp_read_file"}, func(name string) bool {
+		return name == "mcp_read_file"
+	}, nil)
+
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "mcp_read_file"})
+	if !auto {
+		t.Fatal("expected auto-approval for read-only mcp tool")
+	}
+	if decision != api.ApprovalYes {
+		t.Errorf("decision = %d, want ApprovalYes", decision)
+	}
+}
+
 func TestApprovalGate_ModeManual(t *testing.T) {
 	t.Parallel()
 	gate := NewApprovalGate(ModeManual, []string{"read_file", "glob"}, testIsReadOnly, nil)

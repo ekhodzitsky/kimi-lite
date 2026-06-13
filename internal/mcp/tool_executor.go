@@ -17,6 +17,7 @@ type ToolExecutor struct {
 	client     api.MCPClient
 	mu         sync.RWMutex
 	cachedDefs []api.ToolDefinition
+	readOnly   map[string]bool // original tool name -> readOnlyHint
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -40,13 +41,28 @@ func (m *ToolExecutor) Definitions(ctx context.Context) []api.ToolDefinition {
 		slog.Warn("mcp ListTools failed, no cached definitions available", "error", err)
 		return nil
 	}
+	readOnly := make(map[string]bool, len(tools))
 	for i := range tools {
+		readOnly[tools[i].Name] = tools[i].Annotations.ReadOnlyHint
 		tools[i].Name = "mcp_" + tools[i].Name
 	}
 	m.mu.Lock()
 	m.cachedDefs = tools
+	m.readOnly = readOnly
 	m.mu.Unlock()
 	return tools
+}
+
+// IsReadOnly reports whether the named MCP tool is read-only.
+// The tool name must be prefixed with "mcp_".
+func (m *ToolExecutor) IsReadOnly(name string) bool {
+	if !strings.HasPrefix(name, "mcp_") {
+		return false
+	}
+	plain := strings.TrimPrefix(name, "mcp_")
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.readOnly[plain]
 }
 
 // Execute invokes an MCP tool. The tool name must be prefixed with "mcp_".

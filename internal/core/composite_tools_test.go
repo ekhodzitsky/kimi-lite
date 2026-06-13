@@ -114,6 +114,54 @@ func TestCompositeToolExecutor_Collision_FirstWins(t *testing.T) {
 	}
 }
 
+func TestCompositeToolExecutor_IsReadOnly_Delegates(t *testing.T) {
+	t.Parallel()
+	exec1 := &mockToolExecutor{
+		defs: []api.ToolDefinition{{Name: "tool_a", Description: "a"}},
+		readOnly: map[string]bool{
+			"tool_a": true,
+		},
+	}
+	exec2 := &mockToolExecutor{
+		defs: []api.ToolDefinition{{Name: "tool_b", Description: "b"}},
+		readOnly: map[string]bool{
+			"tool_b": false,
+		},
+	}
+	composite := NewCompositeToolExecutor(exec1, exec2)
+
+	if !composite.IsReadOnly("tool_a") {
+		t.Error("expected tool_a to be read-only")
+	}
+	if composite.IsReadOnly("tool_b") {
+		t.Error("expected tool_b not to be read-only")
+	}
+	if composite.IsReadOnly("tool_c") {
+		t.Error("expected unknown tool not to be read-only")
+	}
+}
+
+func TestCompositeToolExecutor_IsReadOnly_CollisionFirstWins(t *testing.T) {
+	t.Parallel()
+	exec1 := &mockToolExecutor{
+		defs: []api.ToolDefinition{{Name: "shared", Description: "first"}},
+		readOnly: map[string]bool{
+			"shared": true,
+		},
+	}
+	exec2 := &mockToolExecutor{
+		defs: []api.ToolDefinition{{Name: "shared", Description: "second"}},
+		readOnly: map[string]bool{
+			"shared": false,
+		},
+	}
+	composite := NewCompositeToolExecutor(exec1, exec2)
+
+	if !composite.IsReadOnly("shared") {
+		t.Error("expected first registered executor to win for IsReadOnly")
+	}
+}
+
 func TestCompositeToolExecutor_Empty(t *testing.T) {
 	t.Parallel()
 	composite := NewCompositeToolExecutor()
