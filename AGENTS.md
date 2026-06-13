@@ -179,6 +179,23 @@ kimi-lite connects to mcp-guard via stdio JSON-RPC:
 3. If not found, runs with built-in tools only
 4. Uses same TOML config format as mcp-guard
 
+## Branch and Commit Conventions
+
+Branches and commits must read like a human maintainer wrote them. See ADR-005.
+
+- **Branch names** are descriptive and ID-free, kebab-case:
+  - `fix-shell-working-directory`
+  - `add-non-interactive-prompt-mode`
+  - `improve-read-file-pagination`
+- **Commit messages** follow Conventional Commits, stay under 72 characters, and do not contain task IDs:
+  ```
+  feat: add non-interactive prompt mode
+
+  Add -p/--prompt flag that runs a single user message through the
+  agent loop and prints the final response.
+  ```
+- Internal task identifiers live in the issue tracker, not in branch names or commit subjects.
+
 ## CI/CD
 
 - **GitHub Actions**: test on ubuntu + macos with `go test -race`, lint with golangci-lint (config verify + full run), plus gates for `gofmt`, `go mod tidy`, and `govulncheck`
