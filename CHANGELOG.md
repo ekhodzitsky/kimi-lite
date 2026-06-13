@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-06-13
+
+### Changed
+
+- **Release action versions** — bumped `anchore/sbom-action/download-syft` to v0.24.0 and `sigstore/cosign-installer` to v4.1.2 in the release workflow.
+
 ## [0.2.3] - 2026-06-13
 
 ### Fixed
@@ -75,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `--debug` flag, sanitized error logging, structured `slog` output.
 - **Cross-platform** — static binary with `CGO_ENABLED=0`, supports macOS, Linux (glibc & musl), ARM64.
 
+[0.2.4]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.4
 [0.2.3]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.3
 [0.2.2]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.2
 [0.2.1]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.1
