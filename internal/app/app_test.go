@@ -881,3 +881,120 @@ func turnsEqual(a, b api.Turn) bool {
 	}
 	return toolCallSlicesEqual(a.ToolCalls, b.ToolCalls) && toolResultSlicesEqual(a.Results, b.Results)
 }
+
+func testAppConfig(dbPath string) *api.Config {
+	return &api.Config{
+		LLM: api.LLMConfig{
+			Provider: "moonshot",
+			APIKey:   "test-key",
+			Model:    "kimi-k2.5",
+			BaseURL:  "https://api.moonshot.cn/v1",
+			Timeout:  60 * time.Second,
+		},
+		Behavior: api.BehaviorConfig{
+			AutoApprove:  []string{"read_file"},
+			ShellTimeout: 30 * time.Second,
+			MaxTurns:     50,
+		},
+		Session: api.SessionConfig{
+			DBPath:     dbPath,
+			MaxHistory: 100,
+		},
+		MCP: api.MCPConfig{
+			GuardCommand: "mcp-guard",
+		},
+		UI: api.UIConfig{
+			Theme: "dark",
+		},
+	}
+}
+
+func TestApp_New_FailsOnBadDBPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Create a regular file where the DB directory should be.
+	badDir := filepath.Join(tmpDir, "notadir")
+	if err := os.WriteFile(badDir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create blocking file: %v", err)
+	}
+
+	cfg := testAppConfig(filepath.Join(badDir, "sessions.db"))
+	app, err := New(cfg, false)
+	if err == nil {
+		if app != nil {
+			_ = app.Close()
+		}
+		t.Fatal("New() expected an error for a blocked db directory")
+	}
+	if app != nil {
+		t.Fatal("New() expected nil App on error")
+	}
+}
+
+func TestApp_New_SucceedsWithValidDBPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	app, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if app == nil {
+		t.Fatal("New() returned nil App")
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+}
+
+func TestApp_SessionLifecycle(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	app, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer app.Close()
+
+	ctx := context.Background()
+	started, err := app.StartSession(ctx)
+	if err != nil {
+		t.Fatalf("StartSession() error: %v", err)
+	}
+	if started.ID == "" {
+		t.Fatal("StartSession() returned session with empty ID")
+	}
+
+	resumed, err := app.ResumeSession(ctx, started.ID)
+	if err != nil {
+		t.Fatalf("ResumeSession() error: %v", err)
+	}
+	if resumed.ID != started.ID {
+		t.Errorf("ResumeSession() returned %q, want %q", resumed.ID, started.ID)
+	}
+
+	continued, err := app.ContinueLastSession(ctx)
+	if err != nil {
+		t.Fatalf("ContinueLastSession() error: %v", err)
+	}
+	if continued.ID != started.ID {
+		t.Errorf("ContinueLastSession() returned %q, want %q", continued.ID, started.ID)
+	}
+}
+
+func TestApp_Close_FreshApp(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	app, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	if err := app.Close(); err != nil {
+		t.Errorf("Close() error: %v", err)
+	}
+}
