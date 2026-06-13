@@ -131,12 +131,8 @@ type Model struct {
 	width  int
 	height int
 
-	approvalRequestID int64
-
-	// Direct approval state (used by approval dialog and response handling)
-	pendingApprovals  []api.ToolCall
-	approvalIndex     int
-	approvalDecisions map[string]api.ApprovalDecision
+	// approvalController owns the pending tool-call approval state machine.
+	approval *approvalController
 
 	// Service references (optional, wired by app layer)
 	turnManager    turnManager
@@ -204,6 +200,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 		focused:      focusInput,
 		appCtx:       appCtx,
 		rb:           newRenderBuffer(),
+		approval:     newApprovalController(),
 		approvalMode: 1,
 	}
 	m.updateLayout()
@@ -336,9 +333,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setState(api.TurnIdle)
 
 	case ApprovalRequestMsg:
-		m.pendingApprovals = msg.Calls
-		m.approvalRequestID = msg.RequestID
-		m.approvalIndex = 0
+		m.approval.startRequest(msg.Calls, msg.RequestID)
 		m.setState(api.TurnWaitingApproval)
 		cmds = append(cmds, m.readStreamChunk())
 
@@ -438,7 +433,7 @@ func (m *Model) View() string {
 		)
 	}
 
-	if m.state == api.TurnWaitingApproval && m.approvalIndex >= 0 && m.approvalIndex < len(m.pendingApprovals) {
+	if m.state == api.TurnWaitingApproval && m.approval.isActive() {
 		view = m.renderApprovalDialog(view)
 	}
 
@@ -507,13 +502,19 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) []tea.Cmd {
 	if m.state == api.TurnWaitingApproval {
 		switch msg.String() {
 		case m.config.Keybindings.ApproveYes:
-			cmds = append(cmds, m.approveCurrent(api.ApprovalYes))
+			if resp, ok := m.approval.approveCurrent(api.ApprovalYes); ok {
+				cmds = append(cmds, func() tea.Msg { return resp })
+			}
 			return cmds
 		case m.config.Keybindings.ApproveNo:
-			cmds = append(cmds, m.approveCurrent(api.ApprovalNo))
+			if resp, ok := m.approval.approveCurrent(api.ApprovalNo); ok {
+				cmds = append(cmds, func() tea.Msg { return resp })
+			}
 			return cmds
 		case m.config.Keybindings.ApproveAlways:
-			cmds = append(cmds, m.approveCurrent(api.ApprovalAlways))
+			if resp, ok := m.approval.approveCurrent(api.ApprovalAlways); ok {
+				cmds = append(cmds, func() tea.Msg { return resp })
+			}
 			return cmds
 		}
 	}
@@ -824,74 +825,28 @@ func (m *Model) handleToolResult(result api.ToolResult) []tea.Cmd {
 func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 
-	if m.approvalDecisions == nil {
-		m.approvalDecisions = make(map[string]api.ApprovalDecision)
-	}
-
-	if resp.Decision == api.ApprovalAlways {
-		approvals := make(map[string]api.ApprovalDecision)
-		for _, call := range m.pendingApprovals {
-			approvals[call.ID] = api.ApprovalYes
-			if m.autoApproveSetter != nil {
-				m.autoApproveSetter(call.Name)
-			}
-		}
-		m.pendingApprovals = nil
-		m.approvalIndex = -1
-		m.approvalDecisions = nil
-		m.setState(api.TurnThinking)
-		cmds = append(cmds, m.resumeWithApprovals(approvals))
-		cmds = append(cmds, m.readStreamChunk())
+	done, approvals, alwaysAll := m.approval.handleResponse(resp)
+	if !done {
 		return cmds
 	}
 
-	m.approvalDecisions[resp.CallID] = resp.Decision
-	m.approvalIndex++
-
-	if m.approvalIndex >= len(m.pendingApprovals) {
-		approvals := make(map[string]api.ApprovalDecision)
-		for _, call := range m.pendingApprovals {
-			if d, ok := m.approvalDecisions[call.ID]; ok {
-				approvals[call.ID] = d
-			} else {
-				approvals[call.ID] = api.ApprovalNo
-			}
+	if alwaysAll && m.autoApproveSetter != nil {
+		for _, call := range m.approval.pending() {
+			m.autoApproveSetter(call.Name)
 		}
-		m.pendingApprovals = nil
-		m.approvalIndex = -1
-		m.approvalDecisions = nil
-		m.setState(api.TurnThinking)
-		cmds = append(cmds, m.resumeWithApprovals(approvals))
-		cmds = append(cmds, m.readStreamChunk())
 	}
 
-	return cmds
-}
-
-func (m *Model) approveCurrent(decision api.ApprovalDecision) tea.Cmd {
-	if m.approvalIndex < 0 || m.approvalIndex >= len(m.pendingApprovals) {
-		return nil
-	}
-
-	call := m.pendingApprovals[m.approvalIndex]
-	return func() tea.Msg {
-		return ApprovalResponseMsg{Decision: decision, CallID: call.ID}
-	}
-}
-
-func (m *Model) resumeWithApprovals(approvals map[string]api.ApprovalDecision) tea.Cmd {
-	// Clear state in main thread before returning async command.
-	reqID := m.approvalRequestID
-	m.pendingApprovals = nil
-	m.approvalRequestID = 0
-	m.approvalIndex = -1
-	m.approvalDecisions = nil
-	return func() tea.Msg {
+	reqID := m.approval.requestID()
+	m.approval.clear()
+	m.setState(api.TurnThinking)
+	cmds = append(cmds, func() tea.Msg {
 		if m.turnManager != nil && m.session != nil {
 			_ = m.turnManager.ResumeWithApproval(m.appCtx, m.session.ID, reqID, approvals)
 		}
 		return StateChangeMsg{State: api.TurnThinking}
-	}
+	})
+	cmds = append(cmds, m.readStreamChunk())
+	return cmds
 }
 
 func (m *Model) addMessage(msg *msgcomp.Message) {
@@ -929,11 +884,10 @@ func (m *Model) refreshViewport() {
 }
 
 func (m *Model) renderApprovalDialog(background string) string {
-	if m.approvalIndex < 0 || m.approvalIndex >= len(m.pendingApprovals) {
+	call, ok := m.approval.currentCall()
+	if !ok {
 		return background
 	}
-
-	call := m.pendingApprovals[m.approvalIndex]
 	var b strings.Builder
 	b.WriteString("Tool call requires approval\n\n")
 	fmt.Fprintf(&b, "Tool: %s\n", call.Name)

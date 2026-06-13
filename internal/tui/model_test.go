@@ -375,8 +375,8 @@ func TestApprovalRequest(t *testing.T) {
 	if model.state != api.TurnWaitingApproval {
 		t.Errorf("state = %d, want TurnWaitingApproval", model.state)
 	}
-	if len(model.pendingApprovals) != 1 {
-		t.Errorf("pendingApprovals length = %d, want 1", len(model.pendingApprovals))
+	if len(model.approval.pending()) != 1 {
+		t.Errorf("pending approvals length = %d, want 1", len(model.approval.pending()))
 	}
 }
 
@@ -401,8 +401,8 @@ func TestApprovalResponse(t *testing.T) {
 	if model.state != api.TurnThinking {
 		t.Errorf("state = %d, want TurnThinking", model.state)
 	}
-	if len(model.pendingApprovals) != 0 {
-		t.Errorf("pendingApprovals length = %d, want 0", len(model.pendingApprovals))
+	if len(model.approval.pending()) != 0 {
+		t.Errorf("pending approvals length = %d, want 0", len(model.approval.pending()))
 	}
 }
 
