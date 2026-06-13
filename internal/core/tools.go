@@ -25,11 +25,12 @@ import (
 )
 
 const (
-	maxFileWriteSize   = 10 * 1024 * 1024 // 10 MB
-	maxFileReadSize    = 10 * 1024 * 1024 // 10 MB
-	maxShellOutputSize = 1024 * 1024      // 1 MB
-	maxShellCommandLen = 4096             // 4 KB
-	maxFetchBodySize   = 2 * 1024 * 1024  // 2 MB
+	maxFileWriteSize        = 10 * 1024 * 1024 // 10 MB
+	maxFileReadSize         = 10 * 1024 * 1024 // 10 MB
+	maxShellOutputSize      = 1024 * 1024      // 1 MB
+	maxShellCommandLen      = 4096             // 4 KB
+	maxShellTimeoutOverride = 10 * time.Minute // absolute ceiling for per-command timeout
+	maxFetchBodySize        = 2 * 1024 * 1024  // 2 MB
 )
 
 var (
@@ -50,6 +51,7 @@ type BuiltInToolExecutor struct {
 	httpClient     *http.Client
 	protectedPaths []string
 	allowShell     bool
+	passEnv        bool
 	root           *os.Root
 }
 
@@ -59,6 +61,7 @@ type ToolExecutorConfig struct {
 	SandboxRoot    string
 	HTTPClient     *http.Client
 	ProtectedPaths []string
+	PassEnv        bool
 }
 
 // NewBuiltInToolExecutor creates a new BuiltInToolExecutor.
@@ -118,6 +121,7 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 		httpClient:     httpClient,
 		protectedPaths: resolvedProtected,
 		allowShell:     true,
+		passEnv:        cfg.PassEnv,
 		root:           root,
 		readOnly: map[string]bool{
 			"read_file":      true,
@@ -299,7 +303,9 @@ func (e *BuiltInToolExecutor) validatePath(path string) (string, error) {
 }
 
 type readFileArgs struct {
-	Path string `json:"path"`
+	Path       string `json:"path"`
+	LineOffset int    `json:"line_offset"`
+	NLines     int    `json:"n_lines"`
 }
 
 type writeFileArgs struct {
@@ -308,9 +314,17 @@ type writeFileArgs struct {
 }
 
 type strReplaceArgs struct {
-	Path      string `json:"path"`
-	OldString string `json:"old_string"`
-	NewString string `json:"new_string"`
+	Path       string `json:"path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
+}
+
+type editArgs struct {
+	Path       string `json:"path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
 }
 
 type globArgs struct {
@@ -324,6 +338,7 @@ type grepArgs struct {
 
 type shellArgs struct {
 	Command string `json:"command"`
+	Timeout int    `json:"timeout"` // optional per-command timeout in seconds
 }
 
 type fetchURLArgs struct {
@@ -344,7 +359,7 @@ func decodeArgs[T any](raw string) (T, error) {
 
 // Definitions returns all available tool definitions.
 func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinition {
-	defs := make([]api.ToolDefinition, 0, 8)
+	defs := make([]api.ToolDefinition, 0, 9)
 
 	addDef := func(name, desc string, params map[string]any) {
 		p, err := marshalParams(params)
@@ -359,12 +374,20 @@ func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinitio
 		})
 	}
 
-	addDef("read_file", "Read the contents of a file at the given path.", map[string]any{
+	addDef("read_file", "Read the contents of a file at the given path. Optionally return only a line range; line_offset and n_lines are 1-based and default to 0 (full file).", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"path": map[string]any{
 				"type":        "string",
 				"description": "The path to the file to read.",
+			},
+			"line_offset": map[string]any{
+				"type":        "integer",
+				"description": "1-based line number to start reading from. 0 means start at the first line.",
+			},
+			"n_lines": map[string]any{
+				"type":        "integer",
+				"description": "Number of lines to read. 0 means read to the end of the file.",
 			},
 		},
 		"required": []string{"path"},
@@ -383,7 +406,7 @@ func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinitio
 		},
 		"required": []string{"path", "content"},
 	})
-	addDef("str_replace_file", "Replace every occurrence of old_string with new_string in a file.", map[string]any{
+	addDef("str_replace_file", "Replace old_string with new_string in a file. By default old_string must occur exactly once unless replace_all is true.", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"path": map[string]any{
@@ -397,6 +420,32 @@ func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinitio
 			"new_string": map[string]any{
 				"type":        "string",
 				"description": "The string to replace with.",
+			},
+			"replace_all": map[string]any{
+				"type":        "boolean",
+				"description": "If true, replace every occurrence. If false (default), fail when old_string occurs more than once.",
+			},
+		},
+		"required": []string{"path", "old_string", "new_string"},
+	})
+	addDef("edit", "Make a targeted edit to a file. Replaces old_string with new_string; old_string must occur exactly once unless replace_all is true.", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{
+				"type":        "string",
+				"description": "The path to the file.",
+			},
+			"old_string": map[string]any{
+				"type":        "string",
+				"description": "The exact string to replace.",
+			},
+			"new_string": map[string]any{
+				"type":        "string",
+				"description": "The string to replace it with.",
+			},
+			"replace_all": map[string]any{
+				"type":        "boolean",
+				"description": "If true, replace every occurrence. If false (default), fail when old_string occurs more than once.",
 			},
 		},
 		"required": []string{"path", "old_string", "new_string"},
@@ -425,12 +474,16 @@ func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinitio
 		},
 		"required": []string{"pattern", "path"},
 	})
-	addDef("shell", "Execute a shell command with a configurable timeout. Note: the shell is NOT path-sandboxed; only the approval gate constrains it.", map[string]any{
+	addDef("shell", "Execute a shell command inside the sandbox root with a configurable timeout and a curated environment.", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"command": map[string]any{
 				"type":        "string",
 				"description": "The shell command to execute.",
+			},
+			"timeout": map[string]any{
+				"type":        "integer",
+				"description": "Optional per-command timeout in seconds. Cannot exceed 600 (10 minutes).",
 			},
 		},
 		"required": []string{"command"},
@@ -505,6 +558,16 @@ func (e *BuiltInToolExecutor) Execute(ctx context.Context, call api.ToolCall) (a
 				result.Error = err.Error()
 			}
 		}
+	case "edit":
+		args, err := decodeArgs[editArgs](call.Arguments)
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Output, err = e.execEditFile(ctx, args)
+			if err != nil {
+				result.Error = err.Error()
+			}
+		}
 	case "glob":
 		args, err := decodeArgs[globArgs](call.Arguments)
 		if err != nil {
@@ -569,6 +632,12 @@ func (e *BuiltInToolExecutor) execReadFile(ctx context.Context, args readFileArg
 	if args.Path == "" {
 		return "", ErrPathRequired
 	}
+	if args.LineOffset < 0 {
+		return "", fmt.Errorf("read file: line_offset must be non-negative")
+	}
+	if args.NLines < 0 {
+		return "", fmt.Errorf("read file: n_lines must be non-negative")
+	}
 	validPath, err := e.validatePath(args.Path)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
@@ -616,7 +685,39 @@ func (e *BuiltInToolExecutor) execReadFile(ctx context.Context, args readFileArg
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
 	}
-	return string(data), nil
+	return extractLineRange(data, args.LineOffset, args.NLines)
+}
+
+// extractLineRange returns a subset of a file's content. offset and n are
+// 1-based; offset==0 && n==0 returns the full content. A zero offset with a
+// non-zero n starts at the first line; a non-zero offset with n==0 reads to
+// the end of the file.
+func extractLineRange(data []byte, offset, n int) (string, error) {
+	if offset == 0 && n == 0 {
+		return string(data), nil
+	}
+	s := string(data)
+	endsWithNewline := len(s) > 0 && s[len(s)-1] == '\n'
+	lines := strings.Split(s, "\n")
+	if endsWithNewline {
+		lines = lines[:len(lines)-1]
+	}
+	start := offset
+	if start == 0 {
+		start = 1
+	}
+	if start > len(lines) {
+		return "", nil
+	}
+	end := len(lines)
+	if n > 0 {
+		end = start - 1 + n
+		if end > len(lines) {
+			end = len(lines)
+		}
+	}
+	out := strings.Join(lines[start-1:end], "\n")
+	return out, nil
 }
 
 // isRootEscapeErr reports whether err is an os.Root "path escapes from parent"
@@ -780,18 +881,26 @@ func (e *BuiltInToolExecutor) execWriteFile(ctx context.Context, args writeFileA
 }
 
 func (e *BuiltInToolExecutor) execStrReplaceFile(ctx context.Context, args strReplaceArgs) (string, error) {
+	return e.replaceInFile(ctx, args.Path, args.OldString, args.NewString, args.ReplaceAll, "str_replace_file")
+}
+
+func (e *BuiltInToolExecutor) execEditFile(ctx context.Context, args editArgs) (string, error) {
+	return e.replaceInFile(ctx, args.Path, args.OldString, args.NewString, args.ReplaceAll, "edit")
+}
+
+func (e *BuiltInToolExecutor) replaceInFile(ctx context.Context, path, oldString, newString string, replaceAll bool, tool string) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("replace file cancelled: %w", err)
+		return "", fmt.Errorf("%s: %w", tool, err)
 	}
-	if args.Path == "" {
+	if path == "" {
 		return "", ErrPathRequired
 	}
-	if args.OldString == "" {
+	if oldString == "" {
 		return "", fmt.Errorf("old_string is required")
 	}
-	validPath, err := e.validatePath(args.Path)
+	validPath, err := e.validatePath(path)
 	if err != nil {
-		return "", fmt.Errorf("str_replace_file: %w", err)
+		return "", fmt.Errorf("%s: %w", tool, err)
 	}
 
 	var data []byte
@@ -799,13 +908,13 @@ func (e *BuiltInToolExecutor) execStrReplaceFile(ctx context.Context, args strRe
 		f, err := e.root.Open(validPath)
 		if err != nil {
 			if isRootEscapeErr(err) {
-				return "", fmt.Errorf("str_replace_file: %w: path escapes sandbox", ErrSandboxViolation)
+				return "", fmt.Errorf("%s: %w: path escapes sandbox", tool, ErrSandboxViolation)
 			}
 			return "", fmt.Errorf("read file: %w", err)
 		}
 		if err := checkFileHardlinkEscape(f); err != nil {
 			_ = f.Close()
-			return "", fmt.Errorf("str_replace_file: %w", err)
+			return "", fmt.Errorf("%s: %w", tool, err)
 		}
 		data, err = io.ReadAll(f)
 		_ = f.Close()
@@ -825,10 +934,14 @@ func (e *BuiltInToolExecutor) execStrReplaceFile(ctx context.Context, args strRe
 	}
 
 	content := string(data)
-	if !strings.Contains(content, args.OldString) {
+	count := strings.Count(content, oldString)
+	if count == 0 {
 		return "", fmt.Errorf("old_string not found in file")
 	}
-	content = strings.ReplaceAll(content, args.OldString, args.NewString)
+	if !replaceAll && count > 1 {
+		return "", fmt.Errorf("old_string occurs %d times; provide a unique old_string or set replace_all=true", count)
+	}
+	content = strings.ReplaceAll(content, oldString, newString)
 	if len(content) > maxFileWriteSize {
 		return "", fmt.Errorf("result exceeds max size of %d bytes", maxFileWriteSize)
 	}
@@ -841,7 +954,7 @@ func (e *BuiltInToolExecutor) execStrReplaceFile(ctx context.Context, args strRe
 			return "", fmt.Errorf("write file: %w", err)
 		}
 	}
-	return fmt.Sprintf("replaced in %s", args.Path), nil
+	return fmt.Sprintf("replaced in %s", path), nil
 }
 
 func (e *BuiltInToolExecutor) execGlob(ctx context.Context, args globArgs) (string, error) {
@@ -1098,17 +1211,28 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (st
 		return "", fmt.Errorf("shell tool is disabled")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, e.shellTimeout)
+	timeout := e.shellTimeout
+	if args.Timeout > 0 {
+		requested := time.Duration(args.Timeout) * time.Second
+		if requested > maxShellTimeoutOverride {
+			requested = maxShellTimeoutOverride
+		}
+		timeout = requested
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// NOTE: shell is NOT path-sandboxed; cmd.Dir is a working directory, not a
 	// chroot. The only guard is the approval gate, which never auto-approves
 	// the shell tool regardless of configuration.
 	cmd := exec.CommandContext(ctx, "sh", "-c", args.Command)
-	cmd.Env = curatedEnv()
-	if e.sandboxRoot != "" {
-		cmd.Dir = e.sandboxRoot
+	if e.passEnv {
+		cmd.Env = os.Environ()
+	} else {
+		cmd.Env = curatedEnv()
 	}
+	cmd.Dir = e.sandboxRoot
 	output, err := cmd.CombinedOutput()
 	outStr := string(output)
 	if len(outStr) > maxShellOutputSize {
@@ -1117,7 +1241,7 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (st
 	}
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return outStr, fmt.Errorf("command timed out after %s", e.shellTimeout)
+			return outStr, fmt.Errorf("command timed out after %s", timeout)
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
@@ -1129,34 +1253,39 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (st
 	return outStr, nil
 }
 
-// secretEnvPatterns lists substrings that indicate an environment variable
-// likely contains sensitive material.
-var secretEnvPatterns = []string{
-	"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL",
-	"API_KEY", "APIKEY", "ACCESS_KEY", "PRIVATE_KEY",
-	"AUTH", "BEARER", "JWT",
+// allowedEnvKeys is the curated allowlist of environment variables passed to
+// shell commands by default. Sensitive variables are excluded unless the
+// pass_env config flag is enabled.
+var allowedEnvKeys = map[string]bool{
+	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true,
+	"SHELL": true, "LANG": true, "TERM": true, "TERM_PROGRAM": true,
+	"TERM_PROGRAM_VERSION": true, "TMPDIR": true, "PWD": true, "OLDPWD": true,
+	"XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_CACHE_HOME": true,
+	"XDG_SESSION_TYPE": true, "XDG_CURRENT_DESKTOP": true,
+	"EDITOR": true, "VISUAL": true, "PAGER": true,
+	"GOROOT": true, "GOPATH": true, "GOPROXY": true, "GOSUMDB": true,
+	"GOVERSION": true, "CGO_ENABLED": true, "NO_COLOR": true,
 }
 
-// curatedEnv returns a copy of the current process environment with
-// likely-secret variables removed. It preserves PATH, HOME, and other
-// safe variables so that common shell commands work.
+// isAllowedEnvKey reports whether a variable is in the curated allowlist.
+// Locale variables matching LC_* are also allowed.
+func isAllowedEnvKey(key string) bool {
+	upper := strings.ToUpper(key)
+	if allowedEnvKeys[upper] {
+		return true
+	}
+	return strings.HasPrefix(upper, "LC_")
+}
+
+// curatedEnv returns a copy of the current process environment containing only
+// variables from the curated allowlist. When pass_env is enabled in config the
+// executor bypasses this function entirely.
 func curatedEnv() []string {
 	env := os.Environ()
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {
 		key, _, _ := strings.Cut(e, "=")
-		upper := strings.ToUpper(key)
-		if strings.Contains(upper, "SSH") {
-			continue
-		}
-		safe := true
-		for _, p := range secretEnvPatterns {
-			if strings.Contains(upper, p) {
-				safe = false
-				break
-			}
-		}
-		if safe {
+		if isAllowedEnvKey(key) {
 			filtered = append(filtered, e)
 		}
 	}

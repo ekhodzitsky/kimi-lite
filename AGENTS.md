@@ -69,7 +69,7 @@ Business logic layer.
 
 - `SessionManager` — create, resume, list sessions
 - `TurnManager` — orchestrates input → LLM → tools → output
-- `BuiltInToolExecutor` — 8 built-in tools (`read_file`, `write_file`, `str_replace_file`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`) with sandboxed file access
+- `BuiltInToolExecutor` — 9 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`) with sandboxed file access
   - Uses `os.OpenRoot` when `SandboxRoot` is configured; falls back to `O_NOFOLLOW` (`openFileNoFollow`) when no sandbox root is set
   - Blocks protected paths and sensitive system/secret trees
   - Performs hardlink-escape checks on sandboxed reads

@@ -37,6 +37,7 @@ shell_timeout = "60s"
 max_turns = 10
 max_tool_rounds = 5
 allow_shell = true
+pass_env = true
 compact_keep_recent = 7
 
 [session]
@@ -125,6 +126,7 @@ approve_always = "a"
 	assertPositive("behavior.max_turns", cfg.Behavior.MaxTurns)
 	assertPositive("behavior.max_tool_rounds", cfg.Behavior.MaxToolRounds)
 	assertTrue("behavior.allow_shell", cfg.Behavior.AllowShell)
+	assertTrue("behavior.pass_env", cfg.Behavior.PassEnv)
 	assertPositive("behavior.compact_keep_recent", cfg.Behavior.CompactKeepRecent)
 
 	// Session

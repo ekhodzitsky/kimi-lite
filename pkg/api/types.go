@@ -385,6 +385,7 @@ type BehaviorConfig struct {
 	MaxToolRounds     int           `mapstructure:"max_tool_rounds"`
 	AllowShell        bool          `mapstructure:"allow_shell"`
 	CompactKeepRecent int           `mapstructure:"compact_keep_recent"`
+	PassEnv           bool          `mapstructure:"pass_env"`
 }
 
 // PermissionDecision is the action a permission rule takes.

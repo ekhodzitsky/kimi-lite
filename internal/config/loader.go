@@ -46,6 +46,7 @@ func NewLoader() *Loader {
 	v.SetDefault("behavior.max_turns", defaults.Behavior.MaxTurns)
 	v.SetDefault("behavior.max_tool_rounds", defaults.Behavior.MaxToolRounds)
 	v.SetDefault("behavior.compact_keep_recent", defaults.Behavior.CompactKeepRecent)
+	v.SetDefault("behavior.pass_env", defaults.Behavior.PassEnv)
 	v.SetDefault("session.db_path", defaults.Session.DBPath)
 	v.SetDefault("session.max_history", defaults.Session.MaxHistory)
 	v.SetDefault("mcp.guard_command", defaults.MCP.GuardCommand)
@@ -200,6 +201,7 @@ timeout = "60s"
 auto_approve = ["read_file", "grep", "glob", "fetch_url", "list_directory"]
 shell_timeout = "30s"
 allow_shell = true
+pass_env = false
 max_turns = 50
 max_tool_rounds = 10
 compact_keep_recent = 2

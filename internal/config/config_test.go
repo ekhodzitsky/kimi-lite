@@ -40,6 +40,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Behavior.ShellTimeout != 30*time.Second {
 		t.Errorf("expected shell timeout 30s, got %v", cfg.Behavior.ShellTimeout)
 	}
+	if cfg.Behavior.PassEnv {
+		t.Error("expected pass_env false by default")
+	}
 	if cfg.Behavior.MaxTurns != 50 {
 		t.Errorf("expected max turns 50, got %d", cfg.Behavior.MaxTurns)
 	}

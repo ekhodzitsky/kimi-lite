@@ -47,15 +47,15 @@ func TestBuiltInToolExecutor_Definitions(t *testing.T) {
 	t.Parallel()
 	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 	defs := exec.Definitions(context.Background())
-	if len(defs) != 8 {
-		t.Fatalf("expected 8 tool definitions, got %d", len(defs))
+	if len(defs) != 9 {
+		t.Fatalf("expected 9 tool definitions, got %d", len(defs))
 	}
 
 	names := make(map[string]bool)
 	for _, d := range defs {
 		names[d.Name] = true
 	}
-	expected := []string{"read_file", "write_file", "str_replace_file", "glob", "grep", "shell", "fetch_url", "list_directory"}
+	expected := []string{"read_file", "write_file", "str_replace_file", "edit", "glob", "grep", "shell", "fetch_url", "list_directory"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("missing tool definition: %s", name)
@@ -77,6 +77,7 @@ func TestBuiltInToolExecutor_IsReadOnly(t *testing.T) {
 		{"list_directory", true},
 		{"write_file", false},
 		{"str_replace_file", false},
+		{"edit", false},
 		{"shell", false},
 	}
 	for _, tt := range tests {
@@ -1246,7 +1247,11 @@ func TestAtomicWriteFile_Atomic(t *testing.T) {
 func TestCuratedEnv(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
 	t.Setenv("HOME", "/home/user")
+	t.Setenv("USER", "user")
 	t.Setenv("OPENAI_API_KEY", "sk-secret")
+	t.Setenv("ANTHROPIC_API_KEY", "anthro-secret")
+	t.Setenv("KIMI_API_KEY", "kimi-secret")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
 	t.Setenv("MY_PASSWORD", "hunter2")
 	t.Setenv("SSH_AUTH_SOCK", "/tmp/ssh")
@@ -1265,11 +1270,20 @@ func TestCuratedEnv(t *testing.T) {
 	if m["HOME"] != "/home/user" {
 		t.Errorf("HOME = %q, want /home/user", m["HOME"])
 	}
-	if m["SAFE_VAR"] != "visible" {
-		t.Errorf("SAFE_VAR = %q, want visible", m["SAFE_VAR"])
+	if m["USER"] != "user" {
+		t.Errorf("USER = %q, want user", m["USER"])
 	}
 	if _, ok := m["OPENAI_API_KEY"]; ok {
 		t.Error("OPENAI_API_KEY should be scrubbed")
+	}
+	if _, ok := m["ANTHROPIC_API_KEY"]; ok {
+		t.Error("ANTHROPIC_API_KEY should be scrubbed")
+	}
+	if _, ok := m["KIMI_API_KEY"]; ok {
+		t.Error("KIMI_API_KEY should be scrubbed")
+	}
+	if _, ok := m["AWS_SECRET_ACCESS_KEY"]; ok {
+		t.Error("AWS_SECRET_ACCESS_KEY should be scrubbed")
 	}
 	if _, ok := m["GITHUB_TOKEN"]; ok {
 		t.Error("GITHUB_TOKEN should be scrubbed")
@@ -1279,6 +1293,9 @@ func TestCuratedEnv(t *testing.T) {
 	}
 	if _, ok := m["SSH_AUTH_SOCK"]; ok {
 		t.Error("SSH_AUTH_SOCK should be scrubbed")
+	}
+	if _, ok := m["SAFE_VAR"]; ok {
+		t.Error("SAFE_VAR should be scrubbed because it is not in the allowlist")
 	}
 }
 
@@ -1592,5 +1609,272 @@ func TestIsRootEscapeErr_RecognizesRootEscape(t *testing.T) {
 	}
 	if isRootEscapeErr(errors.New("other error")) {
 		t.Error("isRootEscapeErr should not match unrelated errors")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ReadFile_Pagination(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	path := filepath.Join(tmp, "lines.txt")
+	content := "line1\nline2\nline3\nline4\nline5\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		offset int
+		nLines int
+		want   string
+	}{
+		{"full file", 0, 0, content},
+		{"first three", 0, 3, "line1\nline2\nline3"},
+		{"middle two", 2, 2, "line2\nline3"},
+		{"to end", 4, 0, "line4\nline5"},
+		{"beyond end", 10, 1, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			result, err := exec.Execute(context.Background(), api.ToolCall{
+				ID:        "call_1",
+				Name:      "read_file",
+				Arguments: fmt.Sprintf(`{"path":"%s","line_offset":%d,"n_lines":%d}`, path, tc.offset, tc.nLines),
+			})
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if result.Error != "" {
+				t.Fatalf("unexpected error: %s", result.Error)
+			}
+			if result.Output != tc.want {
+				t.Errorf("output = %q, want %q", result.Output, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Edit_Unique(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	path := filepath.Join(tmp, "edit.txt")
+	if err := os.WriteFile(path, []byte("foo bar baz"), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "edit",
+		Arguments: fmt.Sprintf(`{"path":"%s","old_string":"bar","new_string":"qux"}`, path),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	data, _ := os.ReadFile(path)
+	if string(data) != "foo qux baz" {
+		t.Errorf("content = %q, want %q", string(data), "foo qux baz")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Edit_MultipleRequiresReplaceAll(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	path := filepath.Join(tmp, "edit.txt")
+	if err := os.WriteFile(path, []byte("abc abc abc"), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "edit",
+		Arguments: fmt.Sprintf(`{"path":"%s","old_string":"abc","new_string":"xyz"}`, path),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for non-unique old_string")
+	}
+	if !strings.Contains(result.Error, "occurs 3 times") {
+		t.Errorf("expected occurrence count error, got: %q", result.Error)
+	}
+
+	result, err = exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_2",
+		Name:      "edit",
+		Arguments: fmt.Sprintf(`{"path":"%s","old_string":"abc","new_string":"xyz","replace_all":true}`, path),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "xyz xyz xyz" {
+		t.Errorf("content = %q, want %q", string(data), "xyz xyz xyz")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_StrReplaceFile_MultipleRequiresReplaceAll(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	path := filepath.Join(tmp, "replace.txt")
+	if err := os.WriteFile(path, []byte("xx xx"), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "str_replace_file",
+		Arguments: fmt.Sprintf(`{"path":"%s","old_string":"xx","new_string":"yy"}`, path),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for non-unique old_string")
+	}
+
+	result, err = exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_2",
+		Name:      "str_replace_file",
+		Arguments: fmt.Sprintf(`{"path":"%s","old_string":"xx","new_string":"yy","replace_all":true}`, path),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "yy yy" {
+		t.Errorf("content = %q, want %q", string(data), "yy yy")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_WorkingDirectory(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	if err := os.WriteFile(filepath.Join(tmp, "hello.txt"), []byte("world"), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: `{"command":"cat hello.txt"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if strings.TrimSpace(result.Output) != "world" {
+		t.Errorf("output = %q, want %q", strings.TrimSpace(result.Output), "world")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_TimeoutOverride(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell semantics")
+	}
+
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 5 * time.Second})
+	marker := fmt.Sprintf("kimi-shell-timeout-override-%d", time.Now().UnixNano())
+
+	start := time.Now()
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: fmt.Sprintf(`{"command":"sleep 3 # %s","timeout":1}`, marker),
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(result.Error, "timed out") {
+		t.Errorf("expected timeout error, got: %q", result.Error)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("command took %v to return, want well under 2s", elapsed)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_CuratedEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell semantics")
+	}
+
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp, PassEnv: false})
+
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("HOME", "/home/user")
+	t.Setenv("OPENAI_API_KEY", "sk-secret")
+	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("SAFE_VAR", "visible")
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: `{"command":"echo \"OPENAI=$OPENAI_API_KEY GITHUB=$GITHUB_TOKEN SAFE=$SAFE_VAR PATH=$PATH\""}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	out := strings.TrimSpace(result.Output)
+	if strings.Contains(out, "sk-secret") || strings.Contains(out, "gh-secret") || strings.Contains(out, "SAFE=visible") {
+		t.Errorf("sensitive/unknown variables leaked into shell env: %q", out)
+	}
+	if !strings.HasPrefix(out, "OPENAI= GITHUB= SAFE= PATH=/usr/bin:/bin") {
+		t.Errorf("expected scrubbed env output, got: %q", out)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_PassEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell semantics")
+	}
+
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp, PassEnv: true})
+
+	t.Setenv("OPENAI_API_KEY", "sk-secret")
+	t.Setenv("SAFE_VAR", "visible")
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: `{"command":"echo \"OPENAI=$OPENAI_API_KEY SAFE=$SAFE_VAR\""}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	out := strings.TrimSpace(result.Output)
+	want := "OPENAI=sk-secret SAFE=visible"
+	if out != want {
+		t.Errorf("output = %q, want %q", out, want)
 	}
 }
