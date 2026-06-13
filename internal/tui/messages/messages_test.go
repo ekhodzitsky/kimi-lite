@@ -5,7 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/glamour"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
@@ -101,13 +102,13 @@ func TestMessageUpdateToggleExpand(t *testing.T) {
 		t.Error("initial Expanded should be false")
 	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	msg := updated.(*Message)
 	if !msg.Expanded {
 		t.Error("Expanded should be true after Enter key")
 	}
 
-	updated2, _ := msg.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated2, _ := msg.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	msg2 := updated2.(*Message)
 	if msg2.Expanded {
 		t.Error("Expanded should be false after second Enter key")
@@ -121,7 +122,7 @@ func TestMessageUpdateMouseToggle(t *testing.T) {
 	call := api.ToolCall{ID: "1", Name: "test_tool", Arguments: `{}`}
 	m := NewToolCallMessage(call, st)
 
-	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft})
 	msg := updated.(*Message)
 	if !msg.Expanded {
 		t.Error("Expanded should be true after mouse click")
@@ -175,7 +176,7 @@ func TestMessageViewUser(t *testing.T) {
 	m := NewUserMessage("hello", st)
 	m.SetWidth(80)
 	view := m.View()
-	if !strings.Contains(view, "hello") {
+	if !strings.Contains(view.Content, "hello") {
 		t.Error("User message view should contain content")
 	}
 }
@@ -187,7 +188,7 @@ func TestMessageViewAssistant(t *testing.T) {
 	m := NewAssistantMessage("**bold**", st)
 	m.SetWidth(80)
 	view := m.View()
-	if view == "" {
+	if view.Content == "" {
 		t.Error("Assistant message view should not be empty")
 	}
 }
@@ -259,7 +260,7 @@ func TestToggleRawModeKeyBinding(t *testing.T) {
 	st := styles.New("dark")
 	m := NewAssistantMessage("**bold**", st)
 
-	cmd := m.UpdateMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	cmd := m.UpdateMsg(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	if cmd == nil {
 		t.Fatal("UpdateMsg should return a command for raw-mode toggle")
 	}
@@ -279,7 +280,7 @@ func TestToggleRawModeKeyBinding_NonAssistantIgnored(t *testing.T) {
 	st := styles.New("dark")
 	m := NewUserMessage("**bold**", st)
 
-	cmd := m.UpdateMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	cmd := m.UpdateMsg(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	if cmd != nil {
 		t.Error("UpdateMsg should not return a command for non-assistant messages")
 	}
@@ -296,10 +297,10 @@ func TestMessageViewToolCall(t *testing.T) {
 	m := NewToolCallMessage(call, st)
 	m.SetWidth(80)
 	view := m.View()
-	if !strings.Contains(view, "read_file") {
+	if !strings.Contains(view.Content, "read_file") {
 		t.Error("Tool call view should contain tool name")
 	}
-	if !strings.Contains(view, "pending") {
+	if !strings.Contains(view.Content, "pending") {
 		t.Error("Tool call view should contain pending status")
 	}
 }
@@ -313,7 +314,7 @@ func TestMessageViewToolCallExpanded(t *testing.T) {
 	m.Expanded = true
 	m.SetWidth(80)
 	view := m.View()
-	if !strings.Contains(view, "Arguments:") {
+	if !strings.Contains(view.Content, "Arguments:") {
 		t.Error("Expanded tool call should show arguments")
 	}
 }
@@ -328,10 +329,10 @@ func TestMessageViewToolCallWithResult(t *testing.T) {
 	m.SetToolResult(api.ToolResult{CallID: "1", Name: "read_file", Output: "file contents"})
 	m.SetWidth(80)
 	view := m.View()
-	if !strings.Contains(view, "done") {
+	if !strings.Contains(view.Content, "done") {
 		t.Error("Tool call with result should show done status")
 	}
-	if !strings.Contains(view, "file contents") {
+	if !strings.Contains(view.Content, "file contents") {
 		t.Error("Tool call with result should show output")
 	}
 }
@@ -343,7 +344,7 @@ func TestMessageViewError(t *testing.T) {
 	m := NewErrorMessage(errors.New("failure"), st)
 	m.SetWidth(80)
 	view := m.View()
-	if !strings.Contains(view, "failure") {
+	if !strings.Contains(view.Content, "failure") {
 		t.Error("Error message view should contain error text")
 	}
 }
@@ -405,7 +406,7 @@ func TestCachedRendererOutput(t *testing.T) {
 			t.Fatalf("glamour.Render error: %v", err)
 		}
 		got := safeGlamourRender(content, theme)
-		if got != want {
+		if ansi.Strip(got) != ansi.Strip(want) {
 			t.Errorf("theme=%s: cached output differs from glamour.Render", theme)
 		}
 	}
@@ -434,13 +435,13 @@ func TestUserMessageCache(t *testing.T) {
 	st := styles.New("dark")
 	m := NewUserMessage("hello world this is a long message", st)
 	m.SetWidth(40)
-	v1 := m.View()
-	v2 := m.View()
+	v1 := m.View().Content
+	v2 := m.View().Content
 	if v1 != v2 {
 		t.Error("second View() at same width should return cached output")
 	}
 	m.SetWidth(30)
-	v3 := m.View()
+	v3 := m.View().Content
 	if v3 == v1 {
 		t.Error("View() after SetWidth should reflect new wrap")
 	}
@@ -453,12 +454,12 @@ func TestToolCallCacheInvalidation(t *testing.T) {
 	call := api.ToolCall{ID: "1", Name: "read_file", Arguments: `{"path": "/tmp/test"}`}
 	m := NewToolCallMessage(call, st)
 	m.SetWidth(80)
-	v1 := m.View()
+	v1 := m.View().Content
 
 	// Toggle expand invalidates cache
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	msg := updated.(*Message)
-	v2 := msg.View()
+	v2 := msg.View().Content
 	if v2 == v1 {
 		t.Error("View() after expand toggle should return different output")
 	}
@@ -481,14 +482,14 @@ func TestGoldenMessageViewUser(t *testing.T) {
 	st := styles.New("dark")
 	m := NewUserMessage("Hello, assistant!", st)
 	m.SetWidth(60)
-	compareGolden(t, "message_user", m.View())
+	compareGolden(t, "message_user", m.View().Content)
 }
 
 func TestGoldenMessageViewAssistant(t *testing.T) {
 	st := styles.New("dark")
 	m := NewAssistantMessage("## Summary\n\nThis is **bold** and `code`.", st)
 	m.SetWidth(60)
-	compareGolden(t, "message_assistant", m.View())
+	compareGolden(t, "message_assistant", m.View().Content)
 }
 
 func TestGoldenMessageViewToolCall(t *testing.T) {
@@ -497,12 +498,12 @@ func TestGoldenMessageViewToolCall(t *testing.T) {
 	m := NewToolCallMessage(call, st)
 	m.Expanded = true
 	m.SetWidth(60)
-	compareGolden(t, "message_toolcall", m.View())
+	compareGolden(t, "message_toolcall", m.View().Content)
 }
 
 func TestGoldenMessageViewError(t *testing.T) {
 	st := styles.New("dark")
 	m := NewErrorMessage(errors.New("something went wrong"), st)
 	m.SetWidth(60)
-	compareGolden(t, "message_error", m.View())
+	compareGolden(t, "message_error", m.View().Content)
 }

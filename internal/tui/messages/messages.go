@@ -7,10 +7,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -151,7 +151,7 @@ func (m *Message) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // UpdateMsg processes a message and returns the resulting command.
 func (m *Message) UpdateMsg(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if key.Matches(msg, m.KeyMap.ToggleExpand) && m.Type == TypeToolCall {
 			m.Expanded = !m.Expanded
 			m.cacheWidth = -1
@@ -160,8 +160,8 @@ func (m *Message) UpdateMsg(msg tea.Msg) tea.Cmd {
 			m.ToggleRawMode()
 			return func() tea.Msg { return RenderInvalidateMsg{} }
 		}
-	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft && m.Type == TypeToolCall {
+	case tea.MouseReleaseMsg:
+		if msg.Button == tea.MouseLeft && m.Type == TypeToolCall {
 			m.Expanded = !m.Expanded
 			m.cacheWidth = -1
 		}
@@ -170,18 +170,18 @@ func (m *Message) UpdateMsg(msg tea.Msg) tea.Cmd {
 }
 
 // View implements tea.Model.
-func (m *Message) View() string {
+func (m *Message) View() tea.View {
 	switch m.Type {
 	case TypeUser:
-		return m.viewUser()
+		return tea.NewView(m.viewUser())
 	case TypeAssistant:
-		return m.viewAssistant()
+		return tea.NewView(m.viewAssistant())
 	case TypeToolCall:
-		return m.viewToolCall()
+		return tea.NewView(m.viewToolCall())
 	case TypeError:
-		return m.viewError()
+		return tea.NewView(m.viewError())
 	default:
-		return ""
+		return tea.NewView("")
 	}
 }
 

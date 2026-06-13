@@ -2,20 +2,21 @@ package messages
 
 import (
 	"flag"
+	"io"
 	"os"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
+	"github.com/charmbracelet/colorprofile"
+	"charm.land/lipgloss/v2"
 )
 
 // updateGolden, when true, regenerates golden files instead of comparing.
 var updateGolden = flag.Bool("update", false, "update golden files")
 
-// TestMain pins the lipgloss color profile to ASCII so golden comparisons are
-// deterministic across environments.
+// TestMain pins the lipgloss color profile to no-color so golden comparisons
+// are deterministic across environments.
 func TestMain(m *testing.M) {
 	flag.Parse()
-	lipgloss.SetColorProfile(termenv.Ascii)
+	lipgloss.Writer = colorprofile.NewWriter(io.Discard, []string{"NO_COLOR=1"})
 	os.Exit(m.Run())
 }
