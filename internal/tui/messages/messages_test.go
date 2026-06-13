@@ -367,3 +367,16 @@ func TestToolCallCacheInvalidation(t *testing.T) {
 		t.Error("View() after expand toggle should return different output")
 	}
 }
+
+func TestSafeGlamourRender_FallbackOnError(t *testing.T) {
+	t.Parallel()
+
+	content := "# hello\n"
+	// glamour cannot be made to panic deterministically, but an invalid theme
+	// forces the renderer-creation error branch and locks in the fallback-to-raw
+	// contract.
+	got := safeGlamourRender(content, "this-theme-does-not-exist-12345")
+	if got != content {
+		t.Errorf("expected raw content fallback, got %q", got)
+	}
+}
