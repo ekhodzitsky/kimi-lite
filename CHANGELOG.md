@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-06-13
+
 ### Added
 
 - **Raw markdown toggle** — press `r` while the viewport is focused to toggle raw/rendered markdown for assistant messages.
@@ -91,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `--debug` flag, sanitized error logging, structured `slog` output.
 - **Cross-platform** — static binary with `CGO_ENABLED=0`, supports macOS, Linux (glibc & musl), ARM64.
 
+[0.2.5]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.5
 [0.2.4]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.4
 [0.2.3]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.3
 [0.2.2]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.2
