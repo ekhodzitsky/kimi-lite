@@ -291,24 +291,27 @@ func TestTurnManager_RunTurn_ManualApproval(t *testing.T) {
 	// Read chunks in background since outCh won't close until resume
 	var contents []string
 	done := make(chan struct{})
+	approvalSeen := make(chan struct{})
 	go func() {
 		for e := range outCh {
-			if e.Type == api.TurnEventContent {
+			switch e.Type {
+			case api.TurnEventContent:
 				contents = append(contents, e.Content)
+			case api.TurnEventApprovalRequest:
+				close(approvalSeen)
 			}
 		}
 		close(done)
 	}()
 
-	// Wait for pending approval state
-	var turn *api.Turn
-	for i := 0; i < 100; i++ {
-		turn = tm.CurrentTurn()
-		if turn != nil && turn.State == api.TurnWaitingApproval {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Wait deterministically for the approval request event.
+	select {
+	case <-approvalSeen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for approval request event")
 	}
+
+	turn := tm.CurrentTurn()
 	if turn == nil {
 		t.Fatal("expected current turn")
 	}
