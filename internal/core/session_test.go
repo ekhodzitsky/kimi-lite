@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
@@ -315,3 +316,32 @@ func TestSessionManager_Fork_DefaultName(t *testing.T) {
 		t.Errorf("name = %q, want %q", forked.Name, want)
 	}
 }
+
+func TestSessionManager_Metrics(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	metrics := &recordingMetrics{}
+	sm.SetMetricsCollector(metrics)
+
+	if _, err := sm.Start(ctx, "/tmp/proj"); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if metrics.counterName != "session.created" {
+		t.Errorf("expected session.created counter, got %q", metrics.counterName)
+	}
+}
+
+type recordingMetrics struct {
+	counterName string
+}
+
+func (r *recordingMetrics) IncCounter(name string, _ ...string) {
+	r.counterName = name
+}
+
+func (r *recordingMetrics) RecordLatency(_ string, _ time.Duration, _ ...string) {}
+
+func (r *recordingMetrics) RecordError(_ string) {}

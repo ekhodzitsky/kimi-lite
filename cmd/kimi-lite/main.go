@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/acp"
 	"github.com/ekhodzitsky/kimi-lite/internal/app"
 	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/llm"
@@ -43,6 +44,7 @@ type flags struct {
 	continueLast bool
 	sessionID    string
 	debug        bool
+	pprofAddr    string
 	prompt       string
 	outputFormat string
 }
@@ -109,12 +111,25 @@ persistence, and MCP integration.`, binaryName),
 	rootCmd.Flags().StringVarP(&f.prompt, "prompt", "p", "", "run a single prompt non-interactively and print the response")
 	rootCmd.Flags().StringVar(&f.outputFormat, "output-format", outputFormatText, "output format for non-interactive mode: text or json")
 	rootCmd.PersistentFlags().BoolVar(&f.debug, "debug", false, "enable debug logging")
+	rootCmd.PersistentFlags().StringVar(&f.pprofAddr, "pprof", "", "enable runtime profiling server on address (e.g. localhost:6060)")
 
 	rootCmd.AddCommand(newExportCmd(&f))
 	rootCmd.AddCommand(newImportCmd(&f))
 	rootCmd.AddCommand(newDoctorCmd(&f))
+	rootCmd.AddCommand(newACPCmd(&f))
 
 	return rootCmd
+}
+
+func newACPCmd(f *flags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "acp",
+		Short: "Start an ACP server over stdio",
+		Long:  "Start an Agent Client Protocol (ACP) server speaking JSON-RPC 2.0 over stdin/stdout.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runACP(cmd.Context(), *f)
+		},
+	}
 }
 
 func newExportCmd(f *flags) *cobra.Command {
@@ -180,11 +195,23 @@ func run(ctx context.Context, f flags) error {
 
 	// Apply CLI overrides
 	if f.model != "" {
-		cfg.LLM.Model = f.model
+		model := f.model
+		if alias, ok := cfg.Models[f.model]; ok {
+			model = alias.Model
+		}
+		cfg.LLM.Model = model
+		cfg.DefaultModel = model
+	}
+	if f.pprofAddr != "" {
+		cfg.PprofAddr = f.pprofAddr
 	}
 
-	// Validate API key
-	if cfg.LLM.APIKey == "" || strings.HasPrefix(cfg.LLM.APIKey, "$") {
+	// Resolve the effective provider and validate its API key.
+	_, providerCfg, err := llm.ResolveProviderFromConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve provider: %w", err)
+	}
+	if providerCfg.APIKey == "" || strings.HasPrefix(providerCfg.APIKey, "$") {
 		return fmt.Errorf("LLM API key is not configured. Set it in ~/.config/kimi-lite/config.toml or via KIMI_LLM_API_KEY environment variable")
 	}
 
@@ -235,13 +262,60 @@ func run(ctx context.Context, f flags) error {
 	}
 
 	// Print startup banner
-	fmt.Printf("[%s] v%s | model: %s\n", binaryName, version, cfg.LLM.Model)
+	resolvedModel, _ := llm.ResolveModelFromConfig(cfg)
+	fmt.Printf("[%s] v%s | model: %s\n", binaryName, version, resolvedModel)
 	if f.continueLast || f.sessionID != "" {
 		fmt.Printf("[Resuming session %s (%s)]\n", session.ID, session.Path)
 	}
 
 	// Run the TUI
 	return application.Run(ctx, session)
+}
+
+// runACP starts the ACP server over stdin/stdout.
+func runACP(ctx context.Context, f flags) error {
+	// Ensure default config exists
+	if err := writeDefaultConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write default config: %v\n", err)
+	}
+
+	// Load configuration
+	loader := config.NewLoader()
+	if f.configPath != "" {
+		loader.SetConfigFile(f.configPath)
+	}
+	cfg, err := loader.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load config (%v), using defaults\n", err)
+		var err2 error
+		cfg, err2 = config.Default()
+		if err2 != nil {
+			return fmt.Errorf("load default config: %w", err2)
+		}
+	}
+
+	// Resolve the effective provider and validate its API key.
+	_, providerCfg, err := llm.ResolveProviderFromConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve provider: %w", err)
+	}
+	if providerCfg.APIKey == "" || strings.HasPrefix(providerCfg.APIKey, "$") {
+		return fmt.Errorf("LLM API key is not configured. Set it in ~/.config/kimi-lite/config.toml or via KIMI_LLM_API_KEY environment variable")
+	}
+
+	// Create application
+	application, err := newApp(cfg, f.debug)
+	if err != nil {
+		return fmt.Errorf("initialize app: %w", err)
+	}
+	defer func() {
+		if err := application.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "shutdown: %v\n", err)
+		}
+	}()
+
+	srv := acp.NewServer(application, nil)
+	return srv.Run(ctx, os.Stdin, os.Stdout)
 }
 
 // runPrompt executes a single turn without the TUI and prints the result.
@@ -271,7 +345,9 @@ func runPrompt(ctx context.Context, application appRunner, session *api.Session,
 				}
 				continue
 			}
-			fmt.Fprint(stdout, event.Content)
+			if _, err := fmt.Fprint(stdout, event.Content); err != nil {
+				return fmt.Errorf("write content: %w", err)
+			}
 
 		case api.TurnEventToolResult:
 			if f.outputFormat == outputFormatJSON {
@@ -310,7 +386,9 @@ func runPrompt(ctx context.Context, application appRunner, session *api.Session,
 	}
 
 	if f.outputFormat == outputFormatText {
-		fmt.Fprintln(stdout)
+		if _, err := fmt.Fprintln(stdout); err != nil {
+			return fmt.Errorf("write newline: %w", err)
+		}
 	}
 	return nil
 }
@@ -441,36 +519,45 @@ func runDoctor(ctx context.Context, configPath string) error {
 	}
 
 	// LLM API key check
-	if cfg.LLM.APIKey == "" {
+	_, providerCfg, err := llm.ResolveProviderFromConfig(cfg)
+	if err != nil {
+		fmt.Printf("[FAIL] LLM provider: %v\n", err)
+		issues = append(issues, "llm-provider")
+	} else if providerCfg.APIKey == "" {
 		fmt.Println("[FAIL] LLM API key: not configured")
 		issues = append(issues, "llm-api-key")
 	} else {
 		fmt.Println("[OK]   LLM API key present")
 		// Lightweight connectivity check
-		client := llm.NewClient(cfg.LLM, nil)
-		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		_, err := client.Chat(cctx, []api.Message{{Role: api.RoleUser, Content: "ping"}}, nil)
+		client, err := llm.NewClientFromConfig(cfg, nil)
 		if err != nil {
-			var apiErr *api.APIError
-			if errors.As(err, &apiErr) {
-				switch apiErr.StatusCode {
-				case 401, 403:
-					fmt.Printf("[FAIL] LLM auth: invalid API key\n")
-					issues = append(issues, "llm-auth")
-				case 400:
-					fmt.Printf("[FAIL] LLM request: %s\n", apiErr.Body)
-					issues = append(issues, "llm-request")
-				default:
+			fmt.Printf("[FAIL] LLM client: %v\n", err)
+			issues = append(issues, "llm-client")
+		} else {
+			cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			_, err := client.Chat(cctx, []api.Message{{Role: api.RoleUser, Content: "ping"}}, nil)
+			if err != nil {
+				var apiErr *api.APIError
+				if errors.As(err, &apiErr) {
+					switch apiErr.StatusCode {
+					case 401, 403:
+						fmt.Printf("[FAIL] LLM auth: invalid API key\n")
+						issues = append(issues, "llm-auth")
+					case 400:
+						fmt.Printf("[FAIL] LLM request: %s\n", apiErr.Body)
+						issues = append(issues, "llm-request")
+					default:
+						fmt.Printf("[WARN] LLM connectivity: %v\n", err)
+						issues = append(issues, "llm-connectivity")
+					}
+				} else {
 					fmt.Printf("[WARN] LLM connectivity: %v\n", err)
 					issues = append(issues, "llm-connectivity")
 				}
 			} else {
-				fmt.Printf("[WARN] LLM connectivity: %v\n", err)
-				issues = append(issues, "llm-connectivity")
+				fmt.Println("[OK]   LLM connectivity")
 			}
-		} else {
-			fmt.Println("[OK]   LLM connectivity")
 		}
 	}
 

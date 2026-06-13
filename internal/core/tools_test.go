@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -47,15 +48,15 @@ func TestBuiltInToolExecutor_Definitions(t *testing.T) {
 	t.Parallel()
 	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 	defs := exec.Definitions(context.Background())
-	if len(defs) != 10 {
-		t.Fatalf("expected 10 tool definitions, got %d", len(defs))
+	if len(defs) != 12 {
+		t.Fatalf("expected 12 tool definitions, got %d", len(defs))
 	}
 
 	names := make(map[string]bool)
 	for _, d := range defs {
 		names[d.Name] = true
 	}
-	expected := []string{"read_file", "write_file", "str_replace_file", "edit", "glob", "grep", "shell", "fetch_url", "list_directory", "TodoList"}
+	expected := []string{"read_file", "write_file", "str_replace_file", "edit", "glob", "grep", "shell", "fetch_url", "list_directory", "TodoList", "dispatch_subagent", "read_video"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("missing tool definition: %s", name)
@@ -76,6 +77,7 @@ func TestBuiltInToolExecutor_IsReadOnly(t *testing.T) {
 		{"fetch_url", true},
 		{"list_directory", true},
 		{"TodoList", true},
+		{"read_video", true},
 		{"write_file", false},
 		{"str_replace_file", false},
 		{"edit", false},
@@ -114,6 +116,56 @@ func TestBuiltInToolExecutor_Execute_ReadFile(t *testing.T) {
 	}
 	if result.Output != "hello world" {
 		t.Errorf("output = %q, want %q", result.Output, "hello world")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ReadVideo(t *testing.T) {
+	skipNoFFmpeg(t)
+	t.Parallel()
+
+	tmp := t.TempDir()
+	videoPath := filepath.Join(tmp, "test.mp4")
+	createTestVideo(t, videoPath)
+
+	exec := newTestExecutor(t, ToolExecutorConfig{
+		ShellTimeout:   30 * time.Second,
+		SandboxRoot:    tmp,
+		VideoExtractor: NewVideoExtractor(),
+	})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_video",
+		Arguments: fmt.Sprintf(`{"path":"%s","max_frames":2}`, videoPath),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "\"path\":\"") {
+		t.Errorf("expected video metadata in output, got: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "data:image/png;base64,") {
+		t.Errorf("expected base64 frame data in output, got: %s", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ReadVideo_NotAvailable(t *testing.T) {
+	t.Parallel()
+
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_video",
+		Arguments: `{"path":"video.mp4"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error when video extractor is unavailable")
 	}
 }
 
@@ -1887,8 +1939,8 @@ func TestBuiltInToolExecutor_Definitions_WebSearchRegisteredWhenProviderSet(t *t
 	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, WebSearcher: fake})
 
 	defs := exec.Definitions(context.Background())
-	if len(defs) != 11 {
-		t.Fatalf("expected 11 tool definitions, got %d", len(defs))
+	if len(defs) != 13 {
+		t.Fatalf("expected 13 tool definitions, got %d", len(defs))
 	}
 	found := false
 	for _, d := range defs {
@@ -1910,8 +1962,8 @@ func TestBuiltInToolExecutor_Definitions_WebSearchNotRegisteredWhenProviderMissi
 	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	defs := exec.Definitions(context.Background())
-	if len(defs) != 10 {
-		t.Fatalf("expected 10 tool definitions, got %d", len(defs))
+	if len(defs) != 12 {
+		t.Fatalf("expected 12 tool definitions, got %d", len(defs))
 	}
 	for _, d := range defs {
 		if d.Name == "web_search" {
@@ -2206,4 +2258,189 @@ func TestBuiltInToolExecutor_Execute_TodoList_EmptyTitle(t *testing.T) {
 	if !strings.Contains(result.Error, "empty title") {
 		t.Errorf("expected empty title error, got: %q", result.Error)
 	}
+}
+
+type fakeSubagentRunner struct {
+	req    *api.SubagentRequest
+	result *api.SubagentResult
+	err    error
+}
+
+func (f *fakeSubagentRunner) Run(ctx context.Context, req api.SubagentRequest) (*api.SubagentResult, error) {
+	f.req = &req
+	if f.result == nil {
+		return &api.SubagentResult{Output: "done"}, nil
+	}
+	return f.result, f.err
+}
+
+func TestDispatchSubagent_Definition(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+	defs := exec.Definitions(context.Background())
+
+	if len(defs) != 12 {
+		t.Fatalf("expected 12 tool definitions, got %d", len(defs))
+	}
+
+	names := make(map[string]bool)
+	for _, d := range defs {
+		names[d.Name] = true
+	}
+	if !names["dispatch_subagent"] {
+		t.Fatal("missing dispatch_subagent tool definition")
+	}
+}
+
+func TestDispatchSubagent_Execute_Explore(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+	runner := &fakeSubagentRunner{result: &api.SubagentResult{Output: "exploration complete", Rounds: 2}}
+	exec.SetSubagentRunner(runner)
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "dispatch_subagent",
+		Arguments: `{"type":"explore","prompt":"investigate the codebase","timeout_seconds":30,"max_rounds":5}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	var got api.SubagentResult
+	if err := json.Unmarshal([]byte(result.Output), &got); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if got.Output != "exploration complete" {
+		t.Errorf("output = %q, want %q", got.Output, "exploration complete")
+	}
+	if got.Rounds != 2 {
+		t.Errorf("rounds = %d, want 2", got.Rounds)
+	}
+
+	if runner.req == nil {
+		t.Fatal("runner.Run was not called")
+	}
+	if runner.req.Type != api.SubagentExplore {
+		t.Errorf("type = %q, want %q", runner.req.Type, api.SubagentExplore)
+	}
+	if runner.req.Prompt != "investigate the codebase" {
+		t.Errorf("prompt = %q, want %q", runner.req.Prompt, "investigate the codebase")
+	}
+	if runner.req.Timeout != 30*time.Second {
+		t.Errorf("timeout = %v, want 30s", runner.req.Timeout)
+	}
+	if runner.req.MaxRounds != 5 {
+		t.Errorf("max_rounds = %d, want 5", runner.req.MaxRounds)
+	}
+}
+
+func TestDispatchSubagent_MissingRunner(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "dispatch_subagent",
+		Arguments: `{"type":"explore","prompt":"hi"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error when subagent runner is not configured")
+	}
+	if !strings.Contains(result.Error, "not configured") {
+		t.Errorf("expected not configured error, got: %q", result.Error)
+	}
+}
+
+func TestDispatchSubagent_InvalidType(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+	exec.SetSubagentRunner(&fakeSubagentRunner{})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "dispatch_subagent",
+		Arguments: `{"type":"unknown","prompt":"hi"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for invalid subagent type")
+	}
+	if !strings.Contains(result.Error, "invalid subagent type") {
+		t.Errorf("expected invalid subagent type error, got: %q", result.Error)
+	}
+}
+
+func TestDispatchSubagent_MissingPrompt(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+	exec.SetSubagentRunner(&fakeSubagentRunner{})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "dispatch_subagent",
+		Arguments: `{"type":"coder"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for missing prompt")
+	}
+	if !strings.Contains(result.Error, "prompt is required") {
+		t.Errorf("expected prompt required error, got: %q", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_ToolCallHookBlocks(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	blocked := false
+	exec.SetHookRunner(&fakeHookRunner{
+		runFunc: func(ctx context.Context, data api.HookData) error {
+			if data.Event == api.HookToolCall && data.ToolName == "write_file" {
+				blocked = true
+				return fmt.Errorf("blocked by policy")
+			}
+			return nil
+		},
+	})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "write_file",
+		Arguments: `{"path":"test.txt","content":"hello"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !blocked {
+		t.Fatal("expected tool_call hook to run")
+	}
+	if result.Error == "" {
+		t.Fatal("expected tool to be blocked")
+	}
+	if !strings.Contains(result.Error, "blocked by policy") {
+		t.Errorf("expected blocked by policy, got: %q", result.Error)
+	}
+}
+
+type fakeHookRunner struct {
+	runFunc func(ctx context.Context, data api.HookData) error
+}
+
+func (f *fakeHookRunner) Run(ctx context.Context, data api.HookData) error {
+	if f.runFunc != nil {
+		return f.runFunc(ctx, data)
+	}
+	return nil
 }

@@ -37,12 +37,12 @@ func NewHTTPTransport(url string, headers map[string]string, bearerEnv string, c
 }
 
 // Connect is a no-op for the HTTP transport; connections are created per request.
-func (t *HTTPTransport) Connect(ctx context.Context) error {
+func (t *HTTPTransport) Connect(_ context.Context) error {
 	return nil
 }
 
 // Send sends a JSON-RPC request via HTTP POST and returns the response.
-func (t *HTTPTransport) Send(ctx context.Context, method string, params any) (*JSONRPCResponse, error) {
+func (t *HTTPTransport) Send(ctx context.Context, method string, params any) (resp *JSONRPCResponse, err error) {
 	id := atomic.AddInt64(&t.nextID, 1)
 	reqBody := map[string]any{
 		"jsonrpc": "2.0",
@@ -72,33 +72,36 @@ func (t *HTTPTransport) Send(ctx context.Context, method string, params any) (*J
 		}
 	}
 
-	resp, err := t.client.Do(req)
+	httpResp, err := t.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("post %s: %w", method, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := httpResp.Body.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close response body for %s: %w", method, cerr)
+		}
+	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response body for %s: %w", method, err)
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("http %d for %s: %s", resp.StatusCode, method, string(body))
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http %d for %s: %s", httpResp.StatusCode, method, string(body))
 	}
 
-	var rpcResp JSONRPCResponse
-	if err := json.Unmarshal(body, &rpcResp); err != nil {
+	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("unmarshal response for %s: %w (body: %s)", method, err, string(body))
 	}
-	if rpcResp.Error != nil {
-		return &rpcResp, rpcResp.Error
+	if resp.Error != nil {
+		return resp, resp.Error
 	}
-	return &rpcResp, nil
+	return resp, nil
 }
 
 // Notify sends a JSON-RPC notification via HTTP POST.
-func (t *HTTPTransport) Notify(ctx context.Context, method string, params any) error {
+func (t *HTTPTransport) Notify(ctx context.Context, method string, params any) (err error) {
 	reqBody := map[string]any{
 		"jsonrpc": "2.0",
 		"method":  method,
@@ -126,17 +129,21 @@ func (t *HTTPTransport) Notify(ctx context.Context, method string, params any) e
 		}
 	}
 
-	resp, err := t.client.Do(req)
+	httpResp, err := t.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("post notification %s: %w", method, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := httpResp.Body.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close notification body for %s: %w", method, cerr)
+		}
+	}()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("http %d for notification %s: %s", resp.StatusCode, method, string(body))
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		body, _ := io.ReadAll(httpResp.Body)
+		return fmt.Errorf("http %d for notification %s: %s", httpResp.StatusCode, method, string(body))
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, httpResp.Body)
 	return nil
 }
 
