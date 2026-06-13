@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -768,26 +769,124 @@ func TestSQLite_Concurrency(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+	sess, err := s.CreateSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
 
-	// Concurrent appends.
-	done := make(chan error, 2)
-	go func() {
-		done <- s.AppendMessage(ctx, sess.ID, api.Message{ID: "m1", Role: api.RoleUser, Content: "a", CreatedAt: time.Now().UTC()})
-	}()
-	go func() {
-		done <- s.AppendMessage(ctx, sess.ID, api.Message{ID: "m2", Role: api.RoleAssistant, Content: "b", CreatedAt: time.Now().UTC()})
-	}()
+	const nReplace = 8
+	const nClear = 4
+	const nAppend = 16
+	const nTurns = 8
 
-	for i := 0; i < 2; i++ {
-		if err := <-done; err != nil {
-			t.Fatalf("concurrent append: %v", err)
+	// Phase 1: stress ReplaceMessages and ClearMessages concurrently.
+	// The final effect of this phase is that the messages table ends empty,
+	// but the operations contend for the single WAL writer slot.
+	var wg sync.WaitGroup
+	errCh := make(chan error, nReplace+nClear)
+
+	for i := 0; i < nReplace; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			msg := api.Message{
+				ID:        fmt.Sprintf("replace-%d", idx),
+				Role:      api.RoleUser,
+				Content:   fmt.Sprintf("replaced-%d", idx),
+				CreatedAt: time.Now().UTC(),
+			}
+			if err := s.ReplaceMessages(ctx, sess.ID, []api.Message{msg}); err != nil {
+				errCh <- fmt.Errorf("replace %d: %w", idx, err)
+			}
+		}(i)
+	}
+	for i := 0; i < nClear; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if err := s.ClearMessages(ctx, sess.ID); err != nil {
+				errCh <- fmt.Errorf("clear %d: %w", idx, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("phase 1 error: %v", err)
+	}
+
+	// Ensure the messages table is empty before phase 2 so the final count is
+	// deterministic regardless of which phase-1 operation won the race.
+	if err := s.ClearMessages(ctx, sess.ID); err != nil {
+		t.Fatalf("final clear after phase 1: %v", err)
+	}
+
+	// Phase 2: concurrent AppendMessage and SaveTurn writers.
+	// Because phase 1 is done, the final message count is deterministic.
+	errCh = make(chan error, nAppend+nTurns)
+	wg = sync.WaitGroup{}
+
+	for i := 0; i < nAppend; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			msg := api.Message{
+				ID:        fmt.Sprintf("append-%d", idx),
+				Role:      api.RoleUser,
+				Content:   fmt.Sprintf("content-%d", idx),
+				CreatedAt: time.Now().UTC(),
+			}
+			if err := s.AppendMessage(ctx, sess.ID, msg); err != nil {
+				errCh <- fmt.Errorf("append %d: %w", idx, err)
+			}
+		}(i)
+	}
+	for i := 0; i < nTurns; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			turn := api.Turn{
+				ID:        fmt.Sprintf("turn-%d", idx),
+				State:     api.TurnIdle,
+				Input:     fmt.Sprintf("input-%d", idx),
+				StartedAt: time.Now().UTC(),
+			}
+			if err := s.SaveTurn(ctx, sess.ID, turn); err != nil {
+				errCh <- fmt.Errorf("save turn %d: %w", idx, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("phase 2 error: %v", err)
+	}
+
+	msgs, err := s.GetMessages(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("get messages: %v", err)
+	}
+	if len(msgs) != nAppend {
+		t.Fatalf("messages = %d, want %d", len(msgs), nAppend)
+	}
+	// Verify each append message survived deterministically.
+	seen := make(map[string]bool, len(msgs))
+	for _, m := range msgs {
+		seen[m.ID] = true
+	}
+	for i := 0; i < nAppend; i++ {
+		id := fmt.Sprintf("append-%d", i)
+		if !seen[id] {
+			t.Errorf("missing message %s", id)
 		}
 	}
 
-	msgs, _ := s.GetMessages(ctx, sess.ID, 0)
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages after concurrent append, got %d", len(msgs))
+	turns, err := s.GetTurns(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("get turns: %v", err)
+	}
+	if len(turns) != nTurns {
+		t.Fatalf("turns = %d, want %d", len(turns), nTurns)
 	}
 }
 
