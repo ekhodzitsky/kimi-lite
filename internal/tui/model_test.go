@@ -1721,3 +1721,51 @@ func TestGoldenViewIdle(t *testing.T) {
 
 	compareGolden(t, "view_idle", m.View())
 }
+
+func newGoldenModel(t *testing.T) *Model {
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: t.TempDir()}
+	m, err := New(cfg, session, context.Background())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.sidebar.Toggle()
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+	return m
+}
+
+func TestGoldenViewThinking(t *testing.T) {
+	m := newGoldenModel(t)
+	updated, _ := m.Update(StateChangeMsg{State: api.TurnThinking})
+	m = updated.(*Model)
+	compareGolden(t, "view_thinking", m.View())
+}
+
+func TestGoldenViewToolCalls(t *testing.T) {
+	m := newGoldenModel(t)
+	m.SetToolCount(3)
+	updated, _ := m.Update(StateChangeMsg{State: api.TurnToolCalls})
+	m = updated.(*Model)
+	compareGolden(t, "view_tool_calls", m.View())
+}
+
+func TestGoldenViewError(t *testing.T) {
+	m := newGoldenModel(t)
+	updated, _ := m.Update(ErrorMsg{Err: errors.New("simulated failure")})
+	m = updated.(*Model)
+	compareGolden(t, "view_error", m.View())
+}
+
+func TestGoldenViewWaitingApproval(t *testing.T) {
+	m := newGoldenModel(t)
+	updated, _ := m.Update(ApprovalRequestMsg{
+		Calls: []api.ToolCall{
+			{ID: "call_1", Name: "read_file", Arguments: `{"path":"foo.txt"}`},
+		},
+		RequestID: 1,
+	})
+	m = updated.(*Model)
+	compareGolden(t, "view_waiting_approval", m.View())
+}
