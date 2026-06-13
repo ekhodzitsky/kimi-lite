@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -584,6 +585,70 @@ func TestClientChatStreamContextCancellation(t *testing.T) {
 	if len(contents) > 1 {
 		t.Errorf("expected at most one chunk, got %d", len(contents))
 	}
+}
+
+func TestClientChatStream_GoroutineReaped(t *testing.T) {
+	// Not parallel: it counts global goroutines, and concurrent tests
+	// would make the baseline/current comparison noisy.
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.Flusher")
+		}
+
+		// Send one chunk to unblock the consumer, then wait for cancellation.
+		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	// Let the test-server goroutine settle before taking a baseline.
+	time.Sleep(100 * time.Millisecond)
+	baseline := runtime.NumGoroutine()
+
+	client := NewClient(api.LLMConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "test-model",
+		Timeout: 10 * time.Second,
+	}, server.Client())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := client.ChatStream(ctx, []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Consume the first chunk, then cancel mid-stream.
+	for chunk := range ch {
+		if chunk.Error != nil {
+			break
+		}
+		if chunk.Content != "" {
+			cancel()
+			break
+		}
+	}
+	// Drain any trailing error/done chunk so the stream goroutine can exit.
+	for range ch {
+	}
+
+	const delta = 2
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= baseline+delta {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("goroutines not reaped: baseline=%d current=%d", baseline, runtime.NumGoroutine())
 }
 
 func TestClientModels(t *testing.T) {
