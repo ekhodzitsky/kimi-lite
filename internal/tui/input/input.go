@@ -2,6 +2,8 @@
 package input
 
 import (
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -61,18 +63,29 @@ func ConfigurableKeyMap(cfg api.KeybindingConfig) KeyMap {
 	return km
 }
 
+// mentionState tracks an active @-mention completion session.
+type mentionState struct {
+	start      int      // absolute byte position of '@' in the value
+	end        int      // absolute byte position after the current word
+	query      string   // lower-cased text after '@'
+	candidates []string // matching candidate paths
+	selected   int      // index of the selected candidate
+}
+
 // Model is the input component model.
 type Model struct {
-	textarea   textarea.Model
-	styles     *styles.Styles
-	keyMap     KeyMap
-	history    []string
-	histIdx    int // -1 means current draft, >=0 means history index
-	draft      string
-	width      int
-	maxHistory int
-	editor     string // configured editor; env vars used as fallback
-	mu         sync.RWMutex
+	textarea       textarea.Model
+	styles         *styles.Styles
+	keyMap         KeyMap
+	history        []string
+	histIdx        int // -1 means current draft, >=0 means history index
+	draft          string
+	width          int
+	maxHistory     int
+	editor         string // configured editor; env vars used as fallback
+	fileCandidates []string
+	mention        *mentionState
+	mu             sync.RWMutex
 }
 
 // New creates a new input model.
@@ -115,6 +128,30 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		km := m.keyMap
 		m.mu.RUnlock()
 
+		// @-mention completion navigation takes precedence.
+		if m.mention != nil {
+			switch msg.String() {
+			case "tab", "down":
+				m.mention.selected++
+				if m.mention.selected >= len(m.mention.candidates) {
+					m.mention.selected = 0
+				}
+				return nil
+			case "shift+tab", "up":
+				m.mention.selected--
+				if m.mention.selected < 0 {
+					m.mention.selected = len(m.mention.candidates) - 1
+				}
+				return nil
+			case "enter":
+				m.insertCandidate()
+				return nil
+			case "esc", "ctrl+c":
+				m.mention = nil
+				return nil
+			}
+		}
+
 		if key.Matches(msg, km.Send) {
 			content := strings.TrimSpace(m.textarea.Value())
 			if content != "" {
@@ -131,6 +168,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				m.draft = ""
 				m.mu.Unlock()
 				m.textarea.Reset()
+				m.mention = nil
 				return func() tea.Msg {
 					return SendMsg{Content: content}
 				}
@@ -140,6 +178,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 
 		if key.Matches(msg, km.Newline) {
 			m.textarea.InsertString("\n")
+			m.detectMention()
 			return nil
 		}
 
@@ -165,6 +204,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			}
 			m.textarea.SetValue(m.history[m.histIdx])
 			m.textarea.CursorEnd()
+			m.mention = nil
 			return tea.Batch(cmds...)
 		}
 
@@ -182,11 +222,13 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				m.textarea.SetValue(m.draft)
 			}
 			m.textarea.CursorEnd()
+			m.mention = nil
 			return tea.Batch(cmds...)
 		}
 
 	case editorFinishedMsg:
 		m.handleEditorFinished(msg)
+		m.detectMention()
 		return tea.Batch(cmds...)
 	}
 
@@ -194,12 +236,17 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
 	cmds = append(cmds, cmd)
+	m.detectMention()
 	return tea.Batch(cmds...)
 }
 
 // View implements tea.Model.
 func (m *Model) View() string {
-	return m.styles.InputBox.Render(m.textarea.View())
+	view := m.styles.InputBox.Render(m.textarea.View())
+	if comp := m.completionView(); comp != "" {
+		view += "\n" + comp
+	}
+	return view
 }
 
 // Height returns the rendered height of the input component.
@@ -244,6 +291,178 @@ func (m *Model) SetEditor(editor string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.editor = editor
+}
+
+// SetFileCandidates sets the list of file paths available for @-mention
+// completion. The caller is responsible for keeping the list in sync with the
+// sidebar tree.
+func (m *Model) SetFileCandidates(paths []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fileCandidates = make([]string, len(paths))
+	copy(m.fileCandidates, paths)
+	if m.mention != nil {
+		m.detectMention()
+	}
+}
+
+// Completing reports whether an @-mention completion popup is currently open.
+func (m *Model) Completing() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.mention != nil
+}
+
+// CloseCompletion dismisses any open @-mention completion popup.
+func (m *Model) CloseCompletion() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mention = nil
+}
+
+// cursorPosition returns the absolute byte position of the cursor in the
+// current value.
+func (m *Model) cursorPosition() int {
+	value := m.textarea.Value()
+	line := m.textarea.Line()
+	if line < 0 {
+		line = 0
+	}
+	lines := strings.Split(value, "\n")
+	if line >= len(lines) {
+		return len(value)
+	}
+	pos := 0
+	for i := 0; i < line; i++ {
+		pos += len(lines[i]) + 1 // '\n'
+	}
+	li := m.textarea.LineInfo()
+	col := li.StartColumn + li.ColumnOffset
+	runes := []rune(lines[line])
+	if col > len(runes) {
+		col = len(runes)
+	}
+	pos += len(string(runes[:col]))
+	return pos
+}
+
+// wordAtCursor returns the word surrounding the cursor and its byte range in
+// the current value. Word boundaries are whitespace characters.
+func (m *Model) wordAtCursor() (word string, start, end int) {
+	value := m.textarea.Value()
+	pos := m.cursorPosition()
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(value) {
+		pos = len(value)
+	}
+	start = pos
+	for start > 0 && !isWordBoundary(value[start-1]) {
+		start--
+	}
+	end = pos
+	for end < len(value) && !isWordBoundary(value[end]) {
+		end++
+	}
+	return value[start:end], start, end
+}
+
+func isWordBoundary(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r':
+		return true
+	}
+	return false
+}
+
+// detectMention updates the active mention state based on the current word at
+// the cursor.
+func (m *Model) detectMention() {
+	word, start, end := m.wordAtCursor()
+	if !strings.HasPrefix(word, "@") {
+		m.mention = nil
+		return
+	}
+	query := strings.ToLower(word[1:])
+	candidates := m.filterCandidates(query)
+	if len(candidates) == 0 {
+		m.mention = nil
+		return
+	}
+	m.mention = &mentionState{
+		start:      start,
+		end:        end,
+		query:      query,
+		candidates: candidates,
+		selected:   0,
+	}
+}
+
+// filterCandidates returns file candidates matching the lower-cased query.
+// A candidate matches when its full path or base name has the query as a
+// case-insensitive prefix.
+func (m *Model) filterCandidates(query string) []string {
+	query = strings.ToLower(query)
+	seen := make(map[string]struct{})
+	var matches []string
+	for _, c := range m.fileCandidates {
+		lower := strings.ToLower(c)
+		if _, ok := seen[c]; ok {
+			continue
+		}
+		if strings.HasPrefix(lower, query) {
+			seen[c] = struct{}{}
+			matches = append(matches, c)
+			continue
+		}
+		if strings.HasPrefix(filepath.Base(lower), query) {
+			seen[c] = struct{}{}
+			matches = append(matches, c)
+		}
+	}
+	sort.Strings(matches)
+	return matches
+}
+
+// insertCandidate replaces the active @-mention word with the selected path.
+func (m *Model) insertCandidate() {
+	if m.mention == nil {
+		return
+	}
+	value := m.textarea.Value()
+	replacement := "@" + m.mention.candidates[m.mention.selected]
+	newValue := value[:m.mention.start] + replacement
+	if m.mention.end <= len(value) {
+		newValue += value[m.mention.end:]
+	}
+	m.textarea.SetValue(newValue)
+	m.mention = nil
+}
+
+// completionView renders the completion popup or an empty string if none is
+// active.
+func (m *Model) completionView() string {
+	if m.mention == nil || len(m.mention.candidates) == 0 || m.styles == nil {
+		return ""
+	}
+	var b strings.Builder
+	const maxItems = 8
+	for i, c := range m.mention.candidates {
+		if i >= maxItems {
+			break
+		}
+		prefix := "  "
+		if i == m.mention.selected {
+			prefix = "> "
+		}
+		b.WriteString(prefix + c + "\n")
+	}
+	content := strings.TrimSuffix(b.String(), "\n")
+	if content == "" {
+		return ""
+	}
+	return m.styles.MentionPopup.Render(content)
 }
 
 func (m *Model) updateStyles() {
