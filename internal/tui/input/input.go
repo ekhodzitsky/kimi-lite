@@ -7,10 +7,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -123,7 +123,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		m.mu.RLock()
 		km := m.keyMap
 		m.mu.RUnlock()
@@ -241,17 +241,21 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 }
 
 // View implements tea.Model.
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
 	view := m.styles.InputBox.Render(m.textarea.View())
 	if comp := m.completionView(); comp != "" {
 		view += "\n" + comp
 	}
-	return view
+	return tea.NewView(view)
 }
 
 // Height returns the rendered height of the input component.
 func (m *Model) Height() int {
-	return lipgloss.Height(m.View())
+	view := m.styles.InputBox.Render(m.textarea.View())
+	if comp := m.completionView(); comp != "" {
+		view += "\n" + comp
+	}
+	return lipgloss.Height(view)
 }
 
 // SetWidth sets the component width.
@@ -469,11 +473,13 @@ func (m *Model) updateStyles() {
 	if m.styles == nil {
 		return
 	}
-	m.textarea.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	m.textarea.FocusedStyle.Base = lipgloss.NewStyle().
+	s := m.textarea.Styles()
+	s.Focused.CursorLine = lipgloss.NewStyle()
+	s.Focused.Base = lipgloss.NewStyle().
 		Background(m.styles.Theme.InputBg).
 		Foreground(m.styles.Theme.Foreground)
-	m.textarea.BlurredStyle.Base = lipgloss.NewStyle().
+	s.Blurred.Base = lipgloss.NewStyle().
 		Background(m.styles.Theme.InputBg).
 		Foreground(m.styles.Theme.Muted)
+	m.textarea.SetStyles(s)
 }
