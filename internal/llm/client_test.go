@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -87,7 +88,7 @@ func TestClientChat(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		response         interface{}
+		response         any
 		statusCode       int
 		messages         []api.Message
 		tools            []api.ToolDefinition
@@ -191,10 +192,10 @@ func TestClientChat(t *testing.T) {
 				} `json:"message"`
 				FinishReason string `json:"finish_reason"`
 			}{}},
-			statusCode:       http.StatusOK,
-			messages:         []api.Message{{Role: api.RoleUser, Content: "Hi"}},
-			wantErr:          true,
-			wantAPIErrStatus: http.StatusOK,
+			statusCode:     http.StatusOK,
+			messages:       []api.Message{{Role: api.RoleUser, Content: "Hi"}},
+			wantErr:        true,
+			wantErrContain: "empty response from API",
 		},
 	}
 
@@ -363,6 +364,7 @@ func TestClientChatStream(t *testing.T) {
 		name             string
 		streamData       string
 		wantContents     []string
+		wantToolCalls    []api.ToolCall
 		wantDone         bool
 		wantErr          bool
 		wantErrContain   string
@@ -392,7 +394,7 @@ data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"funct
 
 data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}}]}
 
-data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"path\":\"test.txt"}}]}}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"path\":\"test.txt\""}}]}}]}
 
 data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}
 
@@ -402,7 +404,32 @@ data: [DONE]
 
 `,
 			wantContents: []string{"Let me", " check"},
-			wantDone:     true,
+			wantToolCalls: []api.ToolCall{
+				{ID: "call_1", Name: "read_file", Arguments: `{"path":"test.txt"}`},
+			},
+			wantDone: true,
+		},
+		{
+			name: "sparse non-zero-based tool-call indices",
+			streamData: `data: {"choices":[{"delta":{"tool_calls":[{"index":2,"id":"call_2","type":"function","function":{"name":"grep"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","type":"function","function":{"name":"read_file"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{\"q\":\"x\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"a.txt\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+`,
+			wantContents: nil,
+			wantToolCalls: []api.ToolCall{
+				{ID: "call_0", Name: "read_file", Arguments: `{"path":"a.txt"}`},
+				{ID: "call_2", Name: "grep", Arguments: `{"q":"x"}`},
+			},
+			wantDone: true,
 		},
 		{
 			name:             "stream server error",
@@ -471,6 +498,9 @@ data: [DONE]
 				if chunk.Content != "" {
 					contents = append(contents, chunk.Content)
 				}
+				// OpenAI-style streams emit a Done chunk both for the
+				// finish_reason payload and for the trailing [DONE] sentinel;
+				// overwrite on each one so the final ToolCalls are captured.
 				if chunk.Done {
 					done = true
 					finalToolCalls = chunk.ToolCalls
@@ -494,18 +524,12 @@ data: [DONE]
 				}
 			}
 
-			if tt.name == "stream with tool calls" {
-				if len(finalToolCalls) != 1 {
-					t.Fatalf("finalToolCalls = %d, want 1", len(finalToolCalls))
-				}
-				if finalToolCalls[0].ID != "call_1" {
-					t.Errorf("toolCall.ID = %q, want call_1", finalToolCalls[0].ID)
-				}
-				if finalToolCalls[0].Name != "read_file" {
-					t.Errorf("toolCall.Name = %q, want read_file", finalToolCalls[0].Name)
-				}
-				if !strings.Contains(finalToolCalls[0].Arguments, "path") {
-					t.Errorf("toolCall.Arguments = %q, want containing path", finalToolCalls[0].Arguments)
+			if len(finalToolCalls) != len(tt.wantToolCalls) {
+				t.Fatalf("finalToolCalls = %v, want %v", finalToolCalls, tt.wantToolCalls)
+			}
+			for i, want := range tt.wantToolCalls {
+				if finalToolCalls[i] != want {
+					t.Errorf("finalToolCalls[%d] = %+v, want %+v", i, finalToolCalls[i], want)
 				}
 			}
 		})
@@ -564,6 +588,70 @@ func TestClientChatStreamContextCancellation(t *testing.T) {
 	if len(contents) > 1 {
 		t.Errorf("expected at most one chunk, got %d", len(contents))
 	}
+}
+
+func TestClientChatStream_GoroutineReaped(t *testing.T) {
+	// Not parallel: it counts global goroutines, and concurrent tests
+	// would make the baseline/current comparison noisy.
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.Flusher")
+		}
+
+		// Send one chunk to unblock the consumer, then wait for cancellation.
+		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	// Let the test-server goroutine settle before taking a baseline.
+	time.Sleep(100 * time.Millisecond)
+	baseline := runtime.NumGoroutine()
+
+	client := NewClient(api.LLMConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "test-model",
+		Timeout: 10 * time.Second,
+	}, server.Client())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := client.ChatStream(ctx, []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Consume the first chunk, then cancel mid-stream.
+	for chunk := range ch {
+		if chunk.Error != nil {
+			break
+		}
+		if chunk.Content != "" {
+			cancel()
+			break
+		}
+	}
+	// Drain any trailing error/done chunk so the stream goroutine can exit.
+	for range ch {
+	}
+
+	const delta = 2
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= baseline+delta {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("goroutines not reaped: baseline=%d current=%d", baseline, runtime.NumGoroutine())
 }
 
 func TestClientModels(t *testing.T) {
@@ -672,7 +760,7 @@ func TestStreamReader(t *testing.T) {
 	tests := []struct {
 		name         string
 		input        string
-		wantChunks   []api.StreamChunk
+		wantChunks   []rawChunk
 		wantErr      bool
 		wantErrAfter int // number of successful chunks before error
 	}{
@@ -685,13 +773,16 @@ data: {"choices":[{"delta":{"content":" world"}}]}
 data: [DONE]
 
 `,
-			wantChunks: []api.StreamChunk{
+			wantChunks: []rawChunk{
 				{Content: "Hello"},
 				{Content: " world"},
 				{Done: true},
 			},
 		},
 		{
+			// Both the finish_reason payload and the trailing [DONE] sentinel
+			// yield a chunk with Done=true, so two consecutive terminal chunks
+			// are expected. Consumers break on the first Done (see turn.go:350).
 			name: "done via finish_reason",
 			input: `data: {"choices":[{"delta":{"content":"Done"}}]}
 
@@ -700,7 +791,7 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
 data: [DONE]
 
 `,
-			wantChunks: []api.StreamChunk{
+			wantChunks: []rawChunk{
 				{Content: "Done"},
 				{Done: true},
 				{Done: true},
@@ -711,7 +802,7 @@ data: [DONE]
 			input: `data: [DONE]
 
 `,
-			wantChunks: []api.StreamChunk{
+			wantChunks: []rawChunk{
 				{Done: true},
 			},
 		},
@@ -732,9 +823,9 @@ data: [DONE]
 			reader := NewStreamReader(io.NopCloser(strings.NewReader(tt.input)))
 			defer reader.Close()
 
-			var chunks []api.StreamChunk
+			var chunks []rawChunk
 			for {
-				chunk, err := reader.ReadChunk(context.Background())
+				chunk, err := reader.readRawChunk(context.Background())
 				if err == io.EOF {
 					if chunk.Done || chunk.Content != "" {
 						chunks = append(chunks, chunk)
@@ -791,12 +882,14 @@ func TestBackoff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("attempt_%d", tt.attempt), func(t *testing.T) {
 			t.Parallel()
-			delay := client.backoff(tt.attempt)
-			if delay > tt.wantMax {
-				t.Errorf("backoff(%d) = %v, want <= %v", tt.attempt, delay, tt.wantMax)
-			}
-			if delay <= 0 {
-				t.Errorf("backoff(%d) = %v, want > 0", tt.attempt, delay)
+			for i := 0; i < 20; i++ {
+				delay := client.backoff(tt.attempt)
+				if delay > tt.wantMax {
+					t.Errorf("backoff(%d) = %v, want <= %v", tt.attempt, delay, tt.wantMax)
+				}
+				if delay < 0 {
+					t.Errorf("backoff(%d) = %v, want >= 0", tt.attempt, delay)
+				}
 			}
 		})
 	}
@@ -893,52 +986,6 @@ func TestBuildChatRequest_ToolCallID(t *testing.T) {
 	}
 }
 
-func TestStreamReader_CancelledContext_ReturnsPromptly(t *testing.T) {
-	t.Parallel()
-
-	pr, _ := io.Pipe()
-	reader := NewStreamReader(pr)
-	defer reader.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := reader.ReadChunk(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("expected context.Canceled, got %v", err)
-	}
-}
-
-func TestStreamReader_CancelMidRead_NoRace(t *testing.T) {
-	t.Parallel()
-
-	pr, pw := io.Pipe()
-	reader := NewStreamReader(pr)
-	defer reader.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Write a partial SSE event so Scan blocks mid-event.
-	go func() {
-		_, _ = pw.Write([]byte("data: "))
-		// Cancel after the reader is blocked.
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-		// Closing the pipe unblocks the scanner.
-		_ = pw.Close()
-	}()
-
-	_, err := reader.ReadChunk(ctx)
-	if err == nil {
-		t.Fatal("expected an error after cancellation")
-	}
-	// The error may be context.Canceled (checked before readRawChunk)
-	// or an io error from the closed pipe; both are acceptable.
-	if !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
-		t.Logf("got error: %v (acceptable)", err)
-	}
-}
-
 func TestSortedToolCalls(t *testing.T) {
 	t.Parallel()
 
@@ -1016,7 +1063,7 @@ func TestStreamReader_LargePayload(t *testing.T) {
 	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
 	defer reader.Close()
 
-	chunk, err := reader.ReadChunk(context.Background())
+	chunk, err := reader.readRawChunk(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1024,7 +1071,7 @@ func TestStreamReader_LargePayload(t *testing.T) {
 		t.Errorf("content length = %d, want %d", len(chunk.Content), len(largeContent))
 	}
 
-	chunk, err = reader.ReadChunk(context.Background())
+	chunk, err = reader.readRawChunk(context.Background())
 	if err != io.EOF {
 		t.Fatalf("expected io.EOF, got %v", err)
 	}
@@ -1231,5 +1278,69 @@ func TestNewClient_TrailingSlashBaseURL(t *testing.T) {
 	}
 	if reqPath != "/chat/completions" {
 		t.Errorf("request path = %q, want /chat/completions", reqPath)
+	}
+}
+
+func TestBuildChatRequest_MaxTokens(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		model         string
+		wantMaxTokens int
+	}{
+		{
+			name:          "moonshot-v1-8k",
+			model:         "moonshot-v1-8k",
+			wantMaxTokens: 4096,
+		},
+		{
+			name:          "kimi-k2.5",
+			model:         "kimi-k2.5",
+			wantMaxTokens: 8192,
+		},
+		{
+			name:          "unknown model defaults to 4096",
+			model:         "unknown-model",
+			wantMaxTokens: 4096,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := NewClient(api.LLMConfig{
+				BaseURL: "https://api.test.com/v1",
+				APIKey:  "key",
+				Model:   tt.model,
+			}, nil)
+
+			req := client.buildChatRequest([]api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil, false)
+
+			if req.MaxTokens != tt.wantMaxTokens {
+				t.Errorf("MaxTokens = %d, want %d", req.MaxTokens, tt.wantMaxTokens)
+			}
+
+			// Verify JSON serialization includes max_tokens for known models.
+			body, err := json.Marshal(req)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				t.Fatalf("unmarshal raw: %v", err)
+			}
+
+			if tt.wantMaxTokens > 0 {
+				if raw["max_tokens"] == nil {
+					t.Fatalf("expected max_tokens in serialized request")
+				}
+				if int(raw["max_tokens"].(float64)) != tt.wantMaxTokens {
+					t.Errorf("serialized max_tokens = %v, want %d", raw["max_tokens"], tt.wantMaxTokens)
+				}
+			}
+		})
 	}
 }

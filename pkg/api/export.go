@@ -2,6 +2,9 @@ package api
 
 import "time"
 
+// SessionExportVersion is the current export schema version.
+const SessionExportVersion = "1.0"
+
 // SessionExport is a portable snapshot of a session with all messages and turns.
 type SessionExport struct {
 	Version    string    `json:"version"`

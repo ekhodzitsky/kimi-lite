@@ -83,11 +83,8 @@ type Styles struct {
 	SidebarItem      lipgloss.Style
 	SidebarSelected  lipgloss.Style
 	InputBox         lipgloss.Style
-	InputPlaceholder lipgloss.Style
 	ScrollIndicator  lipgloss.Style
 	ApprovalDialog   lipgloss.Style
-	CommandText      lipgloss.Style
-	Timestamp        lipgloss.Style
 }
 
 // New creates a new Styles instance for the given theme name.
@@ -196,11 +193,6 @@ func (s *Styles) init() {
 		BorderForeground(t.Border).
 		Padding(0, 1)
 
-	s.InputPlaceholder = lipgloss.NewStyle().
-		Background(t.InputBg).
-		Foreground(t.Muted).
-		Padding(0, 1)
-
 	s.ScrollIndicator = lipgloss.NewStyle().
 		Foreground(t.Muted).
 		Background(t.Background)
@@ -211,12 +203,4 @@ func (s *Styles) init() {
 		BorderStyle(lipgloss.DoubleBorder()).
 		BorderForeground(t.Warning).
 		Padding(1, 2)
-
-	s.CommandText = lipgloss.NewStyle().
-		Foreground(t.Success).
-		Bold(true)
-
-	s.Timestamp = lipgloss.NewStyle().
-		Foreground(t.Muted).
-		Italic(true)
 }

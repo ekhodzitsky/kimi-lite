@@ -16,7 +16,7 @@ func TestCompositeToolExecutor_Definitions_Union(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "tool_b", Description: "b"}},
 	}
 	composite := NewCompositeToolExecutor(exec1, exec2)
-	defs := composite.Definitions()
+	defs := composite.Definitions(context.Background())
 	if len(defs) != 2 {
 		t.Fatalf("expected 2 definitions, got %d", len(defs))
 	}
@@ -74,33 +74,10 @@ func TestCompositeToolExecutor_Execute_UnknownTool(t *testing.T) {
 	}
 }
 
-func TestCompositeToolExecutor_IsReadOnly_Delegates(t *testing.T) {
-	t.Parallel()
-	exec1 := &mockToolExecutor{
-		defs:          []api.ToolDefinition{{Name: "tool_a", Description: "a"}},
-		readOnlyTools: map[string]bool{"tool_a": true},
-	}
-	exec2 := &mockToolExecutor{
-		defs:          []api.ToolDefinition{{Name: "tool_b", Description: "b"}},
-		readOnlyTools: map[string]bool{"tool_b": false},
-	}
-	composite := NewCompositeToolExecutor(exec1, exec2)
-
-	if !composite.IsReadOnly("tool_a") {
-		t.Error("expected tool_a to be read-only")
-	}
-	if composite.IsReadOnly("tool_b") {
-		t.Error("expected tool_b to not be read-only")
-	}
-	if composite.IsReadOnly("unknown") {
-		t.Error("expected unknown tool to not be read-only")
-	}
-}
-
-// TestCompositeToolExecutor_Collision_LastWins documents that when two children
-// define the same tool name, the last registered executor wins for execution.
-// Definitions() returns all definitions without deduplication.
-func TestCompositeToolExecutor_Collision_LastWins(t *testing.T) {
+// TestCompositeToolExecutor_Collision_FirstWins documents that when two children
+// define the same tool name, the first registered executor wins for execution
+// and Definitions() deduplicates to the first-seen definition.
+func TestCompositeToolExecutor_Collision_FirstWins(t *testing.T) {
 	t.Parallel()
 	exec1 := &mockToolExecutor{
 		defs: []api.ToolDefinition{{Name: "shared", Description: "first"}},
@@ -120,27 +97,27 @@ func TestCompositeToolExecutor_Collision_LastWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if result.Output != "second" {
-		t.Errorf("expected last registered to win, got %q", result.Output)
+	if result.Output != "first" {
+		t.Errorf("expected first registered to win, got %q", result.Output)
 	}
 
-	defs := composite.Definitions()
+	defs := composite.Definitions(context.Background())
 	count := 0
 	for _, d := range defs {
 		if d.Name == "shared" {
 			count++
 		}
 	}
-	// Definitions returns union without deduplication; both definitions are present.
-	if count != 2 {
-		t.Errorf("expected 2 definitions with name 'shared', got %d", count)
+	// Definitions deduplicates; only the first definition is present.
+	if count != 1 {
+		t.Errorf("expected 1 definition with name 'shared', got %d", count)
 	}
 }
 
 func TestCompositeToolExecutor_Empty(t *testing.T) {
 	t.Parallel()
 	composite := NewCompositeToolExecutor()
-	defs := composite.Definitions()
+	defs := composite.Definitions(context.Background())
 	if len(defs) != 0 {
 		t.Errorf("expected 0 definitions, got %d", len(defs))
 	}
@@ -150,8 +127,5 @@ func TestCompositeToolExecutor_Empty(t *testing.T) {
 	}
 	if result.Error == "" {
 		t.Fatal("expected error for empty executor")
-	}
-	if composite.IsReadOnly("any") {
-		t.Error("expected unknown tool in empty executor to not be read-only")
 	}
 }

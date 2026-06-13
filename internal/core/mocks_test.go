@@ -110,7 +110,8 @@ func (m *mockStore) UpdateSession(ctx context.Context, session *api.Session) err
 	if _, ok := m.sessions[session.ID]; !ok {
 		return fmt.Errorf("session not found")
 	}
-	session.UpdatedAt = time.Now().UTC()
+	m.serial++
+	session.UpdatedAt = time.Now().UTC().Add(time.Duration(m.serial) * time.Microsecond)
 	m.sessions[session.ID] = session
 	return nil
 }
@@ -129,7 +130,8 @@ func (m *mockStore) AppendMessage(ctx context.Context, sessionID string, msg api
 	defer m.mu.Unlock()
 	m.messages[sessionID] = append(m.messages[sessionID], msg)
 	if sess, ok := m.sessions[sessionID]; ok {
-		sess.UpdatedAt = time.Now().UTC()
+		m.serial++
+		sess.UpdatedAt = time.Now().UTC().Add(time.Duration(m.serial) * time.Microsecond)
 	}
 	return nil
 }
@@ -185,6 +187,18 @@ func (m *mockStore) GetTurns(ctx context.Context, sessionID string, limit int) (
 	return turns, nil
 }
 
+func (m *mockStore) CountTurns(ctx context.Context, sessionID string, state api.TurnState) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, t := range m.turns[sessionID] {
+		if t.State == state {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (m *mockStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -213,21 +227,16 @@ func (m *mockLLMClient) Models() []api.ModelInfo {
 
 // mockToolExecutor is a test double for api.ToolExecutor.
 type mockToolExecutor struct {
-	executeFunc   func(ctx context.Context, call api.ToolCall) (api.ToolResult, error)
-	defs          []api.ToolDefinition
-	readOnlyTools map[string]bool
+	executeFunc func(ctx context.Context, call api.ToolCall) (api.ToolResult, error)
+	defs        []api.ToolDefinition
 }
 
 func (m *mockToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 	return m.executeFunc(ctx, call)
 }
 
-func (m *mockToolExecutor) Definitions() []api.ToolDefinition {
+func (m *mockToolExecutor) Definitions(ctx context.Context) []api.ToolDefinition {
 	return m.defs
-}
-
-func (m *mockToolExecutor) IsReadOnly(name string) bool {
-	return m.readOnlyTools[name]
 }
 
 // mockApprovalGate is a test double for api.ApprovalGate.

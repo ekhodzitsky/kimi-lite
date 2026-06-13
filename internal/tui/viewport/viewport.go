@@ -20,7 +20,6 @@ const (
 type Model struct {
 	vp            viewport.Model
 	styles        *styles.Styles
-	content       strings.Builder
 	autoScroll    bool
 	width         int
 	height        int
@@ -45,6 +44,12 @@ func (m *Model) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	cmd := m.UpdateMsg(msg)
+	return m, cmd
+}
+
+// UpdateMsg processes a message and returns the resulting command.
+func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -53,21 +58,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pgup":
 			m.vp.LineUp(pageScrollLines)
 			m.autoScroll = false
+			m.scrollPercent = m.vp.ScrollPercent()
+			return tea.Batch(cmds...)
 		case "pgdown":
 			m.vp.LineDown(pageScrollLines)
 			m.checkAutoScroll()
+			m.scrollPercent = m.vp.ScrollPercent()
+			return tea.Batch(cmds...)
 		case "home":
 			m.vp.GotoTop()
 			m.autoScroll = false
+			m.scrollPercent = m.vp.ScrollPercent()
+			return tea.Batch(cmds...)
 		case "end":
 			m.vp.GotoBottom()
 			m.autoScroll = true
+			m.scrollPercent = m.vp.ScrollPercent()
+			return tea.Batch(cmds...)
 		case "up":
 			m.vp.LineUp(1)
 			m.autoScroll = false
+			m.scrollPercent = m.vp.ScrollPercent()
+			return tea.Batch(cmds...)
 		case "down":
 			m.vp.LineDown(1)
 			m.checkAutoScroll()
+			m.scrollPercent = m.vp.ScrollPercent()
+			return tea.Batch(cmds...)
 		}
 	case tea.MouseMsg:
 		if msg.Button == tea.MouseButtonWheelUp && msg.Action == tea.MouseActionPress {
@@ -79,20 +96,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Don't pass handled keys to inner viewport to avoid double-processing
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		switch keyMsg.String() {
-		case "pgup", "pgdown", "up", "down", "home", "end":
-			m.scrollPercent = m.vp.ScrollPercent()
-			return m, tea.Batch(cmds...)
-		}
-	}
-
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
 	cmds = append(cmds, cmd)
 	m.scrollPercent = m.vp.ScrollPercent()
-	return m, tea.Batch(cmds...)
+	return tea.Batch(cmds...)
 }
 
 // View implements tea.Model.
@@ -121,18 +129,7 @@ func (m *Model) SetSize(w, h int) {
 
 // SetContent sets the entire content string.
 func (m *Model) SetContent(s string) {
-	m.content.Reset()
-	m.content.WriteString(s)
 	m.vp.SetContent(s)
-	if m.autoScroll {
-		m.vp.GotoBottom()
-	}
-}
-
-// AppendContent appends content and auto-scrolls if enabled.
-func (m *Model) AppendContent(s string) {
-	m.content.WriteString(s)
-	m.vp.SetContent(m.content.String())
 	if m.autoScroll {
 		m.vp.GotoBottom()
 	}
@@ -173,9 +170,4 @@ func (m *Model) scrollIndicatorVisible() bool {
 func (m *Model) scrollIndicator() string {
 	percent := int(m.scrollPercent * 100)
 	return m.styles.ScrollIndicator.Render(fmt.Sprintf("▼ %d%%", percent))
-}
-
-// Content returns the current content string.
-func (m *Model) Content() string {
-	return m.content.String()
 }

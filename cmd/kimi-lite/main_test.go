@@ -3,22 +3,24 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/store"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
 type mockApp struct {
-	setYoloCalled        bool
-	setAutoApproveCalled bool
-	resumeSessionID      string
-	continueLastCalled   bool
-	startSessionCalled   bool
-	runSession           *api.Session
-	runCalled            bool
+	setYoloCalled      bool
+	resumeSessionID    string
+	continueLastCalled bool
+	startSessionCalled bool
+	runSession         *api.Session
+	runCalled          bool
 
 	resumeSessionReturn *api.Session
 	continueLastReturn  *api.Session
@@ -27,11 +29,13 @@ type mockApp struct {
 	continueLastErr     error
 	startSessionErr     error
 	runErr              error
+
+	exportReturn *api.SessionExport
+	closeErr     error
 }
 
-func (m *mockApp) SetYolo(v bool)        { m.setYoloCalled = v }
-func (m *mockApp) SetAutoApprove(v bool) { m.setAutoApproveCalled = v }
-func (m *mockApp) Close() error          { return nil }
+func (m *mockApp) SetYolo(v bool) { m.setYoloCalled = v }
+func (m *mockApp) Close() error   { return m.closeErr }
 func (m *mockApp) ResumeSession(_ context.Context, id string) (*api.Session, error) {
 	m.resumeSessionID = id
 	return m.resumeSessionReturn, m.resumeSessionErr
@@ -50,7 +54,7 @@ func (m *mockApp) Run(_ context.Context, session *api.Session) error {
 	return m.runErr
 }
 func (m *mockApp) ExportSession(_ context.Context, _ string) (*api.SessionExport, error) {
-	return nil, nil
+	return m.exportReturn, nil
 }
 func (m *mockApp) ImportSession(_ context.Context, _ *api.SessionExport) (*api.Session, error) {
 	return nil, nil
@@ -152,6 +156,87 @@ model = "kimi-k2.5"
 	}
 }
 
+func TestContinueFlag_NoPreviousSession(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	mock := &mockApp{
+		continueLastErr:    store.ErrSessionNotFound,
+		startSessionReturn: &api.Session{ID: "sess-new", Path: "/tmp"},
+	}
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return mock, nil }
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"--continue", "--config", configPath})
+	err := cmd.Execute()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.continueLastCalled {
+		t.Error("expected ContinueLastSession to be called")
+	}
+	if !mock.startSessionCalled {
+		t.Error("expected StartSession to be called when no previous session")
+	}
+	if !mock.runCalled {
+		t.Error("expected Run to be called")
+	}
+}
+
+func TestContinueFlag_NonNotFoundError(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	mock := &mockApp{
+		continueLastErr: errors.New("database locked"),
+	}
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return mock, nil }
+	writeDefaultConfig = func() error { return nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"--continue", "--config", configPath})
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("expected error for non-not-found continue error")
+	}
+	if mock.startSessionCalled {
+		t.Error("expected StartSession NOT to be called for non-not-found error")
+	}
+}
+
 func TestSessionFlag(t *testing.T) {
 	origNewApp := newApp
 	origWriteDefaultConfig := writeDefaultConfig
@@ -229,5 +314,205 @@ model = "kimi-k2.5"
 	}
 	if !mock.runCalled {
 		t.Error("expected Run to be called")
+	}
+}
+
+func TestMissingAPIKey_Unresolved(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	writeDefaultConfig = func() error { return nil }
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) {
+		return &mockApp{}, nil
+	}
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	content := `[llm]
+provider = "moonshot"
+api_key = "$UNRESOLVED_API_KEY"
+model = "kimi-k2.5"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tmpDir)
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"--config", configPath})
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("expected error for unresolved API key")
+	}
+	if !strings.Contains(err.Error(), "API key is not configured") {
+		t.Errorf("expected API key error, got: %v", err)
+	}
+}
+
+func TestDegradedDefault_UnresolvedAPIKey(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	writeDefaultConfig = func() error { return nil }
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) {
+		return &mockApp{}, nil
+	}
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	os.Unsetenv("MOONSHOT_API_KEY")
+
+	// Create an invalid config file to force Load() to fail
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte("invalid toml {"), 0644)
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"--config", configPath})
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("expected error for unresolved API key in degraded default")
+	}
+	if !strings.Contains(err.Error(), "API key is not configured") {
+		t.Errorf("expected API key error, got: %v", err)
+	}
+}
+
+func TestRunExport_SurfacesCloseError(t *testing.T) {
+	origNewApp := newApp
+	defer func() { newApp = origNewApp }()
+
+	mock := &mockApp{
+		exportReturn: &api.SessionExport{Version: "1.0"},
+		closeErr:     errors.New("store flush failed"),
+	}
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return mock, nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	err := runExport(context.Background(), "sess-1", filepath.Join(tmpDir, "out.json"), "")
+
+	w.Close()
+	os.Stderr = oldStderr
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "shutdown: store flush failed") {
+		t.Errorf("expected stderr to contain close error, got: %q", buf.String())
+	}
+}
+
+func TestDoctor_UsesCustomConfigPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	customDBDir := filepath.Join(tmpDir, "custom-db")
+	customDBPath := filepath.Join(customDBDir, "sessions.db")
+
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "dummy-key"
+model = "kimi-k2.5"
+base_url = "http://localhost:1"
+[session]
+db_path = "` + customDBPath + `"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Setenv("HOME", tmpDir)
+
+	// runDoctor may fail on LLM check, but the DB directory should be created.
+	_ = runDoctor(context.Background(), configPath)
+
+	if _, err := os.Stat(customDBDir); os.IsNotExist(err) {
+		t.Fatalf("expected DB directory %s to be created using custom config", customDBDir)
+	}
+}
+
+func TestYoloAndAutoFlag(t *testing.T) {
+	cmd := newRootCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--yolo", "--auto"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for unknown --auto flag")
+	}
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("expected unknown flag error, got: %v", err)
+	}
+}
+
+func TestWriteDefaultConfig_Warning(t *testing.T) {
+	origNewApp := newApp
+	origWriteDefaultConfig := writeDefaultConfig
+	defer func() {
+		newApp = origNewApp
+		writeDefaultConfig = origWriteDefaultConfig
+	}()
+
+	writeDefaultConfig = func() error { return errors.New("permission denied") }
+	mock := &mockApp{
+		startSessionReturn: &api.Session{ID: "sess-new", Path: "/tmp"},
+	}
+	newApp = func(cfg *api.Config, debug bool) (appRunner, error) { return mock, nil }
+
+	tmpDir := t.TempDir()
+	configContent := `[llm]
+provider = "moonshot"
+api_key = "test-key"
+model = "kimi-k2.5"
+`
+	configPath := filepath.Join(tmpDir, "config.toml")
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"--config", configPath})
+	err := cmd.Execute()
+
+	w.Close()
+	os.Stderr = oldStderr
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Warning: could not write default config") {
+		t.Errorf("expected stderr warning, got: %q", buf.String())
+	}
+	if !mock.startSessionCalled {
+		t.Error("expected StartSession to be called despite writeDefaultConfig error")
 	}
 }

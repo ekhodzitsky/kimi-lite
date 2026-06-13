@@ -66,25 +66,8 @@ func TestSetContent(t *testing.T) {
 	m.SetSize(80, 20)
 
 	m.SetContent("hello world")
-	if m.Content() != "hello world" {
-		t.Errorf("Content() = %q, want %q", m.Content(), "hello world")
-	}
 	if !m.AtBottom() {
 		t.Error("should be at bottom after SetContent with auto-scroll")
-	}
-}
-
-func TestAppendContent(t *testing.T) {
-	t.Parallel()
-
-	st := styles.New("dark")
-	m := New(st)
-	m.SetSize(80, 20)
-
-	m.SetContent("hello")
-	m.AppendContent(" world")
-	if m.Content() != "hello world" {
-		t.Errorf("Content() = %q, want %q", m.Content(), "hello world")
 	}
 }
 

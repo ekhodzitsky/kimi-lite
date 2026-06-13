@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2025-06-10
+## [0.1.0] - 2026-06-10
 
 ### Added
 
@@ -16,8 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Context compression** — `/compact` command to summarize history and free context window.
 - **MCP integration** — connects through `mcp-guard` proxy for stable Model Context Protocol tools.
 - **Fallback LLM** — automatic failover to a secondary provider on primary failure.
-- **Subagents** — `/btw` for side-channel queries without losing main context.
-- **Goal mode** — `/goal` for autonomous multi-turn execution.
 - **Git integration** — auto `git status` in context, `/checkpoint` to commit changes.
 - **Export / Import** — `kimi-lite export` and `kimi-lite import` for portable session snapshots.
 - **Health checks** — `kimi-lite doctor` verifies config, database, LLM connectivity and MCP status.

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-
-	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
 // StreamReader parses an SSE (Server-Sent Events) stream into chunks.
@@ -37,61 +35,45 @@ func (r *StreamReader) Close() error {
 	return r.reader.Close()
 }
 
-// ReadChunk reads and parses the next api.StreamChunk from the SSE stream.
-// It returns io.EOF when the stream ends normally. The returned chunk may
-// contain valid data even when err is io.EOF (e.g. a final [DONE] event).
-func (r *StreamReader) ReadChunk(ctx context.Context) (api.StreamChunk, error) {
-	if err := ctx.Err(); err != nil {
-		return api.StreamChunk{}, err
-	}
-	raw, err := r.readRawChunk(ctx)
-	if err != nil && err != io.EOF {
-		return api.StreamChunk{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		return api.StreamChunk{}, err
-	}
-
-	chunk := api.StreamChunk{
-		Content: raw.Content,
-		Done:    raw.Done,
-	}
-
-	if len(raw.ToolCalls) > 0 {
-		chunk.ToolCalls = make([]api.ToolCall, 0, len(raw.ToolCalls))
-		for _, tc := range raw.ToolCalls {
-			chunk.ToolCalls = append(chunk.ToolCalls, api.ToolCall{
-				ID:        tc.ID,
-				Name:      tc.Name,
-				Arguments: tc.Arguments,
-			})
-		}
-	}
-
-	return chunk, err
-}
-
 // readRawChunk reads the next raw SSE event. It is unexported so that
 // client.go can access the index field for incremental tool-call accumulation.
 // The caller is responsible for ensuring the context can unblock the underlying
 // reader (e.g. by closing the body on cancellation).
+//
+// Quirk: OpenAI-style streams may signal the end of the stream twice: once
+// through a payload with a non-empty finish_reason, and again through the
+// "[DONE]" sentinel. Both cases set Done=true, so consumers must tolerate
+// duplicate terminal markers.
 func (r *StreamReader) readRawChunk(_ context.Context) (rawChunk, error) {
-	var data string
+	var data strings.Builder
 
 	for r.scanner.Scan() {
 		line := r.scanner.Text()
 
 		// Empty line marks the end of an event.
 		if line == "" {
-			if data != "" {
+			if data.Len() > 0 {
 				break
 			}
 			continue
 		}
 
-		// Parse field: "data: ..."
-		if strings.HasPrefix(line, "data: ") {
-			data = strings.TrimPrefix(line, "data: ")
+		// Skip comment/heartbeat lines.
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+
+		// Parse field: "data: ..." (space after colon is optional per SSE spec).
+		if strings.HasPrefix(line, "data:") {
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			value := strings.TrimPrefix(line, "data:")
+			// Strip optional single leading space, but preserve any additional spaces.
+			if len(value) > 0 && value[0] == ' ' {
+				value = value[1:]
+			}
+			data.WriteString(value)
 			continue
 		}
 		// Ignore other fields like event:, id:, retry:
@@ -101,16 +83,18 @@ func (r *StreamReader) readRawChunk(_ context.Context) (rawChunk, error) {
 		return rawChunk{}, fmt.Errorf("read sse stream: %w", err)
 	}
 
-	if data == "" {
+	if data.Len() == 0 {
 		return rawChunk{}, io.EOF
 	}
 
-	if strings.TrimSpace(data) == "[DONE]" {
+	dataStr := data.String()
+
+	if strings.TrimSpace(dataStr) == "[DONE]" {
 		return rawChunk{Done: true}, io.EOF
 	}
 
 	var payload streamPayload
-	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+	if err := json.Unmarshal([]byte(dataStr), &payload); err != nil {
 		return rawChunk{}, fmt.Errorf("parse sse payload: %w", err)
 	}
 

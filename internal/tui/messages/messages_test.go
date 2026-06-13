@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -191,19 +192,6 @@ func TestMessageViewAssistant(t *testing.T) {
 	}
 }
 
-func TestMessageViewAssistantRawMode(t *testing.T) {
-	t.Parallel()
-
-	st := styles.New("dark")
-	m := NewAssistantMessage("**bold**", st)
-	m.RawMode = true
-	m.SetWidth(80)
-	view := m.View()
-	if !strings.Contains(view, "**bold**") {
-		t.Error("Raw mode should contain raw markdown")
-	}
-}
-
 func TestMessageViewToolCall(t *testing.T) {
 	t.Parallel()
 
@@ -284,4 +272,141 @@ func TestWordWrap(t *testing.T) {
 			t.Errorf("wordWrap(%q, %d) = %q, want %q", tt.input, tt.width, got, tt.want)
 		}
 	}
+}
+
+func TestRenderedContent_SkipsGlamourWhileStreaming(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewAssistantMessage("# Heading\n\n**bold** text", st)
+	m.SetWidth(80)
+	m.SetStreaming(true)
+
+	// While streaming, should return raw content
+	raw := m.renderedContent()
+	if raw != m.Content {
+		t.Errorf("streaming renderedContent = %q, want raw %q", raw, m.Content)
+	}
+	if strings.Contains(raw, "\x1b[") {
+		t.Error("streaming content should not contain ANSI escape codes")
+	}
+
+	// After streaming ends, should render with glamour
+	m.SetStreaming(false)
+	rendered := m.renderedContent()
+	if rendered == m.Content {
+		t.Error("post-stream renderedContent should not equal raw content")
+	}
+}
+
+func TestCachedRendererOutput(t *testing.T) {
+	t.Parallel()
+
+	content := "# Heading\n\n**bold** text"
+	for _, theme := range []string{"dark", "light"} {
+		want, err := glamour.Render(content, theme)
+		if err != nil {
+			t.Fatalf("glamour.Render error: %v", err)
+		}
+		got := safeGlamourRender(content, theme)
+		if got != want {
+			t.Errorf("theme=%s: cached output differs from glamour.Render", theme)
+		}
+	}
+}
+
+func BenchmarkRenderMarkdown(b *testing.B) {
+	content := "# Heading\n\n**bold** text and some `code`\n\n- item 1\n- item 2\n"
+	b.Run("uncached", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_, _ = glamour.Render(content, "dark")
+		}
+	})
+	b.Run("cached", func(b *testing.B) {
+		// Prime cache
+		_ = safeGlamourRender(content, "dark")
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = safeGlamourRender(content, "dark")
+		}
+	})
+}
+
+func TestUserMessageCache(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewUserMessage("hello world this is a long message", st)
+	m.SetWidth(40)
+	v1 := m.View()
+	v2 := m.View()
+	if v1 != v2 {
+		t.Error("second View() at same width should return cached output")
+	}
+	m.SetWidth(30)
+	v3 := m.View()
+	if v3 == v1 {
+		t.Error("View() after SetWidth should reflect new wrap")
+	}
+}
+
+func TestToolCallCacheInvalidation(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	call := api.ToolCall{ID: "1", Name: "read_file", Arguments: `{"path": "/tmp/test"}`}
+	m := NewToolCallMessage(call, st)
+	m.SetWidth(80)
+	v1 := m.View()
+
+	// Toggle expand invalidates cache
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := updated.(*Message)
+	v2 := msg.View()
+	if v2 == v1 {
+		t.Error("View() after expand toggle should return different output")
+	}
+}
+
+func TestSafeGlamourRender_FallbackOnError(t *testing.T) {
+	t.Parallel()
+
+	content := "# hello\n"
+	// glamour cannot be made to panic deterministically, but an invalid theme
+	// forces the renderer-creation error branch and locks in the fallback-to-raw
+	// contract.
+	got := safeGlamourRender(content, "this-theme-does-not-exist-12345")
+	if got != content {
+		t.Errorf("expected raw content fallback, got %q", got)
+	}
+}
+
+func TestGoldenMessageViewUser(t *testing.T) {
+	st := styles.New("dark")
+	m := NewUserMessage("Hello, assistant!", st)
+	m.SetWidth(60)
+	compareGolden(t, "message_user", m.View())
+}
+
+func TestGoldenMessageViewAssistant(t *testing.T) {
+	st := styles.New("dark")
+	m := NewAssistantMessage("## Summary\n\nThis is **bold** and `code`.", st)
+	m.SetWidth(60)
+	compareGolden(t, "message_assistant", m.View())
+}
+
+func TestGoldenMessageViewToolCall(t *testing.T) {
+	st := styles.New("dark")
+	call := api.ToolCall{ID: "call_1", Name: "read_file", Arguments: `{"path": "/tmp/test"}`}
+	m := NewToolCallMessage(call, st)
+	m.Expanded = true
+	m.SetWidth(60)
+	compareGolden(t, "message_toolcall", m.View())
+}
+
+func TestGoldenMessageViewError(t *testing.T) {
+	st := styles.New("dark")
+	m := NewErrorMessage(errors.New("something went wrong"), st)
+	m.SetWidth(60)
+	compareGolden(t, "message_error", m.View())
 }

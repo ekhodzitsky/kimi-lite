@@ -2,22 +2,40 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
+// newTestExecutor creates a BuiltInToolExecutor for tests, failing the test
+// if construction fails.
+func newTestExecutor(t *testing.T, cfg ToolExecutorConfig) *BuiltInToolExecutor {
+	t.Helper()
+	exec, err := NewBuiltInToolExecutor(cfg)
+	if err != nil {
+		t.Fatalf("NewBuiltInToolExecutor: %v", err)
+	}
+	return exec
+}
+
 func TestNewBuiltInToolExecutor_DefaultTimeout(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(0, "", nil)
+	exec, err := NewBuiltInToolExecutor(ToolExecutorConfig{})
+	if err != nil {
+		t.Fatalf("NewBuiltInToolExecutor: %v", err)
+	}
 	// We can't directly access shellTimeout, but we can verify it doesn't panic
 	// and tools work with default timeout.
 	if exec == nil {
@@ -27,17 +45,17 @@ func TestNewBuiltInToolExecutor_DefaultTimeout(t *testing.T) {
 
 func TestBuiltInToolExecutor_Definitions(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
-	defs := exec.Definitions()
-	if len(defs) != 7 {
-		t.Fatalf("expected 7 tool definitions, got %d", len(defs))
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+	defs := exec.Definitions(context.Background())
+	if len(defs) != 8 {
+		t.Fatalf("expected 8 tool definitions, got %d", len(defs))
 	}
 
 	names := make(map[string]bool)
 	for _, d := range defs {
 		names[d.Name] = true
 	}
-	expected := []string{"read_file", "write_file", "str_replace_file", "glob", "grep", "shell", "fetch_url"}
+	expected := []string{"read_file", "write_file", "str_replace_file", "glob", "grep", "shell", "fetch_url", "list_directory"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("missing tool definition: %s", name)
@@ -47,27 +65,25 @@ func TestBuiltInToolExecutor_Definitions(t *testing.T) {
 
 func TestBuiltInToolExecutor_IsReadOnly(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
-
+	e := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 	tests := []struct {
-		name     string
-		readonly bool
+		name string
+		want bool
 	}{
 		{"read_file", true},
 		{"glob", true},
 		{"grep", true},
 		{"fetch_url", true},
+		{"list_directory", true},
 		{"write_file", false},
 		{"str_replace_file", false},
 		{"shell", false},
-		{"unknown", false},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := exec.IsReadOnly(tt.name); got != tt.readonly {
-				t.Errorf("IsReadOnly(%q) = %v, want %v", tt.name, got, tt.readonly)
+			if got := e.IsReadOnly(tt.name); got != tt.want {
+				t.Errorf("IsReadOnly(%q) = %v, want %v", tt.name, got, tt.want)
 			}
 		})
 	}
@@ -76,7 +92,7 @@ func TestBuiltInToolExecutor_IsReadOnly(t *testing.T) {
 func TestBuiltInToolExecutor_Execute_ReadFile(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 	path := filepath.Join(tmp, "test.txt")
 	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
 		t.Fatalf("write test file: %v", err)
@@ -101,7 +117,7 @@ func TestBuiltInToolExecutor_Execute_ReadFile(t *testing.T) {
 func TestBuiltInToolExecutor_Execute_ReadFile_SandboxEscape(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -121,7 +137,7 @@ func TestBuiltInToolExecutor_Execute_ReadFile_SandboxEscape(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_ReadFile_NotFound(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -138,7 +154,7 @@ func TestBuiltInToolExecutor_Execute_ReadFile_NotFound(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_ReadFile_MissingPath(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -153,6 +169,26 @@ func TestBuiltInToolExecutor_Execute_ReadFile_MissingPath(t *testing.T) {
 	}
 }
 
+func TestBuiltInToolExecutor_Execute_ReadFile_NonStringPath(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_file",
+		Arguments: `{"path":123}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected type error for non-string path")
+	}
+	if !strings.Contains(result.Error, "path") || !strings.Contains(result.Error, "string") {
+		t.Errorf("expected path/string error, got: %s", result.Error)
+	}
+}
+
 func TestBuiltInToolExecutor_Execute_ReadFile_TooLarge(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -161,7 +197,7 @@ func TestBuiltInToolExecutor_Execute_ReadFile_TooLarge(t *testing.T) {
 		t.Fatalf("create large file: %v", err)
 	}
 
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
 		Name:      "read_file",
@@ -181,7 +217,7 @@ func TestBuiltInToolExecutor_Execute_ReadFile_TooLarge(t *testing.T) {
 func TestBuiltInToolExecutor_Execute_WriteFile(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 	path := filepath.Join(tmp, "subdir", "out.txt")
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
@@ -208,7 +244,7 @@ func TestBuiltInToolExecutor_Execute_WriteFile(t *testing.T) {
 func TestBuiltInToolExecutor_Execute_StrReplaceFile(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 	path := filepath.Join(tmp, "replace.txt")
 	if err := os.WriteFile(path, []byte("foo bar baz"), 0644); err != nil {
 		t.Fatalf("write test file: %v", err)
@@ -234,7 +270,7 @@ func TestBuiltInToolExecutor_Execute_StrReplaceFile(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_StrReplaceFile_NotFound(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -252,7 +288,7 @@ func TestBuiltInToolExecutor_Execute_StrReplaceFile_NotFound(t *testing.T) {
 func TestBuiltInToolExecutor_Execute_StrReplaceFile_MissingOldString(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 	path := filepath.Join(tmp, "replace.txt")
 	_ = os.WriteFile(path, []byte("content"), 0644)
 
@@ -272,7 +308,7 @@ func TestBuiltInToolExecutor_Execute_StrReplaceFile_MissingOldString(t *testing.
 func TestBuiltInToolExecutor_Execute_Glob(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 	_ = os.WriteFile(filepath.Join(tmp, "a.go"), []byte(""), 0644)
 	_ = os.WriteFile(filepath.Join(tmp, "b.go"), []byte(""), 0644)
 	_ = os.WriteFile(filepath.Join(tmp, "a.txt"), []byte(""), 0644)
@@ -297,7 +333,7 @@ func TestBuiltInToolExecutor_Execute_Glob(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_Glob_MissingPattern(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -312,10 +348,55 @@ func TestBuiltInToolExecutor_Execute_Glob_MissingPattern(t *testing.T) {
 	}
 }
 
+func TestBuiltInToolExecutor_Execute_ListDirectory(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	_ = os.WriteFile(filepath.Join(tmp, "a.go"), []byte(""), 0644)
+	_ = os.Mkdir(filepath.Join(tmp, "subdir"), 0755)
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "list_directory",
+		Arguments: fmt.Sprintf(`{"path":"%s"}`, tmp),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	if !strings.Contains(result.Output, "file a.go") {
+		t.Errorf("output missing a.go: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "dir subdir") {
+		t.Errorf("output missing subdir: %s", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ListDirectory_MissingPath(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "list_directory",
+		Arguments: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for missing path")
+	}
+}
+
 func TestBuiltInToolExecutor_Execute_Grep(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 	_ = os.WriteFile(filepath.Join(tmp, "a.go"), []byte("package main\nfunc main() {}"), 0644)
 	_ = os.WriteFile(filepath.Join(tmp, "b.go"), []byte("package test\nfunc foo() {}"), 0644)
 
@@ -338,7 +419,7 @@ func TestBuiltInToolExecutor_Execute_Grep(t *testing.T) {
 func TestBuiltInToolExecutor_Execute_Grep_NoMatches(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 	_ = os.WriteFile(filepath.Join(tmp, "a.go"), []byte("package main"), 0644)
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
@@ -360,7 +441,7 @@ func TestBuiltInToolExecutor_Execute_Grep_NoMatches(t *testing.T) {
 func TestBuiltInToolExecutor_Execute_Grep_SkipsSymlinks(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 
 	// Create a secret file outside the sandbox.
 	secretDir := t.TempDir()
@@ -389,7 +470,7 @@ func TestBuiltInToolExecutor_Execute_Grep_SkipsSymlinks(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_Shell(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -409,24 +490,49 @@ func TestBuiltInToolExecutor_Execute_Shell(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_Shell_Timeout(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(100*time.Millisecond, "", nil)
 
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix process check")
+	}
+
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 100 * time.Millisecond})
+
+	// Embed a unique token in the command so we can look for a surviving shell
+	// process after the timeout. A properly enforced timeout must return well
+	// before the 5s sleep finishes and must not leave the shell alive.
+	marker := fmt.Sprintf("kimi-shell-timeout-%d", time.Now().UnixNano())
+	command := fmt.Sprintf("sleep 5 # %s", marker)
+
+	start := time.Now()
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
 		Name:      "shell",
-		Arguments: `{"command":"sleep 5"}`,
+		Arguments: fmt.Sprintf(`{"command":%q}`, command),
 	})
+	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if result.Error == "" {
 		t.Fatal("expected timeout error")
 	}
+	if !strings.Contains(result.Error, "timed out") {
+		t.Errorf("expected timeout error to contain 'timed out', got: %q", result.Error)
+	}
+	if elapsed > 1*time.Second {
+		t.Fatalf("command took %v to return, want well under 1s", elapsed)
+	}
+
+	// Best-effort: confirm no shell process carrying our marker is still alive.
+	// pgrep may not be available everywhere, so ignore execution errors.
+	if out, _ := osexec.Command("pgrep", "-f", marker).CombinedOutput(); len(out) > 0 {
+		t.Fatalf("shell process still alive after timeout: %s", out)
+	}
 }
 
 func TestBuiltInToolExecutor_Execute_Shell_MissingCommand(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -443,7 +549,7 @@ func TestBuiltInToolExecutor_Execute_Shell_MissingCommand(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_Shell_NonZeroExit(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -453,11 +559,11 @@ func TestBuiltInToolExecutor_Execute_Shell_NonZeroExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if result.Error == "" {
-		t.Fatal("expected error for non-zero exit")
+	if result.Error != "" {
+		t.Errorf("expected empty error for non-zero exit, got %q", result.Error)
 	}
-	if !strings.Contains(result.Error, "exit code 1") {
-		t.Errorf("error = %q, want containing 'exit code 1'", result.Error)
+	if !strings.Contains(result.Output, "[exit status 1]") {
+		t.Errorf("output = %q, want containing '[exit status 1]'", result.Output)
 	}
 	if !strings.Contains(result.Output, "build failed") {
 		t.Errorf("output = %q, want containing 'build failed'", result.Output)
@@ -466,7 +572,7 @@ func TestBuiltInToolExecutor_Execute_Shell_NonZeroExit(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_Shell_Disabled(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 	exec.SetAllowShell(false)
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
@@ -487,7 +593,7 @@ func TestBuiltInToolExecutor_Execute_Shell_Disabled(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_Shell_CommandTooLong(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	longCmd := strings.Repeat("a", maxShellCommandLen+1)
 	result, err := exec.Execute(context.Background(), api.ToolCall{
@@ -508,7 +614,7 @@ func TestBuiltInToolExecutor_Execute_Shell_CommandTooLong(t *testing.T) {
 
 func TestApprovalGate_NeverAutoApprove_Shell(t *testing.T) {
 	t.Parallel()
-	gate := NewApprovalGate(ModeAuto, []string{"shell", "read_file"})
+	gate := NewApprovalGate(ModeAuto, []string{"shell", "read_file"}, testIsReadOnly, nil)
 
 	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "shell"})
 	if auto {
@@ -530,7 +636,7 @@ func TestApprovalGate_NeverAutoApprove_Shell(t *testing.T) {
 
 func TestApprovalGate_NeverAutoApprove_WriteFile(t *testing.T) {
 	t.Parallel()
-	gate := NewApprovalGate(ModeAuto, []string{"write_file", "str_replace_file"})
+	gate := NewApprovalGate(ModeAuto, []string{"write_file", "str_replace_file"}, testIsReadOnly, nil)
 
 	for _, name := range []string{"write_file", "str_replace_file"} {
 		decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: name})
@@ -545,7 +651,7 @@ func TestApprovalGate_NeverAutoApprove_WriteFile(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_FetchURL_BlocksLocalhost(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -565,7 +671,7 @@ func TestBuiltInToolExecutor_Execute_FetchURL_BlocksLocalhost(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_FetchURL_BlocksPrivateIP(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -582,7 +688,7 @@ func TestBuiltInToolExecutor_Execute_FetchURL_BlocksPrivateIP(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_FetchURL_MissingURL(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -599,7 +705,7 @@ func TestBuiltInToolExecutor_Execute_FetchURL_MissingURL(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_FetchURL_BlocksNonHTTP(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -616,7 +722,7 @@ func TestBuiltInToolExecutor_Execute_FetchURL_BlocksNonHTTP(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_UnknownTool(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -633,7 +739,7 @@ func TestBuiltInToolExecutor_Execute_UnknownTool(t *testing.T) {
 
 func TestBuiltInToolExecutor_Execute_InvalidArguments(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
@@ -686,7 +792,7 @@ func TestIsBlockedHost(t *testing.T) {
 func TestBuiltInToolExecutor_ValidatePath_Symlink_Escape(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 
 	// Create a file outside the sandbox
 	outside := t.TempDir()
@@ -720,7 +826,7 @@ func TestBuiltInToolExecutor_ValidatePath_Symlink_Escape(t *testing.T) {
 func TestBuiltInToolExecutor_ValidatePath_Symlink_InsideSandbox(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
 
 	targetFile := filepath.Join(tmp, "target.txt")
 	if err := os.WriteFile(targetFile, []byte("hello"), 0644); err != nil {
@@ -745,6 +851,77 @@ func TestBuiltInToolExecutor_ValidatePath_Symlink_InsideSandbox(t *testing.T) {
 	}
 	if result.Output != "hello" {
 		t.Errorf("output = %q, want %q", result.Output, "hello")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ReadFile_BlocksHardlinkToOutside(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("SECRET_OUTSIDE_DATA"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	linkFile := filepath.Join(tmp, "link.txt")
+	if err := os.Link(outsideFile, linkFile); err != nil {
+		t.Skipf("hardlinks not supported in test environment: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_file",
+		Arguments: fmt.Sprintf(`{"path":"%s"}`, linkFile),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for hardlink to outside file")
+	}
+	if !strings.Contains(result.Error, "sandbox") && !strings.Contains(result.Error, "blocked") {
+		t.Errorf("expected sandbox/blocked error, got: %s", result.Error)
+	}
+	if strings.Contains(result.Output, "SECRET_OUTSIDE_DATA") {
+		t.Errorf("should not read outside data; output: %q", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ReadFile_BlocksSymlinkParentEscape(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("SECRET_PARENT_DATA"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	// A parent component inside the sandbox is a symlink to a directory outside.
+	parentLink := filepath.Join(tmp, "parent")
+	if err := os.Symlink(outside, parentLink); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_file",
+		Arguments: fmt.Sprintf(`{"path":"%s"}`, filepath.Join(parentLink, "secret.txt")),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for symlink parent escape")
+	}
+	if !strings.Contains(result.Error, "sandbox") && !strings.Contains(result.Error, "blocked") {
+		t.Errorf("expected sandbox/blocked error, got: %s", result.Error)
+	}
+	if strings.Contains(result.Output, "SECRET_PARENT_DATA") {
+		t.Errorf("should not read outside data; output: %q", result.Output)
 	}
 }
 
@@ -774,7 +951,7 @@ func TestBuiltInToolExecutor_Execute_FetchURL_BlocksRedirectToLocalhost(t *testi
 	}))
 	defer server.Close()
 
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 	result, err := exec.Execute(context.Background(), api.ToolCall{
 		ID:        "call_1",
 		Name:      "fetch_url",
@@ -791,9 +968,127 @@ func TestBuiltInToolExecutor_Execute_FetchURL_BlocksRedirectToLocalhost(t *testi
 	}
 }
 
+// localRewriteTransport rewrites request hosts to a local test server so
+// fetch_url tests can bypass the IsBlockedHost guard while still exercising
+// the real HTTP path.
+type localRewriteTransport struct {
+	base http.RoundTripper
+	host string
+}
+
+func (t *localRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.URL.Host = t.host
+	return t.base.RoundTrip(req)
+}
+
+func testFetchClient(server *httptest.Server) *http.Client {
+	return &http.Client{
+		Transport: &localRewriteTransport{
+			base: http.DefaultTransport,
+			host: server.Listener.Addr().String(),
+		},
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_FetchURL_NonTextContentType(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write([]byte("binarydata"))
+	}))
+	defer server.Close()
+
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, HTTPClient: testFetchClient(server)})
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "fetch_url",
+		Arguments: `{"url":"http://example.com"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if strings.Contains(result.Output, "binarydata") {
+		t.Errorf("expected summary for non-text type, got raw bytes: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "image/png") {
+		t.Errorf("expected summary to mention content type, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "binary or non-text data omitted") {
+		t.Errorf("expected summary note, got: %q", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_FetchURL_TextContentType_Delimited(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte("<html></html>"))
+	}))
+	defer server.Close()
+
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, HTTPClient: testFetchClient(server)})
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "fetch_url",
+		Arguments: `{"url":"http://example.com"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "<html></html>") {
+		t.Errorf("expected raw content, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "BEGIN UNTRUSTED EXTERNAL DATA") {
+		t.Errorf("expected untrusted data delimiter, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "END UNTRUSTED EXTERNAL DATA") {
+		t.Errorf("expected untrusted data delimiter, got: %q", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_FetchURL_BodyCapped(t *testing.T) {
+	t.Parallel()
+	largeBody := make([]byte, maxFetchBodySize+1024)
+	for i := range largeBody {
+		largeBody[i] = 'x'
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write(largeBody)
+	}))
+	defer server.Close()
+
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, HTTPClient: testFetchClient(server)})
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "fetch_url",
+		Arguments: `{"url":"http://example.com"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if !strings.Contains(result.Output, "truncated") {
+		t.Errorf("expected truncation notice, got: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, fmt.Sprintf("%d", maxFetchBodySize)) {
+		t.Errorf("expected max size in truncation notice, got: %q", result.Output)
+	}
+}
+
 func TestBuiltInToolExecutor_ValidatePath_BlocksExactEtc(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	_, err := exec.validatePath("/etc")
 	if err == nil {
@@ -804,9 +1099,32 @@ func TestBuiltInToolExecutor_ValidatePath_BlocksExactEtc(t *testing.T) {
 	}
 }
 
+func TestBuiltInToolExecutor_ReadFile_BlocksPrivateEtc(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("sensitive POSIX paths not applicable on Windows")
+	}
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_file",
+		Arguments: `{"path":"/private/etc/passwd"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for sensitive path")
+	}
+	if !strings.Contains(result.Error, "blocked") {
+		t.Fatalf("expected blocked error, got: %v", result.Error)
+	}
+}
+
 func TestBuiltInToolExecutor_ValidatePath_BlocksSshDir(t *testing.T) {
 	t.Parallel()
-	exec := NewBuiltInToolExecutor(30*time.Second, "", nil)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
 
 	_, err := exec.validatePath("~/.ssh/id_rsa")
 	if err == nil {
@@ -822,7 +1140,7 @@ func TestBuiltInToolExecutor_ValidatePath_BlocksProtectedDBPath(t *testing.T) {
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "sessions.db")
 
-	exec := NewBuiltInToolExecutor(30*time.Second, tmp, nil, dbPath)
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp, ProtectedPaths: []string{dbPath}})
 
 	_, err := exec.validatePath(dbPath)
 	if err == nil {
@@ -961,5 +1279,318 @@ func TestCuratedEnv(t *testing.T) {
 	}
 	if _, ok := m["SSH_AUTH_SOCK"]; ok {
 		t.Error("SSH_AUTH_SOCK should be scrubbed")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WriteFile_NonStringContent(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	path := filepath.Join(tmp, "existing.txt")
+	if err := os.WriteFile(path, []byte("preserve me"), 0644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "write_file",
+		Arguments: fmt.Sprintf(`{"path":"%s","content":12345}`, path),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected type error for non-string content")
+	}
+	if !strings.Contains(result.Error, "content") || !strings.Contains(result.Error, "string") {
+		t.Errorf("expected content/string error, got: %s", result.Error)
+	}
+
+	data, _ := os.ReadFile(path)
+	if string(data) != "preserve me" {
+		t.Errorf("file was truncated; got %q, want %q", string(data), "preserve me")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Glob_RelativeAgainstSandbox(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	_ = os.WriteFile(filepath.Join(tmp, "a.go"), []byte(""), 0644)
+	_ = os.WriteFile(filepath.Join(tmp, "b.go"), []byte(""), 0644)
+
+	// Use a relative pattern - should resolve against sandboxRoot, not cwd.
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "glob",
+		Arguments: `{"pattern":"*.go"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	lines := strings.Split(strings.TrimSpace(result.Output), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 matches, got %d: %s", len(lines), result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Glob_OutOfSandboxDropped(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	outside := t.TempDir()
+	_ = os.WriteFile(filepath.Join(outside, "secret.go"), []byte(""), 0644)
+
+	// Pattern pointing outside sandbox should return empty results, not error.
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "glob",
+		Arguments: fmt.Sprintf(`{"pattern":"%s"}`, filepath.Join(outside, "*.go")),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("expected no error for out-of-sandbox pattern, got: %s", result.Error)
+	}
+	if result.Output != "" {
+		t.Errorf("expected empty output, got: %q", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Shell_TruncationRuneSafe(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	tmp := t.TempDir()
+	badFile := filepath.Join(tmp, "bad.txt")
+	payload := make([]byte, maxShellOutputSize+2)
+	for i := 0; i < maxShellOutputSize-1; i++ {
+		payload[i] = 'x'
+	}
+	copy(payload[maxShellOutputSize-1:], []byte("あ")) // 3-byte rune
+	if err := os.WriteFile(badFile, payload, 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: fmt.Sprintf(`{"command":"cat %s"}`, badFile),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+
+	out := result.Output
+	idx := strings.Index(out, "\n... truncated")
+	if idx == -1 {
+		t.Fatalf("expected truncation notice, got: %q", out)
+	}
+	truncated := out[:idx]
+	if !utf8.ValidString(truncated) {
+		t.Errorf("truncated output is not valid UTF-8: %q", truncated)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ReadFile_CancelledContext(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+	path := filepath.Join(tmp, "test.txt")
+	_ = os.WriteFile(path, []byte("hello"), 0644)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := exec.Execute(ctx, api.ToolCall{
+		ID:        "call_1",
+		Name:      "read_file",
+		Arguments: fmt.Sprintf(`{"path":"%s"}`, path),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected context cancellation error")
+	}
+	if !strings.Contains(result.Error, "context canceled") {
+		t.Errorf("expected context canceled error, got: %s", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_ValidatePath_SandboxRootAccepted(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	_, err := exec.validatePath(tmp)
+	if err != nil {
+		t.Fatalf("expected sandbox root to be accepted, got: %v", err)
+	}
+}
+
+func TestBuiltInToolExecutor_ValidatePath_SentinelErrors(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	// Empty path -> ErrPathRequired
+	_, err := exec.validatePath("")
+	if err == nil {
+		t.Fatal("expected error for empty path")
+	}
+	if !errors.Is(err, ErrPathRequired) {
+		t.Errorf("expected ErrPathRequired, got: %v", err)
+	}
+
+	// Blocked sensitive path -> ErrSandboxViolation
+	_, err = exec.validatePath("/etc/passwd")
+	if err == nil {
+		t.Fatal("expected error for blocked path")
+	}
+	if !errors.Is(err, ErrSandboxViolation) {
+		t.Errorf("expected ErrSandboxViolation, got: %v", err)
+	}
+	// On macOS /etc is a symlink to /private/etc; ensure the resolved path is not leaked.
+	if strings.Contains(err.Error(), "/private/etc") {
+		t.Errorf("error leaks resolved macOS path: %v", err)
+	}
+}
+
+func TestBuiltInToolExecutor_execReadFile_ErrorWrapping(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	_, err := exec.execReadFile(context.Background(), readFileArgs{Path: "/etc/passwd"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrSandboxViolation) {
+		t.Errorf("expected errors.Is(err, ErrSandboxViolation), got: %v", err)
+	}
+}
+
+func TestValidateFilePath(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	insideFile := filepath.Join(tmp, "file.txt")
+	if err := os.WriteFile(insideFile, []byte("hello"), 0644); err != nil {
+		t.Fatalf("write inside file: %v", err)
+	}
+
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	symlinkInside := filepath.Join(tmp, "link.txt")
+	if err := os.Symlink(outsideFile, symlinkInside); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	// Inside sandbox returns the resolved absolute path.
+	got, err := ValidateFilePath(insideFile, tmp, nil)
+	if err != nil {
+		t.Fatalf("expected inside-sandbox path to be valid, got error: %v", err)
+	}
+	want := insideFile
+	if resolved, err := filepath.EvalSymlinks(insideFile); err == nil {
+		want = resolved
+	}
+	if filepath.Clean(got) != want {
+		t.Errorf("ValidateFilePath(%q, %q) = %q, want %q", insideFile, tmp, got, want)
+	}
+
+	// Outside sandbox is blocked.
+	_, err = ValidateFilePath(outsideFile, tmp, nil)
+	if err == nil {
+		t.Fatal("expected error for outside-sandbox path")
+	}
+	if !strings.Contains(err.Error(), "sandbox") {
+		t.Errorf("expected sandbox error, got: %v", err)
+	}
+
+	// Sensitive path is blocked.
+	_, err = ValidateFilePath("/etc/passwd", "", nil)
+	if err == nil {
+		t.Fatal("expected error for sensitive path")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("expected blocked error, got: %v", err)
+	}
+
+	// Symlink escape is blocked.
+	_, err = ValidateFilePath(symlinkInside, tmp, nil)
+	if err == nil {
+		t.Fatal("expected error for symlink sandbox escape")
+	}
+	if !strings.Contains(err.Error(), "sandbox") && !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("expected sandbox/blocked error, got: %v", err)
+	}
+}
+
+func TestValidateFilePath_SymlinkToSecretTree_Blocked(t *testing.T) {
+	homeDir := t.TempDir()
+	realHome, err := filepath.EvalSymlinks(homeDir)
+	if err != nil {
+		t.Fatalf("resolve home dir: %v", err)
+	}
+	t.Setenv("HOME", realHome)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", realHome)
+	}
+
+	secretFile := filepath.Join(realHome, ".ssh", "id_rsa")
+	if err := os.MkdirAll(filepath.Dir(secretFile), 0700); err != nil {
+		t.Fatalf("create .ssh dir: %v", err)
+	}
+	if err := os.WriteFile(secretFile, []byte("secret"), 0600); err != nil {
+		t.Fatalf("write secret file: %v", err)
+	}
+
+	linkDir := t.TempDir()
+	linkPath := filepath.Join(linkDir, "link")
+	if err := os.Symlink(secretFile, linkPath); err != nil {
+		t.Skipf("symlinks not supported in test environment: %v", err)
+	}
+
+	_, err = ValidateFilePath(linkPath, "", nil)
+	if err == nil {
+		t.Fatal("expected error for symlink to secret tree")
+	}
+	if !errors.Is(err, ErrSandboxViolation) && !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("expected blocked error, got: %v", err)
+	}
+}
+
+func TestIsRootEscapeErr_RecognizesRootEscape(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	root, err := os.OpenRoot(tmp)
+	if err != nil {
+		t.Fatalf("open sandbox root: %v", err)
+	}
+	defer root.Close()
+
+	f, err := root.Open("../outside")
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("expected root-escape error")
+	}
+	if !isRootEscapeErr(err) {
+		t.Errorf("isRootEscapeErr did not recognize root escape error: %v", err)
+	}
+	if isRootEscapeErr(errors.New("other error")) {
+		t.Error("isRootEscapeErr should not match unrelated errors")
 	}
 }

@@ -18,22 +18,32 @@ func makePortablePath(absPath string) string {
 	if err != nil {
 		return absPath
 	}
-	if strings.HasPrefix(absPath, home) {
-		return "~" + strings.TrimPrefix(absPath, home)
+	rel, err := filepath.Rel(home, absPath)
+	if err != nil {
+		return absPath
 	}
-	return absPath
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return absPath
+	}
+	if rel == "." {
+		return "~"
+	}
+	return filepath.Join("~", rel)
 }
 
 // resolvePortablePath converts a portable path back to an absolute path.
 func resolvePortablePath(portable string) string {
-	if strings.HasPrefix(portable, "~") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return portable
-		}
-		return filepath.Join(home, strings.TrimPrefix(portable, "~"))
+	if !strings.HasPrefix(portable, "~") {
+		return portable
 	}
-	return portable
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return portable
+	}
+	if portable == "~" {
+		return home
+	}
+	return filepath.Join(home, strings.TrimPrefix(portable, "~/"))
 }
 
 // SessionManager manages conversation sessions using an api.Store.
@@ -108,6 +118,7 @@ func (sm *SessionManager) Get(ctx context.Context, id string) (*api.Session, err
 	if err != nil {
 		return nil, fmt.Errorf("get session: %w", err)
 	}
+	sess.Path = resolvePortablePath(sess.Path)
 	msgs, err := sm.store.GetMessages(ctx, id, 0)
 	if err != nil {
 		return nil, fmt.Errorf("get messages: %w", err)

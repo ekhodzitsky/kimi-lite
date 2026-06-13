@@ -45,39 +45,41 @@ func DefaultKeyMap() KeyMap {
 func ConfigurableKeyMap(cfg api.KeybindingConfig) KeyMap {
 	km := DefaultKeyMap()
 	if cfg.Send != "" {
-		km.Send = key.NewBinding(key.WithKeys(cfg.Send))
+		km.Send = key.NewBinding(key.WithKeys(cfg.Send), key.WithHelp(cfg.Send, "send"))
 	}
 	if cfg.Newline != "" {
-		km.Newline = key.NewBinding(key.WithKeys(cfg.Newline))
+		km.Newline = key.NewBinding(key.WithKeys(cfg.Newline), key.WithHelp(cfg.Newline, "newline"))
 	}
 	return km
 }
 
 // Model is the input component model.
 type Model struct {
-	textarea textarea.Model
-	styles   *styles.Styles
-	keyMap   KeyMap
-	history  []string
-	histIdx  int // -1 means current draft, >=0 means history index
-	draft    string
-	width    int
-	mu       sync.RWMutex
+	textarea   textarea.Model
+	styles     *styles.Styles
+	keyMap     KeyMap
+	history    []string
+	histIdx    int // -1 means current draft, >=0 means history index
+	draft      string
+	width      int
+	maxHistory int
+	mu         sync.RWMutex
 }
 
 // New creates a new input model.
-func New(st *styles.Styles, keyMap KeyMap) *Model {
+func New(st *styles.Styles, keyMap KeyMap, maxHistory int) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message... (Enter to send, Alt+Enter for newline)"
 	ta.ShowLineNumbers = false
 	ta.Focus()
 
 	m := &Model{
-		textarea: ta,
-		styles:   st,
-		keyMap:   keyMap,
-		history:  make([]string, 0),
-		histIdx:  -1,
+		textarea:   ta,
+		styles:     st,
+		keyMap:     keyMap,
+		history:    make([]string, 0),
+		histIdx:    -1,
+		maxHistory: maxHistory,
 	}
 	m.updateStyles()
 	return m
@@ -90,6 +92,12 @@ func (m *Model) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	cmd := m.UpdateMsg(msg)
+	return m, cmd
+}
+
+// UpdateMsg processes a message and returns the resulting command.
+func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -102,21 +110,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			content := strings.TrimSpace(m.textarea.Value())
 			if content != "" {
 				m.mu.Lock()
-				m.history = append(m.history, content)
+				// De-duplicate consecutive entries.
+				if len(m.history) == 0 || m.history[len(m.history)-1] != content {
+					m.history = append(m.history, content)
+					// Trim oldest entries beyond the cap.
+					if m.maxHistory > 0 && len(m.history) > m.maxHistory {
+						m.history = m.history[len(m.history)-m.maxHistory:]
+					}
+				}
 				m.histIdx = -1
 				m.draft = ""
 				m.mu.Unlock()
 				m.textarea.Reset()
-				return m, func() tea.Msg {
+				return func() tea.Msg {
 					return SendMsg{Content: content}
 				}
 			}
-			return m, nil
+			return nil
 		}
 
 		if key.Matches(msg, km.Newline) {
 			m.textarea.InsertString("\n")
-			return m, nil
+			return nil
 		}
 
 		// History navigation
@@ -124,7 +139,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			if len(m.history) == 0 {
-				return m, nil
+				return nil
 			}
 			if m.histIdx == -1 {
 				m.draft = m.textarea.Value()
@@ -134,14 +149,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.textarea.SetValue(m.history[m.histIdx])
 			m.textarea.CursorEnd()
-			return m, tea.Batch(cmds...)
+			return tea.Batch(cmds...)
 		}
 
 		if msg.String() == "down" || msg.String() == "ctrl+n" {
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			if m.histIdx == -1 {
-				return m, nil
+				return nil
 			}
 			if m.histIdx < len(m.history)-1 {
 				m.histIdx++
@@ -151,7 +166,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textarea.SetValue(m.draft)
 			}
 			m.textarea.CursorEnd()
-			return m, tea.Batch(cmds...)
+			return tea.Batch(cmds...)
 		}
 	}
 
@@ -159,7 +174,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
 	cmds = append(cmds, cmd)
-	return m, tea.Batch(cmds...)
+	return tea.Batch(cmds...)
 }
 
 // View implements tea.Model.

@@ -3,10 +3,42 @@ package core
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
+
+func TestPortablePath_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory:", err)
+	}
+
+	cases := []string{
+		filepath.Join(home, "proj"),
+		filepath.Join(home, "proj", "src", "main.go"),
+		"/tmp/proj",
+		"/tmp",
+	}
+
+	for _, abs := range cases {
+		portable := makePortablePath(abs)
+		resolved := resolvePortablePath(portable)
+		if resolved != abs {
+			t.Errorf("round-trip failed for %q: portable=%q resolved=%q", abs, portable, resolved)
+		}
+	}
+
+	// Sibling directory that shares a prefix with home must NOT be treated as inside home.
+	sibling := home + "data"
+	if portable := makePortablePath(sibling); portable != sibling {
+		t.Errorf("sibling path %q incorrectly portable-ized as %q, want %q", sibling, portable, sibling)
+	}
+}
 
 func TestSessionManager_Start(t *testing.T) {
 	t.Parallel()
@@ -135,6 +167,24 @@ func TestSessionManager_Get(t *testing.T) {
 	}
 	if len(got.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(got.Messages))
+	}
+}
+
+func TestSessionManager_Get_ResolvesPath(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	// Start stores a portable path; Get must resolve it back to absolute.
+	sess, _ := sm.Start(ctx, "/tmp/proj")
+
+	got, err := sm.Get(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.Path != "/tmp/proj" {
+		t.Errorf("path = %q, want %q", got.Path, "/tmp/proj")
 	}
 }
 

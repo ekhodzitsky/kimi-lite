@@ -23,12 +23,18 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
+// teaProgram is the minimal interface Bubble Tea programs satisfy.
+type teaProgram interface {
+	Run() (tea.Model, error)
+}
+
 // App is the central DI container and lifecycle manager for kimi-lite.
 type App struct {
 	cfg            *api.Config
 	store          api.Store
 	llmClient      api.LLMClient
 	toolExecutor   api.ToolExecutor
+	builtInExec    *core.BuiltInToolExecutor
 	approvalGate   *core.ApprovalGate
 	sessionManager *core.SessionManager
 	turnManager    *core.TurnManager
@@ -37,6 +43,7 @@ type App struct {
 	mcpClient      api.MCPClient
 	tuiModel       *tui.Model
 	logger         *slog.Logger
+	newProgram     func(model tea.Model, opts ...tea.ProgramOption) teaProgram
 }
 
 // New creates a fully wired App from configuration.
@@ -51,7 +58,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 
 	// Ensure DB directory exists
 	dbDir := filepath.Dir(cfg.Session.DBPath)
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
+	if err := os.MkdirAll(dbDir, 0700); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
@@ -78,7 +85,15 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	// Protect the app's own config and DB paths regardless of sandbox.
 	configDir, _ := config.EnsureConfigDir()
 	configPath := filepath.Join(configDir, "config.toml")
-	builtInExec := core.NewBuiltInToolExecutor(cfg.Behavior.ShellTimeout, sandboxRoot, nil, configPath, cfg.Session.DBPath)
+	builtInExec, err := core.NewBuiltInToolExecutor(core.ToolExecutorConfig{
+		ShellTimeout:   cfg.Behavior.ShellTimeout,
+		SandboxRoot:    sandboxRoot,
+		HTTPClient:     nil,
+		ProtectedPaths: []string{configPath, cfg.Session.DBPath},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create built-in tool executor: %w", err)
+	}
 	builtInExec.SetAllowShell(cfg.Behavior.AllowShell)
 
 	// Attempt MCP connection (non-fatal)
@@ -100,8 +115,21 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	// Create composite tool executor
 	toolExec := core.NewCompositeToolExecutor(executors...)
 
+	// Validate auto-approve entries: drop unknown or non-read-only tools.
+	isReadOnly := func(name string) bool {
+		return builtInExec.IsReadOnly(name)
+	}
+	var validatedAutoApprove []string
+	for _, name := range cfg.Behavior.AutoApprove {
+		if isReadOnly(name) {
+			validatedAutoApprove = append(validatedAutoApprove, name)
+		} else {
+			logger.Warn("dropping non-read-only or unknown tool from auto_approve", "tool", name)
+		}
+	}
+
 	// Create approval gate (start in Auto mode)
-	approval := core.NewApprovalGate(core.ModeAuto, cfg.Behavior.AutoApprove)
+	approval := core.NewApprovalGate(core.ModeAuto, validatedAutoApprove, isReadOnly, cfg.Permission.Rules)
 
 	// Create session manager
 	sessionMgr := core.NewSessionManager(st)
@@ -110,21 +138,19 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	turnMgr := core.NewTurnManager(llmClient, toolExec, approval, st, &configProvider{cfg: cfg})
 
 	// Create context compressor
-	compressor := core.NewContextCompressor(llmClient)
-
-	// Create git provider
-	gitProvider := git.NewProvider("")
+	modelInfo := llm.LookupModel(cfg.LLM.Model)
+	compressor := core.NewContextCompressor(llmClient, modelInfo.ContextWindow, cfg.LLM.Timeout)
 
 	application := &App{
 		cfg:            cfg,
 		store:          st,
 		llmClient:      llmClient,
 		toolExecutor:   toolExec,
+		builtInExec:    builtInExec,
 		approvalGate:   approval,
 		sessionManager: sessionMgr,
 		turnManager:    turnMgr,
 		compressor:     compressor,
-		gitProvider:    gitProvider,
 		mcpClient:      mcpClient,
 		logger:         logger,
 	}
@@ -136,13 +162,6 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 func (a *App) SetYolo(yolo bool) {
 	if yolo {
 		a.approvalGate.SetMode(core.ModeYolo)
-	}
-}
-
-// SetAutoApprove sets the approval gate to auto mode (auto-approve read-only).
-func (a *App) SetAutoApprove(auto bool) {
-	if auto {
-		a.approvalGate.SetMode(core.ModeAuto)
 	}
 }
 
@@ -181,9 +200,17 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	model.SetSessionManager(a.sessionManager)
 	model.SetTurnManager(a.turnManager)
 	model.SetCompressor(a.compressor)
-	model.SetGitProvider(a.gitProvider)
 	model.SetMCPClient(a.mcpClient)
 	model.SetStore(a.store)
+
+	// Wire approval callbacks
+	model.SetAutoApproveSetter(func(name string) {
+		a.approvalGate.AddAutoApprove(name)
+	})
+	model.SetApprovalModeSetter(func(mode int) {
+		a.approvalGate.SetMode(core.ApprovalMode(mode))
+	})
+	model.SetApprovalMode(int(a.approvalGate.GetMode()))
 
 	// Set context stats from model info
 	modelInfo := llm.LookupModel(a.cfg.LLM.Model)
@@ -191,34 +218,56 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	model.SetModelName(a.cfg.LLM.Model)
 
 	// Count tools
-	model.SetToolCount(len(a.toolExecutor.Definitions()))
+	model.SetToolCount(len(a.toolExecutor.Definitions(ctx)))
+
+	// Construct the git provider with the resolved session directory so the
+	// dir code path is exercised in production.
+	a.gitProvider = git.NewProvider(session.Path)
+	model.SetGitProvider(a.gitProvider)
+
+	now := time.Now().UTC()
 
 	// Add git status to initial context if in a repo
-	if a.gitProvider.IsRepo(ctx) {
+	if isRepo, repoErr := a.gitProvider.IsRepo(ctx); isRepo {
 		if status, err := a.gitProvider.Status(ctx); err == nil && status != "" {
 			if appendErr := a.store.AppendMessage(ctx, session.ID, api.Message{
-				ID:      idgen.GenerateID(),
-				Role:    api.RoleSystem,
-				Content: fmt.Sprintf("Current git status:\n%s", status),
+				ID:        idgen.GenerateID(),
+				Role:      api.RoleSystem,
+				Content:   fmt.Sprintf("Current git status:\n%s", status),
+				CreatedAt: now,
 			}); appendErr != nil {
 				a.logger.Warn("failed to append git status message", "error", appendErr)
 			}
+		} else if err != nil {
+			a.logger.Debug("git status failed", "error", err)
 		}
+	} else if repoErr != nil {
+		a.logger.Debug("git is-repo failed", "error", repoErr)
 	}
 
-	// Add system message with context
+	// Add system message with agentic prompt. Its timestamp is slightly after
+	// the optional git-status message so ordering is deterministic.
 	if appendErr := a.store.AppendMessage(ctx, session.ID, api.Message{
-		ID:      idgen.GenerateID(),
-		Role:    api.RoleSystem,
-		Content: fmt.Sprintf("You are kimi-lite, a helpful AI coding assistant. Current directory: %s", session.Path),
+		ID:        idgen.GenerateID(),
+		Role:      api.RoleSystem,
+		Content:   systemPrompt(session.Path),
+		CreatedAt: now.Add(time.Millisecond),
 	}); appendErr != nil {
 		a.logger.Warn("failed to append system message", "error", appendErr)
 	}
 
 	a.tuiModel = model
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	var p teaProgram
+	if a.newProgram != nil {
+		p = a.newProgram(model, tea.WithContext(ctx), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	} else {
+		p = tea.NewProgram(model, tea.WithContext(ctx), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	}
 	_, err = p.Run()
+	if errors.Is(err, tea.ErrInterrupted) || errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("run tui: %w", err)
 	}
@@ -241,7 +290,7 @@ func (a *App) ExportSession(ctx context.Context, sessionID string) (*api.Session
 		return nil, fmt.Errorf("get turns: %w", err)
 	}
 	return &api.SessionExport{
-		Version:    "1.0",
+		Version:    api.SessionExportVersion,
 		ExportedAt: time.Now().UTC(),
 		Session:    *sess,
 		Messages:   msgs,
@@ -251,20 +300,30 @@ func (a *App) ExportSession(ctx context.Context, sessionID string) (*api.Session
 
 // ImportSession imports a session from an export, creating a new session with a new ID.
 func (a *App) ImportSession(ctx context.Context, export *api.SessionExport) (*api.Session, error) {
+	if export.Version != "" && export.Version != api.SessionExportVersion {
+		return nil, fmt.Errorf("unsupported export version %q", export.Version)
+	}
 	created, err := a.store.CreateSession(ctx, export.Session.Path)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
+	created.Name = export.Session.Name
+	if err := a.store.UpdateSession(ctx, created); err != nil {
+		cleanupErr := a.store.DeleteSession(ctx, created.ID)
+		return nil, errors.Join(fmt.Errorf("update session name: %w", err), cleanupErr)
+	}
 	// Restore messages
 	for _, msg := range export.Messages {
 		if err := a.store.AppendMessage(ctx, created.ID, msg); err != nil {
-			return nil, fmt.Errorf("append message: %w", err)
+			cleanupErr := a.store.DeleteSession(ctx, created.ID)
+			return nil, errors.Join(fmt.Errorf("append message: %w", err), cleanupErr)
 		}
 	}
 	// Restore turns
 	for _, turn := range export.Turns {
 		if err := a.store.SaveTurn(ctx, created.ID, turn); err != nil {
-			return nil, fmt.Errorf("save turn: %w", err)
+			cleanupErr := a.store.DeleteSession(ctx, created.ID)
+			return nil, errors.Join(fmt.Errorf("save turn: %w", err), cleanupErr)
 		}
 	}
 	return created, nil
@@ -273,6 +332,11 @@ func (a *App) ImportSession(ctx context.Context, export *api.SessionExport) (*ap
 // Close gracefully shuts down all resources.
 func (a *App) Close() error {
 	var errs []error
+
+	// Cancel in-flight turns before waiting so blocked turns abort promptly.
+	if a.turnManager != nil {
+		a.turnManager.CancelAll()
+	}
 
 	// Wait for in-flight turns with timeout.
 	if a.turnManager != nil {
@@ -291,6 +355,11 @@ func (a *App) Close() error {
 	if a.mcpClient != nil {
 		if err := a.mcpClient.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close mcp: %w", err))
+		}
+	}
+	if a.builtInExec != nil {
+		if err := a.builtInExec.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close built-in tool executor: %w", err))
 		}
 	}
 	if a.store != nil {

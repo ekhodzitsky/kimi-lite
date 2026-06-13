@@ -20,7 +20,7 @@ Build kimi-lite in Go using the Bubble Tea TUI framework.
 ### Why Go?
 - **Single static binary** — zero runtime dependencies
 - **Fast startup** — <50ms cold start
-- **Cross-compilation** — native builds for Linux, macOS, Windows from any platform
+- **Cross-compilation** — native builds for Linux and macOS from any platform (Windows is supported by the Go toolchain but not currently built or released)
 - **musl/Alpine compatible** — static linking works out of the box
 - **Standard library** — robust HTTP, JSON, context, concurrency primitives
 - **Cancellation** — `context.Context` is first-class and reliable

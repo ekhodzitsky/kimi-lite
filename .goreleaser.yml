@@ -4,7 +4,7 @@ project_name: kimi-lite
 
 before:
   hooks:
-    - go mod tidy
+    - go mod download
     - go mod verify
 
 builds:
@@ -23,9 +23,10 @@ builds:
       - -s -w
       - -X main.version={{.Version}}
       - -X main.commit={{.Commit}}
-      - -X main.date={{.Date}}
+      - -X main.date={{ .CommitDate }}
     flags:
       - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
   - id: kimi-lite
@@ -35,9 +36,6 @@ archives:
       {{- .Os }}_
       {{- .Arch }}
     format_overrides:
-      - goos: linux
-        formats:
-          - tar.gz
       - goos: darwin
         formats:
           - zip
@@ -49,6 +47,25 @@ archives:
 checksum:
   name_template: '{{ .ProjectName }}_{{ .Version }}_checksums.txt'
   algorithm: sha256
+
+sboms:
+  - id: archive
+    cmd: syft
+    args: ["$artifact", "--output", "spdx-json=$document"]
+    artifacts: archive
+
+signs:
+  - cmd: cosign
+    env:
+      - COSIGN_EXPERIMENTAL=1
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--output-certificate=${certificate}'
+      - '--output-signature=${signature}'
+      - '${artifact}'
+    artifacts: all
+    output: true
 
 changelog:
   sort: asc
