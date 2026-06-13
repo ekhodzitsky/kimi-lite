@@ -185,6 +185,98 @@ func TestHistoryPreservesDraft(t *testing.T) {
 	}
 }
 
+func TestHistoryCap(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 3)
+	m.SetWidth(80)
+
+	for _, content := range []string{"a", "b", "c", "d"} {
+		m.SetValue(content)
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = updated.(*Model)
+	}
+
+	if len(m.history) != 3 {
+		t.Fatalf("history length = %d, want 3", len(m.history))
+	}
+	if m.history[0] != "b" || m.history[1] != "c" || m.history[2] != "d" {
+		t.Errorf("history should keep newest entries, got %v", m.history)
+	}
+}
+
+func TestHistoryDedupConsecutive(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+
+	for _, content := range []string{"hello", "hello", "world", "world", "world"} {
+		m.SetValue(content)
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = updated.(*Model)
+	}
+
+	if len(m.history) != 2 {
+		t.Fatalf("history length = %d, want 2", len(m.history))
+	}
+	if m.history[0] != "hello" || m.history[1] != "world" {
+		t.Errorf("history should de-duplicate consecutive sends, got %v", m.history)
+	}
+}
+
+func TestHistoryNoDedupNonConsecutive(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 100)
+	m.SetWidth(80)
+
+	for _, content := range []string{"hello", "world", "hello"} {
+		m.SetValue(content)
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = updated.(*Model)
+	}
+
+	if len(m.history) != 3 {
+		t.Fatalf("history length = %d, want 3", len(m.history))
+	}
+}
+
+func TestHistoryCapZeroUnbounded(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	km := DefaultKeyMap()
+	m := New(st, km, 0)
+	m.SetWidth(80)
+
+	for i := 0; i < 5; i++ {
+		m.SetValue("msg")
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = updated.(*Model)
+	}
+
+	if len(m.history) != 1 {
+		t.Fatalf("history length = %d, want 1 (consecutive dedup)", len(m.history))
+	}
+
+	for i := 0; i < 5; i++ {
+		m.SetValue(string(rune('a' + i)))
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = updated.(*Model)
+	}
+
+	if len(m.history) != 6 {
+		t.Errorf("history length with cap=0 = %d, want 6", len(m.history))
+	}
+}
+
 func TestFocusBlur(t *testing.T) {
 	t.Parallel()
 
