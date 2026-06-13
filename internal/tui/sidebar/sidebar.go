@@ -49,6 +49,7 @@ type Model struct {
 	width     int
 	height    int
 	cursor    int // linear cursor index for keyboard navigation
+	offset    int // first visible row in the flat list
 	flat      []*TreeNode
 	flatDirty bool
 }
@@ -143,7 +144,14 @@ func (m *Model) View() string {
 	if m.flatDirty {
 		m.rebuildFlat()
 	}
-	for i, node := range m.flat {
+	m.ensureCursorVisible()
+
+	end := m.offset + m.visibleRows()
+	if end > len(m.flat) {
+		end = len(m.flat)
+	}
+	for i := m.offset; i < end; i++ {
+		node := m.flat[i]
 		line := m.renderNode(node, i == m.cursor)
 		b.WriteString(line + "\n")
 	}
@@ -158,6 +166,40 @@ func (m *Model) View() string {
 func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+}
+
+// visibleRows returns the number of flat rows that fit in the current height.
+// One row is reserved for the title line.
+func (m *Model) visibleRows() int {
+	rows := m.height - 1
+	if rows < 1 {
+		return 1
+	}
+	return rows
+}
+
+// ensureCursorVisible adjusts the scroll offset so that the cursor row is
+// always inside the visible viewport.
+func (m *Model) ensureCursorVisible() {
+	if len(m.flat) == 0 {
+		m.offset = 0
+		return
+	}
+
+	rows := m.visibleRows()
+
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	}
+	if m.cursor >= m.offset+rows {
+		m.offset = m.cursor - rows + 1
+	}
+	if m.offset < 0 {
+		m.offset = 0
+	}
+	if m.offset >= len(m.flat) {
+		m.offset = len(m.flat) - 1
+	}
 }
 
 // Toggle toggles sidebar visibility.
@@ -188,6 +230,7 @@ func (m *Model) refresh() error {
 	if len(m.flat) > 0 && m.cursor >= len(m.flat) {
 		m.cursor = len(m.flat) - 1
 	}
+	m.ensureCursorVisible()
 	return nil
 }
 
@@ -248,6 +291,7 @@ func (m *Model) moveCursor(delta int) {
 	if m.cursor >= len(m.flat) {
 		m.cursor = len(m.flat) - 1
 	}
+	m.ensureCursorVisible()
 }
 
 func (m *Model) collapseCurrent() {
@@ -258,6 +302,7 @@ func (m *Model) collapseCurrent() {
 	if node.IsDir && node.Expanded {
 		node.Expanded = false
 		m.flatDirty = true
+		m.ensureCursorVisible()
 	}
 }
 
@@ -269,6 +314,7 @@ func (m *Model) expandCurrent() {
 	if node.IsDir && !node.Expanded {
 		node.Expanded = true
 		m.flatDirty = true
+		m.ensureCursorVisible()
 	}
 }
 
@@ -280,6 +326,7 @@ func (m *Model) toggleCurrent() {
 	if node.IsDir {
 		node.Expanded = !node.Expanded
 		m.flatDirty = true
+		m.ensureCursorVisible()
 	}
 }
 
@@ -291,6 +338,7 @@ func (m *Model) selectCurrent() tea.Cmd {
 	if node.IsDir {
 		node.Expanded = !node.Expanded
 		m.flatDirty = true
+		m.ensureCursorVisible()
 		return nil
 	}
 	m.selected = node.Path
@@ -306,7 +354,11 @@ func (m *Model) selectCurrent() tea.Cmd {
 func (m *Model) handleClick(y int) {
 	m.rebuildFlat()
 	idx := y - 1 // subtract title line
-	if idx < 0 || idx >= len(m.flat) {
+	if idx < 0 {
+		return
+	}
+	idx += m.offset
+	if idx >= len(m.flat) {
 		return
 	}
 	m.cursor = idx
@@ -321,6 +373,7 @@ func (m *Model) handleClick(y int) {
 		}
 		node.Selected = true
 	}
+	m.ensureCursorVisible()
 }
 
 func buildTree(path string, maxDepth int) (*TreeNode, error) {
