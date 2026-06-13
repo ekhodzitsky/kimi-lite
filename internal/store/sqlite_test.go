@@ -270,6 +270,78 @@ func TestSQLite_PragmaAppliedToAllConnections(t *testing.T) {
 	}
 }
 
+func TestSQLite_CrashRecovery(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "crash.db")
+
+	s, err := NewSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	sess, err := s.CreateSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	turn := api.Turn{
+		ID:        idgen.GenerateID(),
+		State:     api.TurnStreaming,
+		Input:     "hi",
+		StartedAt: time.Now().UTC(),
+	}
+	if err := s.SaveTurn(ctx, sess.ID, turn); err != nil {
+		t.Fatalf("save streaming turn: %v", err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	// Re-open the same on-disk database. NewSQLite should recover the orphaned
+	// streaming turn and mark it as an error.
+	s2, err := NewSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer s2.Close()
+
+	turns, err := s2.GetTurns(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("get turns: %v", err)
+	}
+	if len(turns) != 1 {
+		t.Fatalf("len(turns) = %d, want 1", len(turns))
+	}
+	got := turns[0]
+	if got.State != api.TurnError {
+		t.Errorf("state = %v, want TurnError", got.State)
+	}
+	if !strings.Contains(got.Error, "process crashed during streaming") {
+		t.Errorf("error = %q, want containing 'process crashed during streaming'", got.Error)
+	}
+
+	// Sanity-check that the DSN PRAGMAs were applied on the file-backed DB.
+	var journalMode string
+	if err := s2.db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatalf("read journal_mode: %v", err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		t.Errorf("journal_mode = %q, want wal", journalMode)
+	}
+
+	var busyTimeout int
+	if err := s2.db.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("read busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", busyTimeout)
+	}
+}
+
 func TestSQLite_DeleteSession_NoOrphans(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
