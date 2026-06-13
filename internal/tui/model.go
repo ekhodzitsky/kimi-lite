@@ -8,9 +8,8 @@ import (
 	"sync"
 	"time"
 
-	gloss "charm.land/lipgloss/v2"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
@@ -289,12 +288,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// Let the input component consume completion keys while a popup is open.
 		if !m.input.Completing() {
 			cmds = append(cmds, m.handleKeyMsg(msg)...)
 		}
-	case tea.MouseMsg:
+	case tea.MouseReleaseMsg:
 		m.handleMouseMsg(msg)
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -446,15 +445,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View implements tea.Model.
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
 	if m.width == 0 || m.height == 0 {
-		return "Loading..."
+		v := tea.NewView("Loading...")
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+		return v
 	}
 
 	var mainContent strings.Builder
-	mainContent.WriteString(m.vp.View())
+	mainContent.WriteString(m.vp.View().Content)
 	mainContent.WriteString("\n")
-	mainContent.WriteString(m.input.View())
+	mainContent.WriteString(m.input.View().Content)
 	mainContent.WriteString("\n")
 	mainContent.WriteString(m.statusBar())
 
@@ -462,7 +464,7 @@ func (m *Model) View() string {
 	if m.sidebar.Visible() {
 		view = lipgloss.JoinHorizontal(
 			lipgloss.Top,
-			m.sidebar.View(),
+			m.sidebar.View().Content,
 			view,
 		)
 	}
@@ -471,7 +473,10 @@ func (m *Model) View() string {
 		view = m.renderApprovalDialog(view)
 	}
 
-	return view
+	v := tea.NewView(view)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
 }
 
 // SetSession sets the current session.
@@ -535,7 +540,7 @@ func (m *Model) syncInputCandidates() {
 	m.input.SetFileCandidates(m.sidebar.VisiblePaths())
 }
 
-func (m *Model) handleKeyMsg(msg tea.KeyMsg) []tea.Cmd {
+func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 
 	// Approval dialog takes precedence when waiting for approval
@@ -643,8 +648,8 @@ func (m *Model) cycleFocus(delta int) tea.Cmd {
 	return nil
 }
 
-func (m *Model) handleMouseMsg(msg tea.MouseMsg) {
-	if msg.Action != tea.MouseActionRelease || msg.Button != tea.MouseButtonLeft {
+func (m *Model) handleMouseMsg(msg tea.MouseReleaseMsg) {
+	if msg.Button != tea.MouseLeft {
 		return
 	}
 
@@ -812,7 +817,7 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 		lastMsg.SetStreaming(true)
 		m.messages = append(m.messages, lastMsg)
 		m.rb.setLastBlockStart(m.rb.len())
-		m.rb.updateLastBlock(lastMsg.View())
+		m.rb.updateLastBlock(lastMsg.View().Content)
 	} else if m.messages[len(m.messages)-1] != lastMsg {
 		// Last assistant is not the most recent message; fall back to full rebuild
 		lastMsg.AppendContent(chunk.Content)
@@ -822,7 +827,7 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 		return cmds
 	} else if m.rb.lastBlockStart() == 0 {
 		// After a full rebuild (e.g., resize), recompute the assistant's start position
-		m.rb.setLastBlockStart(m.rb.len() - len(lastMsg.View()))
+		m.rb.setLastBlockStart(m.rb.len() - len(lastMsg.View().Content))
 		if m.rb.lastBlockStart() < 0 {
 			m.rb.setLastBlockStart(0)
 		}
@@ -832,7 +837,7 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 	lastMsg.SetWidth(m.vpWidth())
 
 	// Incremental update: truncate back to lastBlockStart and re-render just the last message
-	m.rb.updateLastBlock(lastMsg.View())
+	m.rb.updateLastBlock(lastMsg.View().Content)
 
 	// Continue polling for the next chunk
 	cmds = append(cmds, m.readStreamChunk())
@@ -895,7 +900,7 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 func (m *Model) addMessage(msg *msgcomp.Message) {
 	msg.SetWidth(m.vpWidth())
 	m.messages = append(m.messages, msg)
-	m.rb.appendBlock(msg.View())
+	m.rb.appendBlock(msg.View().Content)
 }
 
 func (m *Model) clearMessages() {
@@ -907,7 +912,7 @@ func (m *Model) clearMessages() {
 func (m *Model) rebuildRenderedContent() {
 	blocks := make([]string, len(m.messages))
 	for i, msg := range m.messages {
-		blocks[i] = msg.View()
+		blocks[i] = msg.View().Content
 	}
 	m.rb.rebuild(blocks)
 	m.rebuildCount++
@@ -973,8 +978,8 @@ func overlayDialog(background string, dialog string, width int, height int) stri
 		}
 	}
 
-	dialogHeight := gloss.Height(dialog)
-	dialogWidth := gloss.Width(dialog)
+	dialogHeight := lipgloss.Height(dialog)
+	dialogWidth := lipgloss.Width(dialog)
 
 	startY := (height - dialogHeight) / 2
 	if startY < 0 {
@@ -996,11 +1001,11 @@ func overlayDialog(background string, dialog string, width int, height int) stri
 	}
 	dialog = strings.Join(dialogLines, "\n")
 
-	comp := gloss.NewCompositor(
-		gloss.NewLayer(strings.Join(bgLines, "\n")),
-		gloss.NewLayer(dialog).X(startX).Y(startY).Z(1),
+	comp := lipgloss.NewCompositor(
+		lipgloss.NewLayer(strings.Join(bgLines, "\n")),
+		lipgloss.NewLayer(dialog).X(startX).Y(startY).Z(1),
 	)
-	rendered := gloss.NewCanvas(width, height).Compose(comp).Render()
+	rendered := lipgloss.NewCanvas(width, height).Compose(comp).Render()
 
 	// Canvas.Render trims trailing whitespace. Re-normalize each line to the
 	// requested width x height so callers get a stable, predictable rectangle.

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -49,7 +49,7 @@ func TestSendMessage(t *testing.T) {
 	m.SetWidth(80)
 
 	m.SetValue("hello world")
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if cmd == nil {
 		t.Fatal("expected a command after sending")
@@ -78,7 +78,7 @@ func TestSendEmptyMessage(t *testing.T) {
 	m.SetWidth(80)
 
 	m.SetValue("   ")
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if cmd != nil {
 		t.Error("sending empty message should not produce a command")
@@ -99,7 +99,7 @@ func TestNewline(t *testing.T) {
 	m.SetWidth(80)
 
 	m.SetValue("line1")
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 
 	if cmd != nil {
 		t.Error("newline should not produce a command")
@@ -122,7 +122,7 @@ func TestHistoryNavigationUpDown(t *testing.T) {
 	// Send three messages
 	for _, content := range []string{"first", "second", "third"} {
 		m.SetValue(content)
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = updated.(*Model)
 	}
 
@@ -131,28 +131,28 @@ func TestHistoryNavigationUpDown(t *testing.T) {
 	}
 
 	// Press up - should show "third"
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = updated.(*Model)
 	if m.Value() != "third" {
 		t.Errorf("after up: value = %q, want %q", m.Value(), "third")
 	}
 
 	// Press up again - should show "second"
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = updated.(*Model)
 	if m.Value() != "second" {
 		t.Errorf("after up: value = %q, want %q", m.Value(), "second")
 	}
 
 	// Press down - should show "third"
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = updated.(*Model)
 	if m.Value() != "third" {
 		t.Errorf("after down: value = %q, want %q", m.Value(), "third")
 	}
 
 	// Press down again - should show draft (empty)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = updated.(*Model)
 	if m.Value() != "" {
 		t.Errorf("after down to draft: value = %q, want empty", m.Value())
@@ -168,17 +168,17 @@ func TestHistoryPreservesDraft(t *testing.T) {
 	m.SetWidth(80)
 
 	m.SetValue("sent")
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(*Model)
 
 	m.SetValue("draft")
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = updated.(*Model)
 	if m.Value() != "sent" {
 		t.Errorf("history up: value = %q, want %q", m.Value(), "sent")
 	}
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = updated.(*Model)
 	if m.Value() != "draft" {
 		t.Errorf("history down should restore draft, got %q", m.Value())
@@ -195,7 +195,7 @@ func TestHistoryCap(t *testing.T) {
 
 	for _, content := range []string{"a", "b", "c", "d"} {
 		m.SetValue(content)
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = updated.(*Model)
 	}
 
@@ -217,7 +217,7 @@ func TestHistoryDedupConsecutive(t *testing.T) {
 
 	for _, content := range []string{"hello", "hello", "world", "world", "world"} {
 		m.SetValue(content)
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = updated.(*Model)
 	}
 
@@ -239,7 +239,7 @@ func TestHistoryNoDedupNonConsecutive(t *testing.T) {
 
 	for _, content := range []string{"hello", "world", "hello"} {
 		m.SetValue(content)
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = updated.(*Model)
 	}
 
@@ -258,7 +258,7 @@ func TestHistoryCapZeroUnbounded(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		m.SetValue("msg")
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = updated.(*Model)
 	}
 
@@ -268,7 +268,7 @@ func TestHistoryCapZeroUnbounded(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		m.SetValue(string(rune('a' + i)))
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = updated.(*Model)
 	}
 
@@ -350,7 +350,7 @@ func TestSetWidth(t *testing.T) {
 	m := New(st, km, 100)
 	m.SetWidth(100)
 	view := m.View()
-	if view == "" {
+	if view.Content == "" {
 		t.Error("View() should not be empty after setting width")
 	}
 }
@@ -456,7 +456,7 @@ func TestMentionInsertCandidate(t *testing.T) {
 
 	m.SetValue("@cmd")
 	m.detectMention()
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	inp := updated.(*Model)
 
 	want := "@cmd/kimi-lite/main.go"
@@ -483,8 +483,8 @@ func TestMentionNavigateAndInsert(t *testing.T) {
 	m.SetValue("@cmd")
 	m.detectMention()
 
-	m.UpdateMsg(tea.KeyMsg{Type: tea.KeyTab})
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m.UpdateMsg(tea.KeyPressMsg{Code: tea.KeyTab})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	inp := updated.(*Model)
 
 	want := "@cmd/kimi-lite/root.go"
@@ -508,7 +508,7 @@ func TestMentionCloseWithEsc(t *testing.T) {
 		t.Fatal("expected completion active")
 	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	inp := updated.(*Model)
 
 	if inp.Completing() {
@@ -550,7 +550,7 @@ func TestMentionViewContainsPopup(t *testing.T) {
 	m.detectMention()
 
 	view := m.View()
-	if !strings.Contains(view, "cmd/kimi-lite/main.go") {
+	if !strings.Contains(view.Content, "cmd/kimi-lite/main.go") {
 		t.Error("expected View() to contain the completion candidate")
 	}
 }

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/git"

@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
@@ -380,9 +380,9 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 
 	var p teaProgram
 	if a.newProgram != nil {
-		p = a.newProgram(model, tea.WithContext(ctx), tea.WithAltScreen(), tea.WithMouseCellMotion())
+		p = a.newProgram(model, tea.WithContext(ctx))
 	} else {
-		p = tea.NewProgram(model, tea.WithContext(ctx), tea.WithAltScreen(), tea.WithMouseCellMotion())
+		p = tea.NewProgram(model, tea.WithContext(ctx))
 	}
 	_, err = p.Run()
 	if errors.Is(err, tea.ErrInterrupted) || errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {

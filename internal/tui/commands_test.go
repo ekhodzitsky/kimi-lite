@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
@@ -146,7 +146,7 @@ func TestCommandTitle_Error(t *testing.T) {
 	updated2, _ := model.Update(msg)
 	model2 := updated2.(*Model)
 
-	view := model2.vp.View()
+	view := model2.vp.View().Content
 	if !strings.Contains(view, "db failed") {
 		t.Errorf("viewport should show error, got %q", view)
 	}
@@ -258,7 +258,7 @@ func TestCommandFork_Error(t *testing.T) {
 	updated2, _ := model.Update(msg)
 	model2 := updated2.(*Model)
 
-	view := model2.vp.View()
+	view := model2.vp.View().Content
 	if !strings.Contains(view, "fork failed") {
 		t.Errorf("viewport should show error, got %q", view)
 	}

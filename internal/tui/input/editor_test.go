@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -169,7 +169,7 @@ func TestExternalEditorKeyReturnsCommand(t *testing.T) {
 	}
 	m.SetEditor(editor)
 
-	cmd := m.UpdateMsg(tea.KeyMsg{Type: tea.KeyCtrlG})
+	cmd := m.UpdateMsg(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 	if cmd == nil {
 		t.Fatal("expected a command for external editor key")
 	}

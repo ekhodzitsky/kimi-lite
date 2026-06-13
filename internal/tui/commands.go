@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"

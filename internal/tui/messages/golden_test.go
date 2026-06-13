@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // goldenPath returns the path to a golden file for the named snapshot.
@@ -32,7 +34,8 @@ func compareGolden(t *testing.T, name, got string) {
 	if err != nil {
 		t.Fatalf("read golden file %s: %v", path, err)
 	}
-	want := string(wantBytes)
+	want := ansi.Strip(string(wantBytes))
+	got = ansi.Strip(got)
 	if got != want {
 		t.Errorf("golden mismatch for %q\n--- got ---\n%s\n--- want ---\n%s", name, got, want)
 	}

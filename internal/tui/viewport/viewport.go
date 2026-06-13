@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 )
@@ -28,7 +28,7 @@ type Model struct {
 
 // New creates a new viewport model.
 func New(st *styles.Styles) *Model {
-	vp := viewport.New(80, 20)
+	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	vp.MouseWheelEnabled = true
 	return &Model{
 		vp:         vp,
@@ -53,15 +53,15 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "pgup":
-			m.vp.LineUp(pageScrollLines)
+			m.vp.ScrollUp(pageScrollLines)
 			m.autoScroll = false
 			m.scrollPercent = m.vp.ScrollPercent()
 			return tea.Batch(cmds...)
 		case "pgdown":
-			m.vp.LineDown(pageScrollLines)
+			m.vp.ScrollDown(pageScrollLines)
 			m.checkAutoScroll()
 			m.scrollPercent = m.vp.ScrollPercent()
 			return tea.Batch(cmds...)
@@ -76,22 +76,22 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			m.scrollPercent = m.vp.ScrollPercent()
 			return tea.Batch(cmds...)
 		case "up":
-			m.vp.LineUp(1)
+			m.vp.ScrollUp(1)
 			m.autoScroll = false
 			m.scrollPercent = m.vp.ScrollPercent()
 			return tea.Batch(cmds...)
 		case "down":
-			m.vp.LineDown(1)
+			m.vp.ScrollDown(1)
 			m.checkAutoScroll()
 			m.scrollPercent = m.vp.ScrollPercent()
 			return tea.Batch(cmds...)
 		}
-	case tea.MouseMsg:
-		if msg.Button == tea.MouseButtonWheelUp && msg.Action == tea.MouseActionPress {
-			m.vp.LineUp(mouseWheelScrollLines)
+	case tea.MouseWheelMsg:
+		if msg.Button == tea.MouseWheelUp {
+			m.vp.ScrollUp(mouseWheelScrollLines)
 			m.autoScroll = false
-		} else if msg.Button == tea.MouseButtonWheelDown && msg.Action == tea.MouseActionPress {
-			m.vp.LineDown(mouseWheelScrollLines)
+		} else if msg.Button == tea.MouseWheelDown {
+			m.vp.ScrollDown(mouseWheelScrollLines)
 			m.checkAutoScroll()
 		}
 	}
@@ -104,7 +104,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 }
 
 // View implements tea.Model.
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
 	content := m.vp.View()
 	if m.scrollIndicatorVisible() {
 		indicator := m.scrollIndicator()
@@ -116,15 +116,15 @@ func (m *Model) View() string {
 		}
 		content = strings.Join(lines, "\n")
 	}
-	return content
+	return tea.NewView(content)
 }
 
 // SetSize sets the viewport dimensions.
 func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.vp.Width = w
-	m.vp.Height = h
+	m.vp.SetWidth(w)
+	m.vp.SetHeight(h)
 }
 
 // SetContent sets the entire content string.

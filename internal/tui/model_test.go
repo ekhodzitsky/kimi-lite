@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
@@ -452,7 +452,7 @@ func TestQuitKey(t *testing.T) {
 	session := &api.Session{ID: "test", Path: "/tmp"}
 	m, _ := New(cfg, session, context.Background())
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if cmd == nil {
 		t.Fatal("expected quit command")
 	}
@@ -472,7 +472,7 @@ func TestCancelKey(t *testing.T) {
 	m, _ := New(cfg, session, context.Background())
 	m.setState(api.TurnThinking)
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	model := updated.(*Model)
 
 	if model.state != api.TurnIdle {
@@ -491,7 +491,7 @@ func TestToggleSidebar(t *testing.T) {
 	m.updateLayout()
 
 	visibleBefore := m.sidebar.Visible()
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
 	model := updated.(*Model)
 
 	if model.sidebar.Visible() == visibleBefore {
@@ -569,7 +569,7 @@ func TestView(t *testing.T) {
 	m, _ := New(cfg, session, context.Background())
 
 	// Before resize, should show loading
-	view := m.View()
+	view := m.View().Content
 	if view != "Loading..." {
 		t.Errorf("View() = %q, want 'Loading...'", view)
 	}
@@ -578,7 +578,7 @@ func TestView(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
-	view = m.View()
+	view = m.View().Content
 	if view == "" {
 		t.Error("View() should not be empty after resize")
 	}
@@ -771,12 +771,12 @@ func TestTurnWithToolCallRendersToolCallAndResult(t *testing.T) {
 				t.Errorf("tool result output = %q, want %q", toolCallMsg.ToolResult.Output, "file content")
 			}
 			// The result should be visible immediately, before any follow-up content.
-			view := model.vp.View()
+			view := model.vp.View().Content
 			if strings.Contains(view, "pending") {
 				t.Errorf("viewport should not contain pending status after result, got %q", view)
 			}
-			if !strings.Contains(toolCallMsg.View(), "done") {
-				t.Errorf("tool call message should render done status, got %q", toolCallMsg.View())
+			if !strings.Contains(toolCallMsg.View().Content, "done") {
+				t.Errorf("tool call message should render done status, got %q", toolCallMsg.View().Content)
 			}
 		}
 	}
@@ -789,12 +789,12 @@ func TestTurnWithToolCallRendersToolCallAndResult(t *testing.T) {
 		t.Fatal("tool call message not found")
 	}
 
-	view := model.vp.View()
+	view := model.vp.View().Content
 	if !strings.Contains(view, "read_file") {
 		t.Errorf("viewport should contain tool name, got %q", view)
 	}
-	if !strings.Contains(toolCallMsg.View(), "done") {
-		t.Errorf("tool call message should render done status, got %q", toolCallMsg.View())
+	if !strings.Contains(toolCallMsg.View().Content, "done") {
+		t.Errorf("tool call message should render done status, got %q", toolCallMsg.View().Content)
 	}
 }
 
@@ -866,7 +866,7 @@ func TestYoloToggle(t *testing.T) {
 	})
 
 	// First press: Auto -> Yolo
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+	m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	if m.approvalMode != 2 {
 		t.Errorf("approvalMode = %d, want 2 (ModeYolo)", m.approvalMode)
 	}
@@ -875,7 +875,7 @@ func TestYoloToggle(t *testing.T) {
 	}
 
 	// Second press: Yolo -> Auto
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+	m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 	if m.approvalMode != 1 {
 		t.Errorf("approvalMode = %d, want 1 (ModeAuto)", m.approvalMode)
 	}
@@ -932,7 +932,7 @@ func TestDirtyFlag_NavigationDoesNotRefreshViewport(t *testing.T) {
 	}
 
 	// Navigation key should NOT set dirty and should NOT refresh viewport
-	updated2, _ := model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated2, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	model2 := updated2.(*Model)
 	if model2.rb.isDirty() {
 		t.Error("dirty should remain false after navigation key")
@@ -953,14 +953,14 @@ func TestLayoutGeometryConsistency(t *testing.T) {
 	l := m.layout()
 
 	// Click at vpHeight boundary should focus input
-	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 50, Y: l.vpHeight})
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft, X: 50, Y: l.vpHeight})
 	model := updated.(*Model)
 	if model.focused != focusInput {
 		t.Errorf("click at vpHeight boundary should focus input, got %d", model.focused)
 	}
 
 	// Click just above should focus viewport
-	updated2, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 50, Y: l.vpHeight - 1})
+	updated2, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft, X: 50, Y: l.vpHeight - 1})
 	model2 := updated2.(*Model)
 	if model2.focused != focusViewport {
 		t.Errorf("click just above vpHeight should focus viewport, got %d", model2.focused)
@@ -986,7 +986,7 @@ func TestRawModeToggle_FocusedMessagePath(t *testing.T) {
 
 	// Focus the viewport and press "r".
 	model.focused = focusViewport
-	updated2, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated2, _ := model.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	model2 := updated2.(*Model)
 
 	if len(model2.messages) != 1 {
@@ -1014,7 +1014,7 @@ func TestRawModeToggle_InputFocusIgnored(t *testing.T) {
 	model := updated.(*Model)
 
 	// Input is focused by default; pressing "r" should not toggle raw mode.
-	updated2, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated2, _ := model.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	model2 := updated2.(*Model)
 
 	if len(model2.messages) != 1 {
@@ -1046,7 +1046,7 @@ func TestDirtyFlag_StreamChunkSetsDirty(t *testing.T) {
 	// Stream chunk should trigger a viewport refresh
 	updated2, _ := model.Update(StreamChunkMsg{Chunk: api.StreamChunk{Content: "world"}})
 	model2 := updated2.(*Model)
-	view := model2.vp.View()
+	view := model2.vp.View().Content
 	if !strings.Contains(view, "world") {
 		t.Errorf("viewport view should contain stream chunk content, got %q", view)
 	}
@@ -1602,7 +1602,7 @@ func TestDiffCommand_RendersGitDiffOutput(t *testing.T) {
 	updated2, _ := model.Update(msg)
 	model2 := updated2.(*Model)
 
-	view := model2.vp.View()
+	view := model2.vp.View().Content
 	if !strings.Contains(view, "added line") {
 		t.Errorf("viewport should contain diff output, got %q", view)
 	}
@@ -1629,7 +1629,7 @@ func TestDiffCommand_NoGitProviderShowsError(t *testing.T) {
 	updated2, _ := model.Update(msg)
 	model2 := updated2.(*Model)
 
-	view := model2.vp.View()
+	view := model2.vp.View().Content
 	if !strings.Contains(view, "no git provider") {
 		t.Errorf("viewport should show no-git-provider error, got %q", view)
 	}
@@ -1658,7 +1658,7 @@ func TestDiffCommand_EmptyDiffShowsError(t *testing.T) {
 	updated2, _ := model.Update(msg)
 	model2 := updated2.(*Model)
 
-	view := model2.vp.View()
+	view := model2.vp.View().Content
 	if !strings.Contains(view, "no diff") {
 		t.Errorf("viewport should show no-diff message, got %q", view)
 	}
@@ -1734,7 +1734,7 @@ func TestMCPCommand_ListsTools(t *testing.T) {
 	updated2, _ := model.Update(msg)
 	model2 := updated2.(*Model)
 
-	view := model2.vp.View()
+	view := model2.vp.View().Content
 	if !strings.Contains(view, "tool-a") {
 		t.Errorf("viewport should contain tool-a, got %q", view)
 	}
@@ -1764,7 +1764,7 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 	updated2, _ := model.Update(msg)
 	model2 := updated2.(*Model)
 
-	view := model2.vp.View()
+	view := model2.vp.View().Content
 	if !strings.Contains(view, "No MCP tools connected") {
 		t.Errorf("viewport should show disconnected message, got %q", view)
 	}
@@ -1785,7 +1785,7 @@ func TestGoldenViewIdle(t *testing.T) {
 	m.height = 24
 	m.updateLayout()
 
-	compareGolden(t, "view_idle", m.View())
+	compareGolden(t, "view_idle", m.View().Content)
 }
 
 func newGoldenModel(t *testing.T) *Model {
@@ -1806,7 +1806,7 @@ func TestGoldenViewThinking(t *testing.T) {
 	m := newGoldenModel(t)
 	updated, _ := m.Update(StateChangeMsg{State: api.TurnThinking})
 	m = updated.(*Model)
-	compareGolden(t, "view_thinking", m.View())
+	compareGolden(t, "view_thinking", m.View().Content)
 }
 
 func TestGoldenViewToolCalls(t *testing.T) {
@@ -1814,14 +1814,14 @@ func TestGoldenViewToolCalls(t *testing.T) {
 	m.SetToolCount(3)
 	updated, _ := m.Update(StateChangeMsg{State: api.TurnToolCalls})
 	m = updated.(*Model)
-	compareGolden(t, "view_tool_calls", m.View())
+	compareGolden(t, "view_tool_calls", m.View().Content)
 }
 
 func TestGoldenViewError(t *testing.T) {
 	m := newGoldenModel(t)
 	updated, _ := m.Update(ErrorMsg{Err: errors.New("simulated failure")})
 	m = updated.(*Model)
-	compareGolden(t, "view_error", m.View())
+	compareGolden(t, "view_error", m.View().Content)
 }
 
 func TestGoldenViewWaitingApproval(t *testing.T) {
@@ -1833,5 +1833,5 @@ func TestGoldenViewWaitingApproval(t *testing.T) {
 		RequestID: 1,
 	})
 	m = updated.(*Model)
-	compareGolden(t, "view_waiting_approval", m.View())
+	compareGolden(t, "view_waiting_approval", m.View().Content)
 }

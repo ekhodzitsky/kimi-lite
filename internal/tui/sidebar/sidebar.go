@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 )
@@ -117,7 +117,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // UpdateMsg processes a message and returns the resulting command.
 func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if !m.visible {
 			return nil
 		}
@@ -135,21 +135,19 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		case " ":
 			m.toggleCurrent()
 		}
-	case tea.MouseMsg:
+	case tea.MouseReleaseMsg:
 		if !m.visible {
 			return nil
 		}
-		if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
-			m.handleClick(msg.Y)
-		}
+		m.handleClick(msg.Y)
 	}
 	return nil
 }
 
 // View implements tea.Model.
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
 	if !m.visible {
-		return ""
+		return tea.NewView("")
 	}
 
 	var b strings.Builder
@@ -172,7 +170,7 @@ func (m *Model) View() string {
 	if len(content) > 0 && content[len(content)-1] == '\n' {
 		content = content[:len(content)-1]
 	}
-	return m.styles.Sidebar.Width(m.width).Height(m.height).Render(content)
+	return tea.NewView(m.styles.Sidebar.Width(m.width).Height(m.height).Render(content))
 }
 
 // SetSize sets the sidebar dimensions.

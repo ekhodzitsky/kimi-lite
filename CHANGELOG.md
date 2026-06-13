@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-06-13
+
+### Changed
+
+- **Full Charm v2 migration** — migrated the entire TUI from `github.com/charmbracelet/*` v1 to `charm.land/*/v2` for `bubbletea`, `bubbles`, `lipgloss`, and `glamour`. This removes the mixed v1/v2 dependency graph and aligns the project with the latest Charm ecosystem.
+
 ## [0.2.6] - 2026-06-13
 
 ### Changed
@@ -99,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `--debug` flag, sanitized error logging, structured `slog` output.
 - **Cross-platform** — static binary with `CGO_ENABLED=0`, supports macOS, Linux (glibc & musl), ARM64.
 
+[0.2.7]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.7
 [0.2.6]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.6
 [0.2.5]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.5
 [0.2.4]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.4
