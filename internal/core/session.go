@@ -135,6 +135,62 @@ func (sm *SessionManager) ClearMessages(ctx context.Context, id string) error {
 	return nil
 }
 
+// Rename updates the name of the session with the given ID.
+func (sm *SessionManager) Rename(ctx context.Context, id string, name string) error {
+	sess, err := sm.store.GetSession(ctx, id)
+	if err != nil {
+		return fmt.Errorf("get session: %w", err)
+	}
+	sess.Name = name
+	if err := sm.store.UpdateSession(ctx, sess); err != nil {
+		return fmt.Errorf("update session: %w", err)
+	}
+	return nil
+}
+
+// Fork creates a new session copied from the source session, including all
+// messages. If name is empty, a default name is derived from the source.
+// The forked session becomes the current session.
+func (sm *SessionManager) Fork(ctx context.Context, sourceID string, name string) (*api.Session, error) {
+	source, err := sm.store.GetSession(ctx, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("get source session: %w", err)
+	}
+
+	msgs, err := sm.store.GetMessages(ctx, sourceID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("get messages: %w", err)
+	}
+
+	if name == "" {
+		if source.Name != "" {
+			name = fmt.Sprintf("Fork of %s", source.Name)
+		} else {
+			name = fmt.Sprintf("Fork of %s", source.ID)
+		}
+	}
+
+	forked, err := sm.store.CreateSession(ctx, source.Path)
+	if err != nil {
+		return nil, fmt.Errorf("create session: %w", err)
+	}
+	forked.Name = name
+	if err := sm.store.UpdateSession(ctx, forked); err != nil {
+		return nil, fmt.Errorf("update forked session: %w", err)
+	}
+
+	for _, msg := range msgs {
+		if err := sm.store.AppendMessage(ctx, forked.ID, msg); err != nil {
+			return nil, fmt.Errorf("append message: %w", err)
+		}
+	}
+
+	sm.setCurrent(forked.ID)
+	forked.Path = resolvePortablePath(forked.Path)
+	forked.Messages = msgs
+	return forked, nil
+}
+
 // CurrentSessionID returns the ID of the current session.
 func (sm *SessionManager) CurrentSessionID() string {
 	sm.mu.RLock()
