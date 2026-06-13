@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-13
+
+### Fixed
+
+- **Process group cleanup** — `shell` and lifecycle `hooks` now kill the entire process group on timeout or cancellation, so child processes spawned by shells (e.g. `sleep`) are terminated instead of outliving the parent.
+
 ## [0.2.0] - 2026-06-13
 
 ### Added
@@ -55,5 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `--debug` flag, sanitized error logging, structured `slog` output.
 - **Cross-platform** — static binary with `CGO_ENABLED=0`, supports macOS, Linux (glibc & musl), ARM64.
 
+[0.2.1]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.1
 [0.2.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.1.0
