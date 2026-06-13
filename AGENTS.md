@@ -28,12 +28,13 @@ pkg/api/                # Public types and interfaces
 ### `pkg/api`
 Public types and interfaces used across all packages. **This is the contract layer.**
 
-Key interfaces:
+Key interfaces and types:
 - `LLMClient` — Chat, ChatStream, Models
 - `Store` — Session/message/turn persistence
 - `ToolExecutor` — Execute, Definitions
 - `ApprovalGate` — ShouldAutoApprove
 - `MCPClient` — Connect, ListTools, CallTool
+- `MCPServerConfig` — direct MCP server configuration (stdio and http transports)
 - `GitProvider` — Status, Diff, IsRepo
 - `WebSearcher` — Search
 
@@ -92,12 +93,17 @@ Bubble Tea terminal UI.
 - `styles` — Lipgloss themes
 
 ### `internal/mcp`
-MCP client connecting to mcp-guard.
+MCP client implementation supporting both the legacy `mcp-guard` stdio path and
+ direct per-server configuration.
 
-- `NewClientFromConfig(cfg)` — creates client with stdio transport
+- `NewClient(transport)` — creates a client from any `Transport`
+- `NewClientFromConfig(cfg)` — legacy stdio client connected to `mcp-guard`
+- `NewClientFromServerConfig(cfg, httpClient)` — direct stdio or http client from `api.MCPServerConfig`
+- `NewHTTPTransport(url, headers, bearerEnv, httpClient)` — JSON-RPC over HTTP POST
+- `NewMultiClient(clients, configs)` — aggregates multiple MCP clients, disambiguates duplicate tool names by server key, and routes tool calls
 - `Connect()` — performs MCP initialize handshake
 - `ListTools()` / `CallTool()` — tool operations
-- Graceful degradation if mcp-guard not found
+- Graceful degradation if mcp-guard or a configured server is unavailable
 
 ### `internal/git`
 Git integration via shelling out to `git`.
@@ -174,11 +180,21 @@ make fmt vet
 
 ## MCP Integration
 
-kimi-lite connects to mcp-guard via stdio JSON-RPC:
-1. Attempts to find `mcp-guard` in PATH
-2. If found, starts subprocess and connects
-3. If not found, runs with built-in tools only
-4. Uses same TOML config format as mcp-guard
+kimi-lite supports two MCP integration modes:
+
+1. **Legacy mcp-guard path** (used when `cfg.MCPServers` is empty):
+   - Attempts to find `mcp-guard` in PATH
+   - If found, starts the subprocess and connects via stdio JSON-RPC
+   - If not found, runs with built-in tools only
+   - Uses the same TOML config format as mcp-guard
+
+2. **Direct MCP server configuration** (used when `cfg.MCPServers` is populated):
+   - Each server is configured via `[mcp_servers.<name>]` tables in `config.toml`
+   - Supported transports: `stdio` (`command`, `args`, `env`, `cwd`) and `http` (`url`, `headers`, `bearer_token_env_var`)
+   - Per-server `enabled`, `startup_timeout_ms`, `tool_timeout_ms`, `enabled_tools`, and `disabled_tools`
+   - HTTP transports use `netutil.SecureHTTPClient()` for SSRF-hardened outbound requests
+   - Multiple servers are aggregated by `mcp.MultiClient`; duplicate tool names are prefixed with the server key
+   - Unavailable servers are logged and skipped; the app continues with the remaining servers
 
 ## Branch and Commit Conventions
 
