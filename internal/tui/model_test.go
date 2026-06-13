@@ -1703,3 +1703,21 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 		t.Errorf("viewport should show disconnected message, got %q", view)
 	}
 }
+
+// TestGoldenViewIdle is a smoke golden test for the deterministic TUI harness.
+// It renders the idle state with the sidebar hidden so the output is stable.
+func TestGoldenViewIdle(t *testing.T) {
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: t.TempDir()}
+	m, err := New(cfg, session, context.Background())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	m.sidebar.Toggle()
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	compareGolden(t, "view_idle", m.View())
+}
