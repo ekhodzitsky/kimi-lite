@@ -501,6 +501,68 @@ func TestSQLite_ReplaceMessages(t *testing.T) {
 		}
 	})
 
+	t.Run("preserves all message fields", func(t *testing.T) {
+		createdAt := time.Date(2024, 6, 15, 12, 30, 0, 0, time.UTC)
+		replaced := []api.Message{
+			{
+				ID:        "full-1",
+				Role:      api.RoleAssistant,
+				Content:   "calling tool",
+				CreatedAt: createdAt,
+				ToolCalls: []api.ToolCall{
+					{ID: "tc1", Name: "read_file", Arguments: `{"path":"foo.txt"}`},
+					{ID: "tc2", Name: "grep", Arguments: `{"pattern":"bar"}`},
+				},
+			},
+			{
+				ID:         "full-2",
+				Role:       api.RoleTool,
+				Content:    "tool result",
+				ToolCallID: "tc1",
+				CreatedAt:  createdAt.Add(time.Second),
+			},
+		}
+		if err := s.ReplaceMessages(ctx, sess.ID, replaced); err != nil {
+			t.Fatalf("replace messages: %v", err)
+		}
+
+		msgs, err := s.GetMessages(ctx, sess.ID, 0)
+		if err != nil {
+			t.Fatalf("get messages: %v", err)
+		}
+		if len(msgs) != len(replaced) {
+			t.Fatalf("expected %d messages, got %d", len(replaced), len(msgs))
+		}
+
+		got := msgs[0]
+		if got.ID != "full-1" || got.Role != api.RoleAssistant || got.Content != "calling tool" {
+			t.Errorf("assistant message mismatch: %+v", got)
+		}
+		if !got.CreatedAt.Equal(createdAt) {
+			t.Errorf("assistant created_at = %v, want %v", got.CreatedAt, createdAt)
+		}
+		if len(got.ToolCalls) != 2 {
+			t.Fatalf("expected 2 tool calls, got %d", len(got.ToolCalls))
+		}
+		if got.ToolCalls[0].ID != "tc1" || got.ToolCalls[0].Name != "read_file" || got.ToolCalls[0].Arguments != `{"path":"foo.txt"}` {
+			t.Errorf("tool call 0 mismatch: %+v", got.ToolCalls[0])
+		}
+		if got.ToolCalls[1].ID != "tc2" || got.ToolCalls[1].Name != "grep" || got.ToolCalls[1].Arguments != `{"pattern":"bar"}` {
+			t.Errorf("tool call 1 mismatch: %+v", got.ToolCalls[1])
+		}
+
+		gotTool := msgs[1]
+		if gotTool.ID != "full-2" || gotTool.Role != api.RoleTool || gotTool.Content != "tool result" {
+			t.Errorf("tool message mismatch: %+v", gotTool)
+		}
+		if gotTool.ToolCallID != "tc1" {
+			t.Errorf("tool_call_id = %q, want %q", gotTool.ToolCallID, "tc1")
+		}
+		if !gotTool.CreatedAt.Equal(createdAt.Add(time.Second)) {
+			t.Errorf("tool created_at = %v, want %v", gotTool.CreatedAt, createdAt.Add(time.Second))
+		}
+	})
+
 	t.Run("empty slice clears messages", func(t *testing.T) {
 		if err := s.ReplaceMessages(ctx, sess.ID, []api.Message{}); err != nil {
 			t.Fatalf("replace messages with empty slice: %v", err)
