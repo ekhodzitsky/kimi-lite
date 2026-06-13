@@ -18,6 +18,7 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
 	"github.com/ekhodzitsky/kimi-lite/internal/llm"
 	"github.com/ekhodzitsky/kimi-lite/internal/mcp"
+	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
 	"github.com/ekhodzitsky/kimi-lite/internal/store"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -113,15 +114,58 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	var executors []api.ToolExecutor
 	executors = append(executors, builtInExec)
 
-	mcpCli := mcp.NewClientFromConfig(cfg.MCP)
-	mcpConnectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := mcpCli.Connect(mcpConnectCtx); err != nil {
-		logger.Warn("mcp-guard not available, running without MCP tools", "error", err)
+	hasDirectServers := false
+	for _, srv := range cfg.MCPServers {
+		if srv.Enabled {
+			hasDirectServers = true
+			break
+		}
+	}
+
+	if hasDirectServers {
+		clients := make(map[string]api.MCPClient)
+		configs := make(map[string]api.MCPServerConfig)
+		for name, srv := range cfg.MCPServers {
+			if !srv.Enabled {
+				continue
+			}
+			cli, err := newMCPClientForServer(srv)
+			if err != nil {
+				logger.Warn("failed to create mcp client", "server", name, "error", err)
+				continue
+			}
+			startup := time.Duration(srv.StartupTimeoutMs) * time.Millisecond
+			if startup <= 0 {
+				startup = 5 * time.Second
+			}
+			connectCtx, cancel := context.WithTimeout(context.Background(), startup)
+			if err := cli.Connect(connectCtx); err != nil {
+				logger.Warn("mcp server unavailable", "server", name, "error", err)
+				cancel()
+				_ = cli.Close()
+				continue
+			}
+			cancel()
+			clients[name] = cli
+			configs[name] = srv
+		}
+		if len(clients) > 0 {
+			multi := mcp.NewMultiClient(clients, configs)
+			mcpClient = multi
+			executors = append(executors, mcp.NewToolExecutor(multi))
+			logger.Info("mcp servers connected", "count", len(clients))
+		}
 	} else {
-		mcpClient = mcpCli
-		executors = append(executors, mcp.NewToolExecutor(mcpClient))
-		logger.Info("mcp-guard connected")
+		mcpCli := mcp.NewClientFromConfig(cfg.MCP)
+		mcpConnectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := mcpCli.Connect(mcpConnectCtx); err != nil {
+			logger.Warn("mcp-guard not available, running without MCP tools", "error", err)
+		} else {
+			mcpClient = mcpCli
+			executors = append(executors, mcp.NewToolExecutor(mcpClient))
+			logger.Info("mcp-guard connected")
+		}
 	}
 
 	// Create composite tool executor
@@ -345,6 +389,23 @@ func (a *App) ImportSession(ctx context.Context, export *api.SessionExport) (*ap
 		}
 	}
 	return created, nil
+}
+
+// newMCPClientForServer creates an api.MCPClient for a single direct server
+// configuration. It is a package-level variable so tests can inject fakes.
+var newMCPClientForServer = func(cfg api.MCPServerConfig) (api.MCPClient, error) {
+	switch cfg.Transport {
+	case api.MCPTransportStdio:
+		tr := mcp.NewStdioTransport(cfg.Command, cfg.Args...)
+		tr.SetEnv(cfg.Env)
+		tr.SetCWD(cfg.CWD)
+		return mcp.NewClient(tr), nil
+	case api.MCPTransportHTTP:
+		tr := mcp.NewHTTPTransport(cfg.URL, cfg.Headers, cfg.BearerTokenEnvVar, netutil.SecureHTTPClient())
+		return mcp.NewClient(tr), nil
+	default:
+		return nil, fmt.Errorf("unsupported mcp transport %q", cfg.Transport)
+	}
 }
 
 // Close gracefully shuts down all resources.
