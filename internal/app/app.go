@@ -14,11 +14,14 @@ import (
 
 	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
+	"github.com/ekhodzitsky/kimi-lite/internal/core/hooks"
+	"github.com/ekhodzitsky/kimi-lite/internal/core/subagents"
 	"github.com/ekhodzitsky/kimi-lite/internal/git"
 	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
 	"github.com/ekhodzitsky/kimi-lite/internal/llm"
 	"github.com/ekhodzitsky/kimi-lite/internal/mcp"
 	"github.com/ekhodzitsky/kimi-lite/internal/netutil"
+	"github.com/ekhodzitsky/kimi-lite/internal/observability"
 	"github.com/ekhodzitsky/kimi-lite/internal/store"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -45,6 +48,8 @@ type App struct {
 	tuiModel       *tui.Model
 	logger         *slog.Logger
 	newProgram     func(model tea.Model, opts ...tea.ProgramOption) teaProgram
+	pprofCancel    context.CancelFunc
+	skillsContent  string
 }
 
 // New creates a fully wired App from configuration.
@@ -56,6 +61,9 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel,
 	}))
+
+	// Create metrics collector.
+	metrics := observability.NewCollector()
 
 	// Ensure DB directory exists
 	dbDir := filepath.Dir(cfg.Session.DBPath)
@@ -69,11 +77,18 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 
-	// Create LLM client with optional fallback.
-	var llmClient api.LLMClient = llm.NewClient(cfg.LLM, nil)
-	if cfg.LLM.Fallback != nil {
-		fallbackClient := llm.NewClient(*cfg.LLM.Fallback, nil)
-		llmClient = llm.NewFallbackClient(llmClient, fallbackClient)
+	// Create LLM client from provider/model-table configuration.
+	llmClient, err := llm.NewClientFromConfig(cfg, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create llm client: %w", err)
+	}
+	if mc, ok := llmClient.(interface{ SetMetricsCollector(api.MetricsCollector) }); ok {
+		mc.SetMetricsCollector(metrics)
+	}
+
+	resolvedModel, err := llm.ResolveModelFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("resolve model: %w", err)
 	}
 
 	// Determine sandbox root (current working directory)
@@ -92,9 +107,15 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		webSearcher = ws
 	}
 
+	// Discover user skills from the config directory.
+	configDir, _ := config.EnsureConfigDir()
+	skillsDir := filepath.Join(configDir, "skills")
+	allSkills, _ := core.DiscoverSkills(skillsDir)
+	skills := core.FilterSkills(allSkills, cfg.Behavior.Skills)
+	skillsContent := core.LoadSkillContent(skills)
+
 	// Create built-in tool executor (nil httpClient forces secure default).
 	// Protect the app's own config and DB paths regardless of sandbox.
-	configDir, _ := config.EnsureConfigDir()
 	configPath := filepath.Join(configDir, "config.toml")
 	builtInExec, err := core.NewBuiltInToolExecutor(core.ToolExecutorConfig{
 		ShellTimeout:   cfg.Behavior.ShellTimeout,
@@ -103,11 +124,22 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		ProtectedPaths: []string{configPath, cfg.Session.DBPath},
 		PassEnv:        cfg.Behavior.PassEnv,
 		WebSearcher:    webSearcher,
+		VideoExtractor: core.NewVideoExtractor(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create built-in tool executor: %w", err)
 	}
 	builtInExec.SetAllowShell(cfg.Behavior.AllowShell)
+	builtInExec.SetMetricsCollector(metrics)
+
+	// Wire the ephemeral subagent runner into the built-in tool executor.
+	// Subagents receive a restricted tool set and do not persist sessions.
+	subRunner := subagents.NewRunner(llmClient, builtInExec, sandboxRoot)
+	builtInExec.SetSubagentRunner(subRunner)
+
+	// Wire lifecycle hooks into components that emit events.
+	hookRunner := hooks.NewRunner(cfg.Hooks)
+	builtInExec.SetHookRunner(hookRunner)
 
 	// Attempt MCP connection (non-fatal)
 	var mcpClient api.MCPClient
@@ -187,15 +219,25 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	// Create approval gate (start in Auto mode)
 	approval := core.NewApprovalGate(core.ModeAuto, validatedAutoApprove, isReadOnly, cfg.Permission.Rules)
 
+	// Attach risk-aware scoring so destructive or escaping operations are not
+	// silently auto-approved.
+	riskEval := core.NewRiskEvaluator(cfg.Permission.RiskRules, sandboxRoot)
+	approval.SetRiskEvaluator(riskEval, cfg.Permission.RiskThreshold)
+
 	// Create session manager
 	sessionMgr := core.NewSessionManager(st)
+	sessionMgr.SetHookRunner(hookRunner)
+	sessionMgr.SetMetricsCollector(metrics)
 
 	// Create turn manager
 	turnMgr := core.NewTurnManager(llmClient, toolExec, approval, st, &configProvider{cfg: cfg})
+	turnMgr.SetHookRunner(hookRunner)
+	turnMgr.SetMetricsCollector(metrics)
 
 	// Create context compressor
-	modelInfo := llm.LookupModel(cfg.LLM.Model)
+	modelInfo := llm.LookupModel(resolvedModel)
 	compressor := core.NewContextCompressor(llmClient, modelInfo.ContextWindow, cfg.LLM.Timeout)
+	compressor.SetTokenEstimator(core.NewHeuristicTokenEstimator())
 
 	application := &App{
 		cfg:            cfg,
@@ -209,6 +251,18 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		compressor:     compressor,
 		mcpClient:      mcpClient,
 		logger:         logger,
+		skillsContent:  skillsContent,
+	}
+
+	// Start runtime profiling server if requested.
+	if cfg.PprofAddr != "" {
+		pprofCtx, pprofCancel := context.WithCancel(context.Background())
+		application.pprofCancel = pprofCancel
+		go func() {
+			if err := observability.StartPprof(pprofCtx, cfg.PprofAddr); err != nil {
+				logger.Warn("pprof server exited", "addr", cfg.PprofAddr, "error", err)
+			}
+		}()
 	}
 
 	return application, nil
@@ -275,9 +329,13 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	model.SetApprovalMode(int(a.approvalGate.GetMode()))
 
 	// Set context stats from model info
-	modelInfo := llm.LookupModel(a.cfg.LLM.Model)
+	resolvedModel, err := llm.ResolveModelFromConfig(a.cfg)
+	if err != nil {
+		return fmt.Errorf("resolve model: %w", err)
+	}
+	modelInfo := llm.LookupModel(resolvedModel)
 	model.SetContextStats(0, modelInfo.ContextWindow)
-	model.SetModelName(a.cfg.LLM.Model)
+	model.SetModelName(resolvedModel)
 
 	// Count tools
 	model.SetToolCount(len(a.toolExecutor.Definitions(ctx)))
@@ -312,7 +370,7 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	if appendErr := a.store.AppendMessage(ctx, session.ID, api.Message{
 		ID:        idgen.GenerateID(),
 		Role:      api.RoleSystem,
-		Content:   systemPrompt(session.Path),
+		Content:   systemPrompt(session.Path, a.skillsContent),
 		CreatedAt: now.Add(time.Millisecond),
 	}); appendErr != nil {
 		a.logger.Warn("failed to append system message", "error", appendErr)
@@ -411,6 +469,11 @@ var newMCPClientForServer = func(cfg api.MCPServerConfig) (api.MCPClient, error)
 // Close gracefully shuts down all resources.
 func (a *App) Close() error {
 	var errs []error
+
+	// Stop the profiling server if it was started.
+	if a.pprofCancel != nil {
+		a.pprofCancel()
+	}
 
 	// Cancel in-flight turns before waiting so blocked turns abort promptly.
 	if a.turnManager != nil {

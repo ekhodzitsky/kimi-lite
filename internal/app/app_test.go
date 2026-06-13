@@ -100,7 +100,7 @@ func TestConfigProvider_Get(t *testing.T) {
 func TestSystemPrompt_ContainsToolNames(t *testing.T) {
 	t.Parallel()
 
-	prompt := systemPrompt("/tmp/test-dir")
+	prompt := systemPrompt("/tmp/test-dir", "")
 
 	requiredTools := []string{"read_file", "glob", "grep", "list_directory", "write_file", "str_replace_file", "shell", "fetch_url"}
 	for _, tool := range requiredTools {
@@ -1122,5 +1122,151 @@ func TestApp_Run_AppendsSystemMessage(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a system message containing the agent prompt, got %+v", msgs)
+	}
+}
+
+func TestApp_New_WiresHookRunner(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	dbPath := filepath.Join(tmpDir, "sessions.db")
+
+	cfg := &api.Config{
+		LLM: api.LLMConfig{
+			Provider: "moonshot",
+			APIKey:   "test-key",
+			Model:    "kimi-k2.5",
+			BaseURL:  "https://api.moonshot.cn/v1",
+			Timeout:  60 * time.Second,
+		},
+		Behavior: api.BehaviorConfig{
+			AutoApprove:  []string{"read_file"},
+			ShellTimeout: 30 * time.Second,
+			MaxTurns:     50,
+		},
+		Session: api.SessionConfig{
+			DBPath:     dbPath,
+			MaxHistory: 100,
+		},
+		MCP: api.MCPConfig{
+			GuardCommand: "mcp-guard",
+		},
+		UI: api.UIConfig{
+			Theme: "dark",
+		},
+		Hooks: []api.HookConfig{
+			{Event: api.HookToolCall, Command: "true"},
+		},
+	}
+
+	app, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer app.Close()
+
+	if app.turnManager == nil {
+		t.Fatal("turnManager is nil")
+	}
+	if app.sessionManager == nil {
+		t.Fatal("sessionManager is nil")
+	}
+	if app.builtInExec == nil {
+		t.Fatal("builtInExec is nil")
+	}
+}
+
+func TestApp_New_WiresSubagentRunner(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	dbPath := filepath.Join(tmpDir, "sessions.db")
+
+	cfg := &api.Config{
+		LLM: api.LLMConfig{
+			Provider: "moonshot",
+			APIKey:   "test-key",
+			Model:    "kimi-k2.5",
+			BaseURL:  "https://api.moonshot.cn/v1",
+			Timeout:  60 * time.Second,
+		},
+		Behavior: api.BehaviorConfig{
+			AutoApprove:  []string{"read_file"},
+			ShellTimeout: 30 * time.Second,
+			MaxTurns:     50,
+		},
+		Session: api.SessionConfig{
+			DBPath:     dbPath,
+			MaxHistory: 100,
+		},
+		MCP: api.MCPConfig{
+			GuardCommand: "mcp-guard",
+		},
+		UI: api.UIConfig{
+			Theme: "dark",
+		},
+	}
+
+	app, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer app.Close()
+
+	for _, def := range app.builtInExec.Definitions(context.Background()) {
+		if def.Name == "dispatch_subagent" {
+			return
+		}
+	}
+	t.Fatal("dispatch_subagent tool not found in built-in executor definitions")
+}
+
+func TestApp_PprofServerStartsAndStops(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := &api.Config{
+		LLM: api.LLMConfig{
+			Provider: "moonshot",
+			APIKey:   "test-key",
+			Model:    "kimi-k2.5",
+			BaseURL:  "https://api.moonshot.cn/v1",
+			Timeout:  60 * time.Second,
+		},
+		Behavior: api.BehaviorConfig{
+			AutoApprove:  []string{"read_file"},
+			ShellTimeout: 30 * time.Second,
+			MaxTurns:     50,
+		},
+		Session: api.SessionConfig{
+			DBPath:     filepath.Join(tmpDir, "sessions.db"),
+			MaxHistory: 100,
+		},
+		UI: api.UIConfig{
+			Theme: "dark",
+		},
+		PprofAddr: "127.0.0.1:0",
+	}
+
+	app, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if app.pprofCancel == nil {
+		t.Fatal("expected pprofCancel to be set")
+	}
+
+	if err := app.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+}
+
+func TestSystemPrompt_IncludesSkills(t *testing.T) {
+	t.Parallel()
+
+	prompt := systemPrompt("/tmp/test-dir", "# Go\nUse gofmt.")
+	if !strings.Contains(prompt, "Additional skills context") {
+		t.Error("system prompt missing skills header")
+	}
+	if !strings.Contains(prompt, "Use gofmt.") {
+		t.Error("system prompt missing skill content")
 	}
 }

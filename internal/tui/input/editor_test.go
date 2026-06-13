@@ -1,6 +1,7 @@
 package input
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -63,7 +64,7 @@ func TestParseEditor(t *testing.T) {
 
 	t.Run("with arguments", func(t *testing.T) {
 		t.Parallel()
-		cmd, err := parseEditor("go version", "/tmp/file.txt")
+		cmd, err := parseEditor(context.Background(), "go version", "/tmp/file.txt")
 		if err != nil {
 			t.Fatalf("parseEditor error = %v", err)
 		}
@@ -75,7 +76,7 @@ func TestParseEditor(t *testing.T) {
 
 	t.Run("empty editor", func(t *testing.T) {
 		t.Parallel()
-		_, err := parseEditor("", "/tmp/file.txt")
+		_, err := parseEditor(context.Background(), "", "/tmp/file.txt")
 		if err == nil {
 			t.Error("expected error for empty editor")
 		}
@@ -83,7 +84,7 @@ func TestParseEditor(t *testing.T) {
 
 	t.Run("not found", func(t *testing.T) {
 		t.Parallel()
-		_, err := parseEditor("definitely-not-an-editor-12345", "/tmp/file.txt")
+		_, err := parseEditor(context.Background(), "definitely-not-an-editor-12345", "/tmp/file.txt")
 		if err == nil {
 			t.Error("expected error when editor executable not found")
 		}

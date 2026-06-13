@@ -26,13 +26,15 @@ type approvalPayload struct {
 
 // TurnManager orchestrates a single user input → LLM response cycle.
 type TurnManager struct {
-	llm      api.LLMClient
-	tools    api.ToolExecutor
-	approval api.ApprovalGate
-	store    api.Store
-	cfg      api.ConfigProvider
-	mu       sync.RWMutex
-	turn     *api.Turn
+	llm        api.LLMClient
+	tools      api.ToolExecutor
+	approval   api.ApprovalGate
+	store      api.Store
+	cfg        api.ConfigProvider
+	hookRunner api.HookRunner
+	metrics    api.MetricsCollector
+	mu         sync.RWMutex
+	turn       *api.Turn
 
 	pendingMu    sync.Mutex
 	pendingCalls []api.ToolCall
@@ -53,8 +55,22 @@ func NewTurnManager(llm api.LLMClient, tools api.ToolExecutor, approval api.Appr
 		approval:   approval,
 		store:      store,
 		cfg:        cfg,
+		metrics:    api.NoopMetricsCollector{},
 		approvalCh: make(chan approvalPayload, 1),
 	}
+}
+
+// SetHookRunner sets the lifecycle hook runner.
+func (tm *TurnManager) SetHookRunner(r api.HookRunner) {
+	tm.hookRunner = r
+}
+
+// SetMetricsCollector sets the metrics collector.
+func (tm *TurnManager) SetMetricsCollector(m api.MetricsCollector) {
+	if m == nil {
+		m = api.NoopMetricsCollector{}
+	}
+	tm.metrics = m
 }
 
 // CurrentTurn returns a deep copy of the current turn.
@@ -153,6 +169,9 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 }
 
 func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	tm.metrics.IncCounter("turn.started")
+	tm.runHooks(ctx, api.HookTurnStart, sessionID, "", "")
+
 	if tm.cfg != nil && tm.cfg.Get() != nil {
 		maxTurns := tm.cfg.Get().Behavior.MaxTurns
 		if maxTurns > 0 {
@@ -269,6 +288,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 
 		if len(pending) > 0 {
 			_, reqID := tm.PendingApprovals()
+			tm.runApprovalHook(ctx, api.HookApprovalRequest, sessionID, turn.ID, pending)
 			select {
 			case eventCh <- api.TurnEvent{Type: api.TurnEventApprovalRequest, ToolCalls: pending, RequestID: reqID}:
 			case <-ctx.Done():
@@ -330,6 +350,8 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 					results = append(results, result)
 				}
 			}
+
+			tm.runApprovalHook(ctx, api.HookApprovalDecision, sessionID, turn.ID, pending)
 
 			tm.pendingMu.Lock()
 			tm.pendingCalls = nil
@@ -438,6 +460,8 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 	if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
 		slog.Error("failed to save turn", "error", err)
 	}
+	tm.metrics.IncCounter("turn.completed")
+	tm.runHooks(ctx, api.HookTurnEnd, sessionID, turn.ID, "")
 	tm.mu.Lock()
 	tm.turn = turn
 	tm.mu.Unlock()
@@ -562,6 +586,7 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 }
 
 func (tm *TurnManager) setError(ctx context.Context, sessionID string, turn *api.Turn, err error) {
+	tm.metrics.IncCounter("turn.errored")
 	tm.mu.Lock()
 	turn.State = api.TurnError
 	turn.Error = err.Error()
@@ -594,5 +619,36 @@ func (tm *TurnManager) persistPartialResponse(ctx context.Context, sessionID str
 	}
 	if err := tm.store.AppendMessage(ctx, sessionID, assistantMsg); err != nil {
 		slog.Error("failed to append partial assistant message", "error", err)
+	}
+}
+
+func (tm *TurnManager) runHooks(ctx context.Context, event api.HookEvent, sessionID, turnID, input string) {
+	if tm.hookRunner == nil {
+		return
+	}
+	if err := tm.hookRunner.Run(ctx, api.HookData{
+		Event:     event,
+		SessionID: sessionID,
+		TurnID:    turnID,
+		ToolArgs:  input,
+	}); err != nil {
+		slog.Debug("turn hook failed", "event", event, "error", err)
+	}
+}
+
+func (tm *TurnManager) runApprovalHook(ctx context.Context, event api.HookEvent, sessionID, turnID string, calls []api.ToolCall) {
+	if tm.hookRunner == nil || len(calls) == 0 {
+		return
+	}
+	for _, call := range calls {
+		if err := tm.hookRunner.Run(ctx, api.HookData{
+			Event:     event,
+			SessionID: sessionID,
+			TurnID:    turnID,
+			ToolName:  call.Name,
+			ToolArgs:  call.Arguments,
+		}); err != nil {
+			slog.Debug("approval hook failed", "event", event, "tool", call.Name, "error", err)
+		}
 	}
 }

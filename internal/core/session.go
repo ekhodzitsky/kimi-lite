@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,14 +49,32 @@ func resolvePortablePath(portable string) string {
 
 // SessionManager manages conversation sessions using an api.Store.
 type SessionManager struct {
-	store     api.Store
-	mu        sync.RWMutex
-	currentID string
+	store      api.Store
+	mu         sync.RWMutex
+	currentID  string
+	hookRunner api.HookRunner
+	metrics    api.MetricsCollector
 }
 
 // NewSessionManager creates a new SessionManager.
 func NewSessionManager(store api.Store) *SessionManager {
-	return &SessionManager{store: store}
+	return &SessionManager{
+		store:   store,
+		metrics: api.NoopMetricsCollector{},
+	}
+}
+
+// SetHookRunner sets the lifecycle hook runner.
+func (sm *SessionManager) SetHookRunner(r api.HookRunner) {
+	sm.hookRunner = r
+}
+
+// SetMetricsCollector sets the metrics collector.
+func (sm *SessionManager) SetMetricsCollector(m api.MetricsCollector) {
+	if m == nil {
+		m = api.NoopMetricsCollector{}
+	}
+	sm.metrics = m
 }
 
 // Start creates a new session for the given path and sets it as current.
@@ -65,6 +84,8 @@ func (sm *SessionManager) Start(ctx context.Context, path string) (*api.Session,
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 	sm.setCurrent(sess.ID)
+	sm.metrics.IncCounter("session.created")
+	sm.runHooks(ctx, api.HookSessionStart, sess.ID)
 	return sess, nil
 }
 
@@ -81,6 +102,8 @@ func (sm *SessionManager) Resume(ctx context.Context, id string) (*api.Session, 
 	}
 	sess.Messages = msgs
 	sm.setCurrent(sess.ID)
+	sm.metrics.IncCounter("session.resumed")
+	sm.runHooks(ctx, api.HookSessionStart, sess.ID)
 	return sess, nil
 }
 
@@ -97,6 +120,8 @@ func (sm *SessionManager) ContinueLast(ctx context.Context, path string) (*api.S
 	}
 	sess.Messages = msgs
 	sm.setCurrent(sess.ID)
+	sm.metrics.IncCounter("session.resumed")
+	sm.runHooks(ctx, api.HookSessionStart, sess.ID)
 	return sess, nil
 }
 
@@ -188,6 +213,8 @@ func (sm *SessionManager) Fork(ctx context.Context, sourceID string, name string
 	sm.setCurrent(forked.ID)
 	forked.Path = resolvePortablePath(forked.Path)
 	forked.Messages = msgs
+	sm.metrics.IncCounter("session.created")
+	sm.runHooks(ctx, api.HookSessionStart, forked.ID)
 	return forked, nil
 }
 
@@ -202,4 +229,16 @@ func (sm *SessionManager) setCurrent(id string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.currentID = id
+}
+
+func (sm *SessionManager) runHooks(ctx context.Context, event api.HookEvent, sessionID string) {
+	if sm.hookRunner == nil {
+		return
+	}
+	if err := sm.hookRunner.Run(ctx, api.HookData{
+		Event:     event,
+		SessionID: sessionID,
+	}); err != nil {
+		slog.Debug("session hook failed", "event", event, "error", err)
+	}
 }

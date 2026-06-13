@@ -355,7 +355,6 @@ func TestSetWidth(t *testing.T) {
 	}
 }
 
-
 func TestMentionDetection(t *testing.T) {
 	t.Parallel()
 

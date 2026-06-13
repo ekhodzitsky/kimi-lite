@@ -16,6 +16,7 @@ type ContextCompressor struct {
 	llm           api.LLMClient
 	contextWindow int
 	timeout       time.Duration
+	estimator     api.TokenEstimator
 }
 
 // NewContextCompressor creates a new ContextCompressor.
@@ -27,8 +28,26 @@ func NewContextCompressor(llm api.LLMClient, contextWindow int, timeout time.Dur
 	}
 }
 
-// estimateTokens returns a rough token estimate using a len/4 heuristic.
-func estimateTokens(msgs []api.Message) int {
+// SetTokenEstimator replaces the default len/4 estimator. A nil estimator is
+// ignored.
+func (c *ContextCompressor) SetTokenEstimator(est api.TokenEstimator) {
+	if est == nil {
+		return
+	}
+	c.estimator = est
+}
+
+// estimateTokens returns a token estimate using the configured estimator or a
+// len/4 fallback.
+func (c *ContextCompressor) estimateTokens(msgs []api.Message) int {
+	if c.estimator != nil {
+		return c.estimator.Estimate(msgs)
+	}
+	return estimateTokensLegacy(msgs)
+}
+
+// estimateTokensLegacy returns a rough token estimate using a len/4 heuristic.
+func estimateTokensLegacy(msgs []api.Message) int {
 	tokens := 0
 	for _, m := range msgs {
 		tokens += len(m.Content) / 4
@@ -116,7 +135,7 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 	}
 
 	// Gate compaction on token estimate vs context window.
-	totalTokens := estimateTokens(messages)
+	totalTokens := c.estimateTokens(messages)
 	if c.contextWindow > 0 {
 		threshold := c.contextWindow / 2
 		if totalTokens <= threshold {
@@ -144,9 +163,9 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 	// Short-circuit when the estimated summary+recent would not be smaller
 	// than the originals.
 	if c.contextWindow > 0 {
-		toSummarizeTokens := estimateTokens(middle)
-		recentTokens := estimateTokens(recent)
-		leadingTokens := estimateTokens(leading)
+		toSummarizeTokens := c.estimateTokens(middle)
+		recentTokens := c.estimateTokens(recent)
+		leadingTokens := c.estimateTokens(leading)
 		summaryTokens := 50 + toSummarizeTokens/10
 		if leadingTokens+summaryTokens+recentTokens >= totalTokens {
 			return 0, nil
@@ -169,7 +188,7 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 		tokens := 0
 		for i := len(middle) - 1; i >= 0; i-- {
 			msg := middle[i]
-			msgTokens := estimateTokens([]api.Message{msg})
+			msgTokens := c.estimateTokens([]api.Message{msg})
 			if tokens+msgTokens > maxInputTokens && len(included) > 0 {
 				break
 			}

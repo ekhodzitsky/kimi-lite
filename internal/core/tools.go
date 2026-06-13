@@ -55,6 +55,10 @@ type BuiltInToolExecutor struct {
 	passEnv        bool
 	root           *os.Root
 	webSearcher    api.WebSearcher
+	videoExtractor *VideoExtractor
+	subagentRunner api.SubagentRunner
+	hookRunner     api.HookRunner
+	metrics        api.MetricsCollector
 	toolStore      map[string]any
 	toolStoreMu    sync.Mutex
 }
@@ -67,6 +71,7 @@ type ToolExecutorConfig struct {
 	ProtectedPaths []string
 	PassEnv        bool
 	WebSearcher    api.WebSearcher
+	VideoExtractor *VideoExtractor
 }
 
 // NewBuiltInToolExecutor creates a new BuiltInToolExecutor.
@@ -127,6 +132,7 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 		"fetch_url":      true,
 		"list_directory": true,
 		"TodoList":       true,
+		"read_video":     true,
 	}
 	if cfg.WebSearcher != nil {
 		readOnly["web_search"] = true
@@ -141,6 +147,8 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 		passEnv:        cfg.PassEnv,
 		root:           root,
 		webSearcher:    cfg.WebSearcher,
+		videoExtractor: cfg.VideoExtractor,
+		metrics:        api.NoopMetricsCollector{},
 		toolStore:      make(map[string]any),
 		readOnly:       readOnly,
 	}, nil
@@ -149,6 +157,24 @@ func NewBuiltInToolExecutor(cfg ToolExecutorConfig) (*BuiltInToolExecutor, error
 // SetAllowShell controls whether the shell tool is enabled.
 func (e *BuiltInToolExecutor) SetAllowShell(v bool) {
 	e.allowShell = v
+}
+
+// SetSubagentRunner sets the runner used by the dispatch_subagent tool.
+func (e *BuiltInToolExecutor) SetSubagentRunner(r api.SubagentRunner) {
+	e.subagentRunner = r
+}
+
+// SetHookRunner sets the lifecycle hook runner.
+func (e *BuiltInToolExecutor) SetHookRunner(r api.HookRunner) {
+	e.hookRunner = r
+}
+
+// SetMetricsCollector sets the metrics collector.
+func (e *BuiltInToolExecutor) SetMetricsCollector(m api.MetricsCollector) {
+	if m == nil {
+		m = api.NoopMetricsCollector{}
+	}
+	e.metrics = m
 }
 
 // IsReadOnly reports whether the named built-in tool is read-only.
@@ -362,6 +388,11 @@ type listDirArgs struct {
 	Path string `json:"path"`
 }
 
+type readVideoArgs struct {
+	Path      string `json:"path"`
+	MaxFrames int    `json:"max_frames"`
+}
+
 type webSearchArgs struct {
 	Query          string `json:"query"`
 	Limit          int    `json:"limit"`
@@ -377,6 +408,13 @@ type todoListArgs struct {
 	Todos []todoItem `json:"todos"`
 }
 
+type dispatchSubagentArgs struct {
+	Type           string `json:"type"`
+	Prompt         string `json:"prompt"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	MaxRounds      int    `json:"max_rounds"`
+}
+
 func decodeArgs[T any](raw string) (T, error) {
 	var v T
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
@@ -387,7 +425,7 @@ func decodeArgs[T any](raw string) (T, error) {
 
 // Definitions returns all available tool definitions.
 func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinition {
-	defs := make([]api.ToolDefinition, 0, 11)
+	defs := make([]api.ToolDefinition, 0, 12)
 
 	addDef := func(name, desc string, params map[string]any) {
 		p, err := marshalParams(params)
@@ -536,6 +574,20 @@ func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinitio
 		},
 		"required": []string{"path"},
 	})
+	addDef("read_video", "Extract metadata and key frames from a video file at the given path. Returns a JSON object with width, height, duration, format, and base64 PNG frames. Requires ffmpeg/ffprobe in PATH.", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{
+				"type":        "string",
+				"description": "The path to the video file.",
+			},
+			"max_frames": map[string]any{
+				"type":        "integer",
+				"description": "Maximum number of frames to extract (default 1, max 10).",
+			},
+		},
+		"required": []string{"path"},
+	})
 	if e.webSearcher != nil {
 		addDef("web_search", "Search the web for a query and return a list of results.", map[string]any{
 			"type": "object",
@@ -556,6 +608,29 @@ func (e *BuiltInToolExecutor) Definitions(_ context.Context) []api.ToolDefinitio
 			"required": []string{"query"},
 		})
 	}
+	addDef("dispatch_subagent", "Dispatch a focused subagent. Returns when the subagent finishes.", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"type": map[string]any{
+				"type":        "string",
+				"enum":        []string{"coder", "explore", "plan"},
+				"description": "The subagent type.",
+			},
+			"prompt": map[string]any{
+				"type":        "string",
+				"description": "The task prompt for the subagent.",
+			},
+			"timeout_seconds": map[string]any{
+				"type":        "integer",
+				"description": "Optional timeout in seconds.",
+			},
+			"max_rounds": map[string]any{
+				"type":        "integer",
+				"description": "Optional maximum number of rounds.",
+			},
+		},
+		"required": []string{"type", "prompt"},
+	})
 	addDef("TodoList", "Maintain a structured TODO list for tracking progress during multi-step tasks. Omit todos to read the current list; provide an empty array to clear it; otherwise pass the full replacement list.", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -594,9 +669,16 @@ func marshalParams(v map[string]any) (json.RawMessage, error) {
 
 // Execute runs a tool call and returns the result.
 func (e *BuiltInToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+	start := time.Now()
 	result := api.ToolResult{
 		CallID: call.ID,
 		Name:   call.Name,
+	}
+
+	if err := e.runToolCallHook(ctx, call); err != nil {
+		result.Error = err.Error()
+		e.runToolResultHook(ctx, result)
+		return result, nil
 	}
 
 	switch call.Name {
@@ -606,6 +688,16 @@ func (e *BuiltInToolExecutor) Execute(ctx context.Context, call api.ToolCall) (a
 			result.Error = err.Error()
 		} else {
 			result.Output, err = e.execReadFile(ctx, args)
+			if err != nil {
+				result.Error = err.Error()
+			}
+		}
+	case "read_video":
+		args, err := decodeArgs[readVideoArgs](call.Arguments)
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Output, err = e.execReadVideo(ctx, args)
 			if err != nil {
 				result.Error = err.Error()
 			}
@@ -700,6 +792,16 @@ func (e *BuiltInToolExecutor) Execute(ctx context.Context, call api.ToolCall) (a
 				result.Error = err.Error()
 			}
 		}
+	case "dispatch_subagent":
+		args, err := decodeArgs[dispatchSubagentArgs](call.Arguments)
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Output, err = e.execDispatchSubagent(ctx, args)
+			if err != nil {
+				result.Error = err.Error()
+			}
+		}
 	case "TodoList":
 		args, err := decodeArgs[todoListArgs](call.Arguments)
 		if err != nil {
@@ -714,7 +816,44 @@ func (e *BuiltInToolExecutor) Execute(ctx context.Context, call api.ToolCall) (a
 		result.Error = fmt.Sprintf("unknown tool: %s", call.Name)
 	}
 
+	e.metrics.IncCounter("tool.called", "tool", call.Name)
+	e.metrics.RecordLatency("tool.latency", time.Since(start), "tool", call.Name)
+	if result.Error != "" {
+		e.metrics.RecordError("tool")
+	}
+	e.runToolResultHook(ctx, result)
 	return result, nil
+}
+
+func (e *BuiltInToolExecutor) runToolCallHook(ctx context.Context, call api.ToolCall) error {
+	if e.hookRunner == nil {
+		return nil
+	}
+	if err := e.hookRunner.Run(ctx, api.HookData{
+		Event:    api.HookToolCall,
+		ToolName: call.Name,
+		ToolArgs: call.Arguments,
+	}); err != nil {
+		return fmt.Errorf("tool_call hook: %w", err)
+	}
+	return nil
+}
+
+func (e *BuiltInToolExecutor) runToolResultHook(ctx context.Context, result api.ToolResult) {
+	if e.hookRunner == nil {
+		return
+	}
+	data := api.HookData{
+		Event:      api.HookToolResult,
+		ToolName:   result.Name,
+		ToolResult: result.Output,
+	}
+	if result.Error != "" {
+		data.Error = result.Error
+	}
+	if err := e.hookRunner.Run(ctx, data); err != nil {
+		slog.Debug("tool result hook failed", "tool", result.Name, "error", err)
+	}
 }
 
 func (e *BuiltInToolExecutor) execReadFile(ctx context.Context, args readFileArgs) (string, error) {
@@ -941,6 +1080,36 @@ func (e *BuiltInToolExecutor) atomicWriteFileRoot(relTarget string, data []byte,
 		return fmt.Errorf("rename temp file: %w", err)
 	}
 	return nil
+}
+
+func (e *BuiltInToolExecutor) execReadVideo(ctx context.Context, args readVideoArgs) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("read video cancelled: %w", err)
+	}
+	if args.Path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if e.videoExtractor == nil {
+		return "", fmt.Errorf("video extraction is not available: ffmpeg/ffprobe not found in PATH")
+	}
+	validPath, err := ValidateFilePath(args.Path, e.sandboxRoot, e.protectedPaths)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+
+	maxFrames := args.MaxFrames
+	if maxFrames <= 0 {
+		maxFrames = 1
+	}
+	if maxFrames > 10 {
+		maxFrames = 10
+	}
+
+	info, err := e.videoExtractor.Extract(ctx, validPath, maxFrames)
+	if err != nil {
+		return "", fmt.Errorf("read video: %w", err)
+	}
+	return videoResultJSON(info, maxFileReadSize), nil
 }
 
 func (e *BuiltInToolExecutor) execWriteFile(ctx context.Context, args writeFileArgs) (string, error) {
@@ -1507,6 +1676,49 @@ func (e *BuiltInToolExecutor) execTodoList(args todoListArgs) (string, error) {
 		return "Todo list cleared.", nil
 	}
 	return fmt.Sprintf("Todo list updated.\n%s\n\n%s", renderTodoList(args.Todos), todoListWriteReminder), nil
+}
+
+func (e *BuiltInToolExecutor) execDispatchSubagent(ctx context.Context, args dispatchSubagentArgs) (string, error) {
+	if e.subagentRunner == nil {
+		return "", fmt.Errorf("dispatch_subagent not configured: subagent runner is not set")
+	}
+
+	var subagentType api.SubagentType
+	switch args.Type {
+	case "coder":
+		subagentType = api.SubagentCoder
+	case "explore":
+		subagentType = api.SubagentExplore
+	case "plan":
+		subagentType = api.SubagentPlan
+	default:
+		return "", fmt.Errorf("invalid subagent type %q", args.Type)
+	}
+
+	if args.Prompt == "" {
+		return "", fmt.Errorf("prompt is required")
+	}
+
+	req := api.SubagentRequest{
+		Type:        subagentType,
+		Prompt:      args.Prompt,
+		SandboxRoot: e.sandboxRoot,
+		MaxRounds:   args.MaxRounds,
+	}
+	if args.TimeoutSeconds > 0 {
+		req.Timeout = time.Duration(args.TimeoutSeconds) * time.Second
+	}
+
+	res, err := e.subagentRunner.Run(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("subagent run failed: %w", err)
+	}
+
+	b, err := json.Marshal(res)
+	if err != nil {
+		return "", fmt.Errorf("marshal subagent result: %w", err)
+	}
+	return string(b), nil
 }
 
 func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args fetchURLArgs) (string, error) {

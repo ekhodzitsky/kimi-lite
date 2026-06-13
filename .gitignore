@@ -24,6 +24,7 @@ coverage.out
 coverage.html
 *.prof
 *.trace
+bench.*.txt
 
 # Logs
 *.log
@@ -36,5 +37,6 @@ coverage.html
 SECURITY_AUDIT*.md
 docs/audits/
 docs/superpowers/
+.specs/
 .omc/
 .venv*/

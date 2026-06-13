@@ -167,6 +167,7 @@ func TestEnvVarResolution(t *testing.T) {
 			t.Setenv("TEST_API_KEY", tt.envValue)
 
 			tmpDir := t.TempDir()
+			t.Setenv("HOME", tmpDir)
 			content := `[llm]
 provider = "moonshot"
 api_key = "` + tt.config + `"
@@ -193,6 +194,7 @@ func TestEnvVarResolution_MissingVar(t *testing.T) {
 	os.Unsetenv("TEST_API_KEY_MISSING")
 
 	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
 	content := `[llm]
 provider = "moonshot"
 api_key = "$TEST_API_KEY_MISSING"
@@ -737,6 +739,65 @@ func TestValidate_PermissionRules(t *testing.T) {
 	}
 	msg := err.Error()
 	for _, want := range []string{"tool must not be empty", "decision must be one of", "scope must be one of"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected error to contain %q, got: %s", want, msg)
+		}
+	}
+}
+
+func TestValidate_RiskRules(t *testing.T) {
+	t.Parallel()
+
+	valid := DefaultConfig()
+	valid.Permission.RiskThreshold = api.RiskLevelLow
+	valid.Permission.RiskRules = []api.RiskRule{
+		{Tool: "shell", Level: api.RiskLevelHigh},
+	}
+	if err := Validate(valid); err != nil {
+		t.Fatalf("expected valid config, got: %v", err)
+	}
+
+	invalid := DefaultConfig()
+	invalid.Permission.RiskThreshold = api.RiskLevel("extreme")
+	invalid.Permission.RiskRules = []api.RiskRule{
+		{Tool: "", Level: api.RiskLevelLow},
+		{Tool: "shell", Level: api.RiskLevel("extreme")},
+	}
+	err := Validate(invalid)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"risk_threshold must be one of", "tool must not be empty", "level must be one of"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected error to contain %q, got: %s", want, msg)
+		}
+	}
+}
+
+func TestValidate_Hooks(t *testing.T) {
+	t.Parallel()
+
+	valid := DefaultConfig()
+	valid.Hooks = []api.HookConfig{
+		{Event: api.HookToolCall, Command: "echo", Timeout: 5 * time.Second},
+	}
+	if err := Validate(valid); err != nil {
+		t.Fatalf("expected valid config, got: %v", err)
+	}
+
+	invalid := DefaultConfig()
+	invalid.Hooks = []api.HookConfig{
+		{Event: "unknown_event", Command: "echo"},
+		{Event: api.HookToolCall, Command: ""},
+		{Event: api.HookTurnStart, Command: "echo", Timeout: -1 * time.Second},
+	}
+	err := Validate(invalid)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"hooks[0].event", "hooks[1].command", "hooks[2].timeout"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("expected error to contain %q, got: %s", want, msg)
 		}

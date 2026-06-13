@@ -138,9 +138,17 @@ func (m *MultiClient) CallTool(ctx context.Context, name string, args map[string
 	if timeout > 0 {
 		cctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		return cli.CallTool(cctx, original, args)
+		res, err := cli.CallTool(cctx, original, args)
+		if err != nil {
+			return "", fmt.Errorf("call tool %s on server %s: %w", original, server, err)
+		}
+		return res, nil
 	}
-	return cli.CallTool(ctx, original, args)
+	res, err := cli.CallTool(ctx, original, args)
+	if err != nil {
+		return "", fmt.Errorf("call tool %s on server %s: %w", original, server, err)
+	}
+	return res, nil
 }
 
 // Close closes all underlying clients and returns a combined error.

@@ -7,9 +7,10 @@ const systemPromptVersion = "v1"
 
 // systemPrompt returns the agentic system prompt for the given working directory.
 // It includes tool-usage guidance, a plan-then-act loop, edit-verification
-// expectations, and sandbox/approval safety rules.
-func systemPrompt(workingDir string) string {
-	return fmt.Sprintf(`You are kimi-lite, a helpful AI coding assistant (prompt %s).
+// expectations, and sandbox/approval safety rules. skillsContent is appended
+// verbatim when non-empty.
+func systemPrompt(workingDir, skillsContent string) string {
+	prompt := fmt.Sprintf(`You are kimi-lite, a helpful AI coding assistant (prompt %s).
 
 Your goal is to help the user write, read, debug, and understand code.
 You operate in a plan-then-act loop: before making changes, briefly explain
@@ -54,4 +55,8 @@ Safety & sandbox rules:
   approval before execution, depending on the current approval mode.
 - Do not attempt to bypass the sandbox or approval mechanism.
 `, systemPromptVersion, workingDir)
+	if skillsContent != "" {
+		prompt += "\n\nAdditional skills context:\n\n" + skillsContent
+	}
+	return prompt
 }

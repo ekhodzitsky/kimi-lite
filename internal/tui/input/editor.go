@@ -1,6 +1,7 @@
 package input
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,7 +34,7 @@ func resolveEditor(configured string) string {
 // parseEditor splits an editor command into name and arguments and appends the
 // file path as the final argument. It validates that the editor executable can
 // be located.
-func parseEditor(editor, path string) (*exec.Cmd, error) {
+func parseEditor(ctx context.Context, editor, path string) (*exec.Cmd, error) {
 	parts := strings.Fields(editor)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("editor command is empty")
@@ -43,7 +44,10 @@ func parseEditor(editor, path string) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("editor not found: %q: %w", name, err)
 	}
 	args := append(parts[1:], path)
-	return exec.Command(name, args...), nil
+	// #nosec G204 — the editor is resolved from user configuration or trusted
+	// environment variables ($VISUAL, $EDITOR) and is a deliberate user-facing
+	// subprocess launch.
+	return exec.CommandContext(ctx, name, args...), nil
 }
 
 // writeTempFile writes content to a temporary file and returns its path.
@@ -52,16 +56,25 @@ func writeTempFile(content string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
-	defer f.Close()
+	closeAndRemove := func(name string) {
+		_ = f.Close()
+		_ = os.Remove(name)
+	}
 
 	if _, err := f.WriteString(content); err != nil {
-		return f.Name(), fmt.Errorf("write temp file: %w", err)
+		closeAndRemove(f.Name())
+		return "", fmt.Errorf("write temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		closeAndRemove(f.Name())
+		return "", fmt.Errorf("close temp file: %w", err)
 	}
 	return f.Name(), nil
 }
 
 // readTempFile reads the contents of path as a string.
 func readTempFile(path string) (string, error) {
+	// #nosec G304 — path is a temporary file created and passed by the TUI.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read temp file: %w", err)
@@ -81,7 +94,7 @@ func (m *Model) openExternalEditor(editor string) tea.Cmd {
 		}
 	}
 
-	cmd, err := parseEditor(resolveEditor(editor), path)
+	cmd, err := parseEditor(context.Background(), resolveEditor(editor), path)
 	if err != nil {
 		_ = os.Remove(path)
 		return func() tea.Msg {
