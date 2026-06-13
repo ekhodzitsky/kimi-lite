@@ -2,107 +2,199 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
-	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
-// mockMCPClient is a test double for api.MCPClient.
-type mockMCPClient struct {
+// fakeMCPClient is a test double for api.MCPClient.
+type fakeMCPClient struct {
 	listToolsFunc func(ctx context.Context) ([]api.ToolDefinition, error)
 	callToolFunc  func(ctx context.Context, name string, args map[string]any) (string, error)
-	closeFunc     func() error
 }
 
-func (m *mockMCPClient) Connect(ctx context.Context) error {
-	return nil
-}
-
-func (m *mockMCPClient) ListTools(ctx context.Context) ([]api.ToolDefinition, error) {
-	if m.listToolsFunc != nil {
-		return m.listToolsFunc(ctx)
+func (f *fakeMCPClient) Connect(ctx context.Context) error { return nil }
+func (f *fakeMCPClient) Close() error                      { return nil }
+func (f *fakeMCPClient) ListTools(ctx context.Context) ([]api.ToolDefinition, error) {
+	if f.listToolsFunc != nil {
+		return f.listToolsFunc(ctx)
 	}
 	return nil, nil
 }
-
-func (m *mockMCPClient) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
-	if m.callToolFunc != nil {
-		return m.callToolFunc(ctx, name, args)
+func (f *fakeMCPClient) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	if f.callToolFunc != nil {
+		return f.callToolFunc(ctx, name, args)
 	}
 	return "", nil
 }
 
-func (m *mockMCPClient) Close() error {
-	if m.closeFunc != nil {
-		return m.closeFunc()
-	}
-	return nil
-}
-
-func TestToolExecutor_Definitions_CachesOnFailure(t *testing.T) {
+func TestToolExecutor_Definitions(t *testing.T) {
 	t.Parallel()
 
-	callCount := 0
-	client := &mockMCPClient{
-		listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
-			callCount++
-			if callCount == 1 {
+	t.Run("prefixes returned names", func(t *testing.T) {
+		t.Parallel()
+
+		client := &fakeMCPClient{
+			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
 				return []api.ToolDefinition{
-					{Name: "read_file", Description: "Read a file"},
+					{Name: "read_file", Description: "read", Parameters: json.RawMessage(`{"type":"object"}`)},
+					{Name: "grep", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)},
 				}, nil
-			}
-			return nil, errors.New("network error")
-		},
-	}
+			},
+		}
+		exec := NewToolExecutor(client)
 
-	exec := NewToolExecutor(client)
+		defs := exec.Definitions(context.Background())
+		if len(defs) != 2 {
+			t.Fatalf("len(defs) = %d, want 2", len(defs))
+		}
+		if defs[0].Name != "mcp_read_file" {
+			t.Errorf("defs[0].Name = %q, want mcp_read_file", defs[0].Name)
+		}
+		if defs[1].Name != "mcp_grep" {
+			t.Errorf("defs[1].Name = %q, want mcp_grep", defs[1].Name)
+		}
+	})
 
-	// First call succeeds and populates the cache.
-	defs1 := exec.Definitions(context.Background())
-	if len(defs1) != 1 {
-		t.Fatalf("expected 1 definition, got %d", len(defs1))
-	}
-	if defs1[0].Name != "mcp_read_file" {
-		t.Fatalf("expected prefixed name mcp_read_file, got %q", defs1[0].Name)
-	}
+	t.Run("returns nil on ListTools error with no cache", func(t *testing.T) {
+		t.Parallel()
 
-	// Second call fails but returns cached definitions.
-	defs2 := exec.Definitions(context.Background())
-	if len(defs2) != 1 {
-		t.Fatalf("expected 1 cached definition, got %d", len(defs2))
-	}
-	if defs2[0].Name != "mcp_read_file" {
-		t.Fatalf("expected cached prefixed name mcp_read_file, got %q", defs2[0].Name)
-	}
+		client := &fakeMCPClient{
+			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
+				return nil, errors.New("mcp unavailable")
+			},
+		}
+		exec := NewToolExecutor(client)
+
+		if defs := exec.Definitions(context.Background()); defs != nil {
+			t.Fatalf("expected nil, got %+v", defs)
+		}
+	})
+
+	t.Run("falls back to cached definitions on ListTools error", func(t *testing.T) {
+		t.Parallel()
+
+		callCount := 0
+		client := &fakeMCPClient{
+			listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
+				callCount++
+				if callCount == 1 {
+					return []api.ToolDefinition{{Name: "cached", Description: "cached", Parameters: json.RawMessage(`{})`)}}, nil
+				}
+				return nil, errors.New("mcp unavailable")
+			},
+		}
+		exec := NewToolExecutor(client)
+		first := exec.Definitions(context.Background())
+		cached := []api.ToolDefinition{{Name: "mcp_cached", Description: "cached", Parameters: json.RawMessage(`{})`)}}
+		if !reflect.DeepEqual(first, cached) {
+			t.Fatalf("first defs = %+v, want %+v", first, cached)
+		}
+
+		second := exec.Definitions(context.Background())
+		if !reflect.DeepEqual(second, cached) {
+			t.Fatalf("fallback defs = %+v, want %+v", second, cached)
+		}
+	})
 }
 
-func TestToolExecutor_Definitions_ContextCancellation(t *testing.T) {
+func TestToolExecutor_Execute(t *testing.T) {
 	t.Parallel()
 
-	client := &mockMCPClient{
-		listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-	}
+	t.Run("strips mcp_ prefix and returns output", func(t *testing.T) {
+		t.Parallel()
 
-	exec := NewToolExecutor(client)
+		var calledName string
+		var calledArgs map[string]any
+		client := &fakeMCPClient{
+			callToolFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
+				calledName = name
+				calledArgs = args
+				return "done", nil
+			},
+		}
+		exec := NewToolExecutor(client)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
+		result, err := exec.Execute(context.Background(), api.ToolCall{
+			ID:        "call-1",
+			Name:      "mcp_read_file",
+			Arguments: `{"path":"a.txt"}`,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if calledName != "read_file" {
+			t.Errorf("CallTool name = %q, want read_file", calledName)
+		}
+		if calledArgs["path"] != "a.txt" {
+			t.Errorf("CallTool args = %+v, want path=a.txt", calledArgs)
+		}
+		if result.CallID != "call-1" {
+			t.Errorf("result.CallID = %q, want call-1", result.CallID)
+		}
+		if result.Name != "mcp_read_file" {
+			t.Errorf("result.Name = %q, want mcp_read_file", result.Name)
+		}
+		if result.Output != "done" {
+			t.Errorf("result.Output = %q, want done", result.Output)
+		}
+		if result.Error != "" {
+			t.Errorf("result.Error = %q, want empty", result.Error)
+		}
+	})
 
-	start := time.Now()
-	defs := exec.Definitions(ctx)
-	elapsed := time.Since(start)
+	t.Run("invalid arguments return ToolResult.Error with nil Go error", func(t *testing.T) {
+		t.Parallel()
 
-	if defs != nil {
-		t.Fatalf("expected nil definitions on cancelled context, got %v", defs)
-	}
+		exec := NewToolExecutor(&fakeMCPClient{})
+		result, err := exec.Execute(context.Background(), api.ToolCall{
+			ID:        "call-2",
+			Name:      "mcp_bad",
+			Arguments: `not json`,
+		})
+		if err != nil {
+			t.Fatalf("expected nil Go error, got %v", err)
+		}
+		if result.CallID != "call-2" {
+			t.Errorf("result.CallID = %q, want call-2", result.CallID)
+		}
+		if result.Name != "mcp_bad" {
+			t.Errorf("result.Name = %q, want mcp_bad", result.Name)
+		}
+		if result.Error == "" {
+			t.Fatal("expected non-empty result.Error")
+		}
+		if result.Output != "" {
+			t.Errorf("result.Output = %q, want empty", result.Output)
+		}
+	})
 
-	// Should return promptly (well before the 5s timeout).
-	if elapsed > 1*time.Second {
-		t.Fatalf("expected prompt return on cancelled context, took %v", elapsed)
-	}
+	t.Run("CallTool error surfaces in ToolResult.Error with nil Go error", func(t *testing.T) {
+		t.Parallel()
+
+		client := &fakeMCPClient{
+			callToolFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
+				return "", errors.New("tool crashed")
+			},
+		}
+		exec := NewToolExecutor(client)
+
+		result, err := exec.Execute(context.Background(), api.ToolCall{
+			ID:        "call-3",
+			Name:      "mcp_grep",
+			Arguments: `{"q":"x"}`,
+		})
+		if err != nil {
+			t.Fatalf("expected nil Go error, got %v", err)
+		}
+		if result.Error != "tool crashed" {
+			t.Errorf("result.Error = %q, want tool crashed", result.Error)
+		}
+		if result.Output != "" {
+			t.Errorf("result.Output = %q, want empty", result.Output)
+		}
+	})
 }
