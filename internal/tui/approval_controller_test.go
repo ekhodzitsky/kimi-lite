@@ -157,6 +157,41 @@ func TestApprovalController_HandleResponse_DefaultsMissingToNo(t *testing.T) {
 	}
 }
 
+func TestApprovalController_HandleResponse_ApprovalDiff(t *testing.T) {
+	t.Parallel()
+
+	ac := newApprovalController()
+	ac.startRequest([]api.ToolCall{
+		{ID: "a", Name: "write_file"},
+	}, 1)
+
+	done, approvals, alwaysAll := ac.handleResponse(ApprovalResponseMsg{Decision: api.ApprovalDiff, CallID: "a"})
+	if done {
+		t.Error("expected not done for ApprovalDiff")
+	}
+	if approvals != nil {
+		t.Errorf("expected nil approvals, got %v", approvals)
+	}
+	if alwaysAll {
+		t.Error("expected alwaysAll=false for ApprovalDiff")
+	}
+	if ac.currentIndex() != 0 {
+		t.Errorf("currentIndex = %d, want 0", ac.currentIndex())
+	}
+	if _, ok := ac.decisions["a"]; ok {
+		t.Error("ApprovalDiff should not be recorded as a final decision")
+	}
+
+	// A subsequent yes should finalize.
+	done, approvals, _ = ac.handleResponse(ApprovalResponseMsg{Decision: api.ApprovalYes, CallID: "a"})
+	if !done {
+		t.Error("expected done after ApprovalYes")
+	}
+	if approvals["a"] != api.ApprovalYes {
+		t.Errorf("approvals[a] = %v, want ApprovalYes", approvals["a"])
+	}
+}
+
 func TestApprovalController_Clear(t *testing.T) {
 	t.Parallel()
 

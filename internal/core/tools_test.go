@@ -553,8 +553,8 @@ func TestBuiltInToolExecutor_Execute_Shell_Timeout(t *testing.T) {
 	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 100 * time.Millisecond})
 
 	// Embed a unique token in the command so we can look for a surviving shell
-	// process after the timeout. A properly enforced timeout must return well
-	// before the 5s sleep finishes and must not leave the shell alive.
+	// or sleep process after the timeout. A properly enforced timeout must
+	// return well before the 5s sleep finishes and must not leave descendants.
 	marker := fmt.Sprintf("kimi-shell-timeout-%d", time.Now().UnixNano())
 	command := fmt.Sprintf("sleep 5 # %s", marker)
 
@@ -574,14 +574,15 @@ func TestBuiltInToolExecutor_Execute_Shell_Timeout(t *testing.T) {
 	if !strings.Contains(result.Error, "timed out") {
 		t.Errorf("expected timeout error to contain 'timed out', got: %q", result.Error)
 	}
-	if elapsed > 1*time.Second {
-		t.Fatalf("command took %v to return, want well under 1s", elapsed)
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("command took %v to return, want well under 1s for a 100ms timeout", elapsed)
 	}
 
-	// Best-effort: confirm no shell process carrying our marker is still alive.
-	// pgrep may not be available everywhere, so ignore execution errors.
+	// Best-effort: give the kernel a moment to reap the process group, then
+	// confirm no shell or sleep process carrying our marker is still alive.
+	time.Sleep(100 * time.Millisecond)
 	if out, _ := osexec.Command("pgrep", "-f", marker).CombinedOutput(); len(out) > 0 {
-		t.Fatalf("shell process still alive after timeout: %s", out)
+		t.Fatalf("shell or sleep process still alive after timeout: %s", out)
 	}
 }
 
@@ -822,23 +823,32 @@ func TestIsBlockedHost(t *testing.T) {
 		{"::ffff:127.0.0.1", true},
 		{"10.0.0.1", true},
 		{"172.16.0.1", true},
+		{"172.31.255.255", true},
 		{"192.168.1.1", true},
 		{"169.254.1.1", true},
 		{"169.254.169.254", true},
 		{"100.64.0.1", true},
+		{"100.64.0.0", true},
+		{"100.127.255.255", true},
 		{"fd12:3456::1", true},
 		{"fc00::1", true},
+		{"fc00::", true},
+		{"fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", true},
 		{"fe80::1", true},
+		{"fe80::", true},
+		{"febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff", true},
 		{"::ffff:10.0.0.1", true},
 		{"example.com", false},
 		{"8.8.8.8", false},
+		{"1.1.1.1", false},
+		{"2001:4860:4860::8888", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
 			t.Parallel()
-			if got := netutil.IsBlockedHost(tt.host); got != tt.blocked {
-				t.Errorf("IsBlockedHost(%q) = %v, want %v", tt.host, got, tt.blocked)
+			if got := isBlockedHost(tt.host); got != tt.blocked {
+				t.Errorf("isBlockedHost(%q) = %v, want %v", tt.host, got, tt.blocked)
 			}
 		})
 	}
@@ -977,6 +987,76 @@ func TestBuiltInToolExecutor_Execute_ReadFile_BlocksSymlinkParentEscape(t *testi
 	}
 	if strings.Contains(result.Output, "SECRET_PARENT_DATA") {
 		t.Errorf("should not read outside data; output: %q", result.Output)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_ReadFile_BlocksSymlinkParentTOCTOU(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink semantics")
+	}
+	t.Parallel()
+
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("SECRET_TOCTOU_DATA"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	insideDir := filepath.Join(tmp, "parent")
+	if err := os.MkdirAll(insideDir, 0755); err != nil {
+		t.Fatalf("create inside dir: %v", err)
+	}
+	insideFile := filepath.Join(insideDir, "file.txt")
+	if err := os.WriteFile(insideFile, []byte("inside"), 0644); err != nil {
+		t.Fatalf("write inside file: %v", err)
+	}
+
+	// Race a parent component between a real inside directory and a symlink to
+	// an outside directory. Even if validation and opening race, os.Root must
+	// never allow outside data to be read.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	swapped := make(chan struct{})
+	go func() {
+		defer close(swapped)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			_ = os.RemoveAll(insideDir)
+			_ = os.Symlink(outside, insideDir)
+			_ = os.Remove(insideDir)
+			_ = os.MkdirAll(insideDir, 0755)
+			_ = os.WriteFile(insideFile, []byte("inside"), 0644)
+		}
+	}()
+
+	var sawEscape bool
+	for i := 0; i < 50; i++ {
+		result, err := exec.Execute(context.Background(), api.ToolCall{
+			ID:        fmt.Sprintf("call_%d", i),
+			Name:      "read_file",
+			Arguments: fmt.Sprintf(`{"path":"%s"}`, insideFile),
+		})
+		if err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if strings.Contains(result.Output, "SECRET_TOCTOU_DATA") {
+			sawEscape = true
+			break
+		}
+	}
+
+	cancel()
+	<-swapped
+
+	if sawEscape {
+		t.Fatal("read_file escaped sandbox via TOCTOU symlink parent swap")
 	}
 }
 

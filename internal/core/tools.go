@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -334,7 +335,8 @@ func (e *BuiltInToolExecutor) validatePath(path string) (string, error) {
 	if e.root == nil {
 		return absPath, nil
 	}
-	// Convert the validated absolute path to a root-relative path for os.Root.
+	// ValidateFilePath already verified sandbox containment, and os.Root enforces
+	// it at operation time. Convert to a root-relative path for os.Root.
 	rel, err := filepath.Rel(e.sandboxRoot, absPath)
 	if err != nil {
 		return "", fmt.Errorf("%w: path escapes sandbox", ErrSandboxViolation)
@@ -875,19 +877,8 @@ func (e *BuiltInToolExecutor) execReadFile(ctx context.Context, args readFileArg
 		return "", fmt.Errorf("read file: %w", err)
 	}
 
-	var info os.FileInfo
 	var f *os.File
 	if e.root != nil {
-		info, err = e.root.Stat(validPath)
-		if err != nil {
-			if isRootEscapeErr(err) {
-				return "", fmt.Errorf("read file: %w: path escapes sandbox", ErrSandboxViolation)
-			}
-			return "", fmt.Errorf("read file: %w", err)
-		}
-		if info.Size() > maxFileReadSize {
-			return "", fmt.Errorf("file exceeds max read size of %d bytes", maxFileReadSize)
-		}
 		f, err = e.root.Open(validPath)
 		if err != nil {
 			if isRootEscapeErr(err) {
@@ -900,19 +891,20 @@ func (e *BuiltInToolExecutor) execReadFile(ctx context.Context, args readFileArg
 			return "", fmt.Errorf("read file: %w", err)
 		}
 	} else {
-		info, err = os.Stat(validPath)
-		if err != nil {
-			return "", fmt.Errorf("read file: %w", err)
-		}
-		if info.Size() > maxFileReadSize {
-			return "", fmt.Errorf("file exceeds max read size of %d bytes", maxFileReadSize)
-		}
 		f, err = openFileNoFollow(validPath)
 		if err != nil {
 			return "", fmt.Errorf("read file: %w", err)
 		}
 	}
 	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+	if info.Size() > maxFileReadSize {
+		return "", fmt.Errorf("file exceeds max read size of %d bytes", maxFileReadSize)
+	}
 	data, err := io.ReadAll(f)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
@@ -960,6 +952,36 @@ func isRootEscapeErr(err error) bool {
 		// os.Root does not export a sentinel for this error, so we match the
 		// documented text. This will need updating if Go changes the message.
 		return pe.Err != nil && strings.Contains(pe.Err.Error(), "path escapes from parent")
+	}
+	return false
+}
+
+// isBlockedHost reports whether a hostname or IP should be blocked to prevent
+// SSRF attacks. It wraps netutil.IsBlockedHost and explicitly covers IPv4
+// CGNAT (100.64.0.0/10), IPv6 unique-local (fc00::/7), and IPv6 link-local
+// unicast (fe80::/10) ranges as defense-in-depth.
+func isBlockedHost(hostname string) bool {
+	if netutil.IsBlockedHost(hostname) {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	if ip == nil {
+		return false
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		// CGNAT 100.64.0.0/10.
+		if ipv4[0] == 100 && ipv4[1] >= 64 && ipv4[1] <= 127 {
+			return true
+		}
+		return false
+	}
+	// IPv6 fc00::/7 (unique-local).
+	if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
+		return true
+	}
+	// IPv6 fe80::/10 (link-local unicast).
+	if len(ip) == net.IPv6len && ip[0] == 0xfe && ip[1]>>2 == 0x80>>2 {
+		return true
 	}
 	return false
 }
@@ -1165,58 +1187,114 @@ func (e *BuiltInToolExecutor) replaceInFile(ctx context.Context, path, oldString
 		return "", fmt.Errorf("%s: %w", tool, err)
 	}
 
-	var data []byte
 	if e.root != nil {
-		f, err := e.root.Open(validPath)
-		if err != nil {
-			if isRootEscapeErr(err) {
-				return "", fmt.Errorf("%s: %w: path escapes sandbox", tool, ErrSandboxViolation)
-			}
-			return "", fmt.Errorf("read file: %w", err)
-		}
-		if err := checkFileHardlinkEscape(f); err != nil {
-			_ = f.Close()
-			return "", fmt.Errorf("%s: %w", tool, err)
-		}
-		data, err = io.ReadAll(f)
-		_ = f.Close()
-		if err != nil {
-			return "", fmt.Errorf("read file: %w", err)
+		if err := e.replaceInFileRoot(validPath, oldString, newString, replaceAll, tool); err != nil {
+			return "", err
 		}
 	} else {
-		f, err := openFileNoFollow(validPath)
-		if err != nil {
-			return "", fmt.Errorf("read file: %w", err)
+		if err := e.replaceInFileNoRoot(validPath, oldString, newString, replaceAll, tool); err != nil {
+			return "", err
 		}
-		defer func() { _ = f.Close() }()
-		data, err = io.ReadAll(f)
-		if err != nil {
-			return "", fmt.Errorf("read file: %w", err)
+	}
+	return fmt.Sprintf("replaced in %s", path), nil
+}
+
+// replaceInFileRoot opens the target file once with O_RDWR and performs the
+// read-modify-write through the single *os.File handle. os.Root enforces that
+// the path stays within the sandbox, and checkFileHardlinkEscape blocks
+// hardlink aliases to outside files.
+func (e *BuiltInToolExecutor) replaceInFileRoot(relPath, oldString, newString string, replaceAll bool, tool string) error {
+	f, err := e.root.OpenFile(relPath, os.O_RDWR, 0)
+	if err != nil {
+		if isRootEscapeErr(err) {
+			return fmt.Errorf("%s: %w: path escapes sandbox", tool, ErrSandboxViolation)
 		}
+		return fmt.Errorf("%s: %w", tool, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := checkFileHardlinkEscape(f); err != nil {
+		return fmt.Errorf("%s: %w", tool, err)
+	}
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("%s: %w", tool, err)
+	}
+	if info.Size() > maxFileReadSize {
+		return fmt.Errorf("%s: file exceeds max read size of %d bytes", tool, maxFileReadSize)
+	}
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return fmt.Errorf("%s: %w", tool, err)
 	}
 
 	content := string(data)
 	count := strings.Count(content, oldString)
 	if count == 0 {
-		return "", fmt.Errorf("old_string not found in file")
+		return fmt.Errorf("old_string not found in file")
 	}
 	if !replaceAll && count > 1 {
-		return "", fmt.Errorf("old_string occurs %d times; provide a unique old_string or set replace_all=true", count)
+		return fmt.Errorf("old_string occurs %d times; provide a unique old_string or set replace_all=true", count)
 	}
 	content = strings.ReplaceAll(content, oldString, newString)
 	if len(content) > maxFileWriteSize {
-		return "", fmt.Errorf("result exceeds max size of %d bytes", maxFileWriteSize)
+		return fmt.Errorf("%s: result exceeds max size of %d bytes", tool, maxFileWriteSize)
 	}
-	if e.root != nil {
-		if err := e.atomicWriteFileRoot(validPath, []byte(content), true); err != nil {
-			return "", fmt.Errorf("write file: %w", err)
-		}
-	} else {
-		if err := atomicWriteFile(validPath, []byte(content)); err != nil {
-			return "", fmt.Errorf("write file: %w", err)
-		}
+
+	if err := f.Truncate(0); err != nil {
+		return fmt.Errorf("%s: %w", tool, err)
 	}
-	return fmt.Sprintf("replaced in %s", path), nil
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("%s: %w", tool, err)
+	}
+	if _, err := f.Write([]byte(content)); err != nil {
+		return fmt.Errorf("%s: %w", tool, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("%s: %w", tool, err)
+	}
+	return nil
+}
+
+func (e *BuiltInToolExecutor) replaceInFileNoRoot(absPath, oldString, newString string, replaceAll bool, tool string) error {
+	f, err := openFileNoFollow(absPath)
+	if err != nil {
+		return fmt.Errorf("read file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("%s: %w", tool, err)
+	}
+	if info.Size() > maxFileReadSize {
+		return fmt.Errorf("%s: file exceeds max read size of %d bytes", tool, maxFileReadSize)
+	}
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return fmt.Errorf("read file: %w", err)
+	}
+
+	content := string(data)
+	count := strings.Count(content, oldString)
+	if count == 0 {
+		return fmt.Errorf("old_string not found in file")
+	}
+	if !replaceAll && count > 1 {
+		return fmt.Errorf("old_string occurs %d times; provide a unique old_string or set replace_all=true", count)
+	}
+	content = strings.ReplaceAll(content, oldString, newString)
+	if len(content) > maxFileWriteSize {
+		return fmt.Errorf("%s: result exceeds max size of %d bytes", tool, maxFileWriteSize)
+	}
+
+	if err := atomicWriteFile(absPath, []byte(content)); err != nil {
+		return fmt.Errorf("write file: %w", err)
+	}
+	return nil
 }
 
 func (e *BuiltInToolExecutor) execGlob(ctx context.Context, args globArgs) (string, error) {
@@ -1770,7 +1848,7 @@ func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args fetchURLArg
 		return "", fmt.Errorf("only http and https URLs are allowed")
 	}
 	// The authoritative SSRF guard is DialContext/CheckRedirect in the HTTP client, not this pre-check.
-	if netutil.IsBlockedHost(u.Hostname()) {
+	if isBlockedHost(u.Hostname()) {
 		return "", fmt.Errorf("URL host is blocked")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, args.URL, nil)

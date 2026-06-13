@@ -54,6 +54,12 @@ type ApprovalResponseMsg struct {
 	CallID   string
 }
 
+// ApprovalDiffMsg carries a diff preview for a pending tool call.
+type ApprovalDiffMsg struct {
+	CallID string
+	Diff   string
+}
+
 // SendMessageMsg is emitted by the root model to the app layer.
 type SendMessageMsg struct {
 	Content string

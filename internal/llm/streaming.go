@@ -42,8 +42,9 @@ func (r *StreamReader) Close() error {
 //
 // Quirk: OpenAI-style streams may signal the end of the stream twice: once
 // through a payload with a non-empty finish_reason, and again through the
-// "[DONE]" sentinel. Both cases set Done=true, so consumers must tolerate
-// duplicate terminal markers.
+// "[DONE]" sentinel. Both cases set Done=true, which means two consecutive
+// terminal chunks are possible. Callers must treat the first Done chunk as
+// terminal and stop reading (see internal/core/turn.go:350).
 func (r *StreamReader) readRawChunk(_ context.Context) (rawChunk, error) {
 	var data strings.Builder
 

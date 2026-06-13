@@ -37,6 +37,10 @@ type chatRequest struct {
 // final-response cycle using real store, real executor, real TurnManager, and an
 // httptest-backed LLM client.
 func TestAgenticLoop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 
@@ -164,41 +168,46 @@ func TestAgenticLoop(t *testing.T) {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
-	var userFound, assistantToolFound, toolFound, assistantFinalFound bool
-	for _, msg := range msgs {
-		switch msg.Role {
-		case api.RoleUser:
-			userFound = true
-		case api.RoleAssistant:
-			if len(msg.ToolCalls) > 0 {
-				assistantToolFound = true
-				if msg.ToolCalls[0].Name != "read_file" {
-					t.Errorf("expected read_file tool call, got %q", msg.ToolCalls[0].Name)
-				}
-				if msg.ToolCalls[0].Arguments == "" {
-					t.Error("tool call arguments survived round-trip empty")
-				}
-			} else {
-				assistantFinalFound = true
-			}
-		case api.RoleTool:
-			toolFound = true
-			if !strings.Contains(msg.Content, "hello from integration test") {
-				t.Errorf("tool message missing file content: %q", msg.Content)
-			}
-		}
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 persisted messages, got %d: %+v", len(msgs), msgs)
 	}
-	if !userFound {
-		t.Error("missing persisted user message")
+
+	if msgs[0].Role != api.RoleUser {
+		t.Errorf("message[0].role = %q, want %q", msgs[0].Role, api.RoleUser)
 	}
-	if !assistantToolFound {
-		t.Error("missing persisted assistant tool-call message")
+	if msgs[0].Content != "please read the file" {
+		t.Errorf("message[0].content = %q, want user prompt", msgs[0].Content)
 	}
-	if !toolFound {
-		t.Error("missing persisted tool result message")
+
+	if msgs[1].Role != api.RoleAssistant {
+		t.Errorf("message[1].role = %q, want %q", msgs[1].Role, api.RoleAssistant)
 	}
-	if !assistantFinalFound {
-		t.Error("missing persisted final assistant message")
+	if len(msgs[1].ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call on assistant message, got %d", len(msgs[1].ToolCalls))
+	}
+	if msgs[1].ToolCalls[0].Name != "read_file" {
+		t.Errorf("tool call name = %q, want read_file", msgs[1].ToolCalls[0].Name)
+	}
+	wantArgs := `{"path":"test.txt"}`
+	if msgs[1].ToolCalls[0].Arguments != wantArgs {
+		t.Errorf("tool call arguments = %q, want %q (SQLite round-trip)", msgs[1].ToolCalls[0].Arguments, wantArgs)
+	}
+
+	if msgs[2].Role != api.RoleTool {
+		t.Errorf("message[2].role = %q, want %q", msgs[2].Role, api.RoleTool)
+	}
+	if msgs[2].ToolCallID != "call_1" {
+		t.Errorf("tool message tool_call_id = %q, want call_1", msgs[2].ToolCallID)
+	}
+	if !strings.Contains(msgs[2].Content, "hello from integration test") {
+		t.Errorf("tool message missing file content: %q", msgs[2].Content)
+	}
+
+	if msgs[3].Role != api.RoleAssistant {
+		t.Errorf("message[3].role = %q, want %q", msgs[3].Role, api.RoleAssistant)
+	}
+	if msgs[3].Content != "Done reading." {
+		t.Errorf("final assistant message = %q, want %q", msgs[3].Content, "Done reading.")
 	}
 
 	// Verify the persisted turn.

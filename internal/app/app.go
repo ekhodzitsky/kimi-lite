@@ -233,6 +233,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	turnMgr := core.NewTurnManager(llmClient, toolExec, approval, st, &configProvider{cfg: cfg})
 	turnMgr.SetHookRunner(hookRunner)
 	turnMgr.SetMetricsCollector(metrics)
+	turnMgr.SetSandboxRoot(sandboxRoot)
 
 	// Create context compressor
 	modelInfo := llm.LookupModel(resolvedModel)

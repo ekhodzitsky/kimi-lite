@@ -191,6 +191,7 @@ func TestApprovalDecision_String(t *testing.T) {
 		{ApprovalNo, "no"},
 		{ApprovalYes, "yes"},
 		{ApprovalAlways, "always"},
+		{ApprovalDiff, "diff"},
 		{ApprovalDecision(999), "unknown"},
 	}
 

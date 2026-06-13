@@ -205,6 +205,7 @@ approve_always = "a"
 	assertNotEmpty("keybindings.approve_yes", cfg.Keybindings.ApproveYes)
 	assertNotEmpty("keybindings.approve_no", cfg.Keybindings.ApproveNo)
 	assertNotEmpty("keybindings.approve_always", cfg.Keybindings.ApproveAlways)
+	assertNotEmpty("keybindings.approve_diff", cfg.Keybindings.ApproveDiff)
 
 	// Spot-check exact values for fields that previously drifted out of the
 	// RawConfig mirror.

@@ -3,7 +3,10 @@ package core
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -332,6 +335,142 @@ func TestTurnManager_RunTurn_ManualApproval(t *testing.T) {
 	}
 
 	turn = tm.CurrentTurn()
+	if turn.State != api.TurnIdle {
+		t.Errorf("state = %d, want TurnIdle", turn.State)
+	}
+	if len(turn.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(turn.Results))
+	}
+	if turn.Results[0].Error != "" {
+		t.Errorf("unexpected result error: %s", turn.Results[0].Error)
+	}
+}
+
+func TestTurnManager_RunTurn_ApprovalDiffThenYes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "out.txt")
+	if err := os.WriteFile(target, []byte("old content"), 0644); err != nil {
+		t.Fatalf("write target file: %v", err)
+	}
+
+	callCount := 0
+	var executeCount atomic.Int32
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Content: "Let me write"},
+					api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+						{ID: "tc1", Name: "write_file", Arguments: `{"path":"` + target + `","content":"new content"}`},
+					}},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Content: "Done writing"},
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			executeCount.Add(1)
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "done"}, nil
+		},
+		defs: []api.ToolDefinition{{Name: "write_file", Description: "write"}},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalNo, false // manual approval required
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm.SetSandboxRoot(tmp)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Write a file")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	diffCh := make(chan api.TurnEvent, 1)
+	done := make(chan struct{})
+	approvalSeen := make(chan struct{})
+	go func() {
+		for e := range outCh {
+			switch e.Type {
+			case api.TurnEventApprovalRequest:
+				close(approvalSeen)
+			case api.TurnEventApprovalDiff:
+				select {
+				case diffCh <- e:
+				default:
+				}
+			}
+		}
+		close(done)
+	}()
+
+	select {
+	case <-approvalSeen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for approval request event")
+	}
+
+	if executeCount.Load() != 0 {
+		t.Fatalf("expected no tool execution before approval, got %d", executeCount.Load())
+	}
+
+	// Request a diff preview first.
+	_, reqID := tm.PendingApprovals()
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID, map[string]api.ApprovalDecision{"tc1": api.ApprovalDiff}); err != nil {
+		t.Fatalf("resume with diff: %v", err)
+	}
+
+	var diffEvent api.TurnEvent
+	select {
+	case diffEvent = <-diffCh:
+	case <-done:
+		t.Fatal("turn completed unexpectedly after diff request")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for diff event")
+	}
+
+	if diffEvent.DiffCallID != "tc1" {
+		t.Errorf("DiffCallID = %q, want tc1", diffEvent.DiffCallID)
+	}
+	if !strings.Contains(diffEvent.DiffContent, "old content") {
+		t.Errorf("DiffContent = %q, want containing old content", diffEvent.DiffContent)
+	}
+	if !strings.Contains(diffEvent.DiffContent, "new content") {
+		t.Errorf("DiffContent = %q, want containing new content", diffEvent.DiffContent)
+	}
+	if executeCount.Load() != 0 {
+		t.Fatalf("expected no tool execution after diff request, got %d", executeCount.Load())
+	}
+
+	// Now approve the pending call.
+	_, reqID = tm.PendingApprovals()
+	if err := tm.ResumeWithApproval(ctx, sess.ID, reqID, map[string]api.ApprovalDecision{"tc1": api.ApprovalYes}); err != nil {
+		t.Fatalf("resume with approval: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn to complete")
+	}
+
+	if executeCount.Load() != 1 {
+		t.Fatalf("expected 1 tool execution after yes, got %d", executeCount.Load())
+	}
+	turn := tm.CurrentTurn()
 	if turn.State != api.TurnIdle {
 		t.Errorf("state = %d, want TurnIdle", turn.State)
 	}

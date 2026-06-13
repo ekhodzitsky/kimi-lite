@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +37,10 @@ func FuzzReadChunk(f *testing.F) {
 		[]byte("event: message\nid: 42\nretry: 1000\ndata: mixed\n\n"),
 		// Truncated in the middle of a data line.
 		[]byte("data: {\"choices\":["),
+		// Two consecutive terminal markers, as emitted by OpenAI-style streams.
+		[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Done\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+		// Oversized data line (exceeds the default 64 KB scanner limit).
+		[]byte("data: " + strings.Repeat("x", 128*1024) + "\n\n"),
 	}
 
 	for _, s := range seeds {

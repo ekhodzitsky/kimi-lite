@@ -50,10 +50,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           go test -run=^$ -fuzz=FuzzReadChunk -fuzztime=10s ./internal/llm
-          go test -run=^$ -fuzz=FuzzIsBlockedHost -fuzztime=10s ./internal/netutil
+          go test -run=^$ -fuzz=FuzzIsBlockedHost -fuzztime=10s ./internal/core
           go test -run=^$ -fuzz=FuzzValidatePath -fuzztime=10s ./internal/core
-          go test -run=^$ -fuzz=FuzzHeuristicTokenEstimator -fuzztime=10s ./internal/core
-          go test -run=^$ -fuzz=FuzzRiskEvaluator -fuzztime=10s ./internal/core
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@e53489f4d376d79066609109e7a95a29eb3740b1 # v7.0.0

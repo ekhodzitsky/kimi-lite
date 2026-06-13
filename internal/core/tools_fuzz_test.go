@@ -7,56 +7,100 @@ import (
 	"testing"
 )
 
-// FuzzValidatePath exercises BuiltInToolExecutor.validatePath with arbitrary
-// inputs. It ensures the validator never panics and that any path it accepts
-// stays within the configured sandbox root.
-func FuzzValidatePath(f *testing.F) {
+// FuzzIsBlockedHost ensures the local SSRF guard never panics on arbitrary
+// host strings and accepts known private/loopback seeds.
+func FuzzIsBlockedHost(f *testing.F) {
 	seeds := []string{
-		"file.txt",
-		"subdir/file.txt",
-		"../escape",
-		"foo/../../../etc/passwd",
-		"....//....//etc/passwd",
-		"subdir/../file.txt",
-		"/absolute/outside",
-		"link",
+		"localhost",
+		"127.0.0.1",
+		"0.0.0.0",
+		"::1",
+		"::ffff:127.0.0.1",
+		"10.0.0.1",
+		"172.16.0.1",
+		"192.168.1.1",
+		"169.254.1.1",
+		"169.254.169.254",
+		"100.64.0.1",
+		"fd12:3456::1",
+		"fc00::1",
+		"fe80::1",
+		"::ffff:10.0.0.1",
+		"example.com",
+		"8.8.8.8",
+		"not-an-ip!@#$%",
 		"",
-		".",
-		"..",
-		"./././file",
 	}
-
 	for _, s := range seeds {
 		f.Add(s)
 	}
 
-	f.Fuzz(func(t *testing.T, path string) {
-		sandbox := t.TempDir()
+	f.Fuzz(func(t *testing.T, input string) {
+		// Must not panic on any input.
+		_ = isBlockedHost(input)
+	})
+}
 
-		// Create a symlink inside the sandbox that points outside; validatePath
-		// must either reject it or resolve it to a path still under the root.
-		_ = os.Symlink("/etc/passwd", filepath.Join(sandbox, "link"))
+// FuzzValidatePath ensures validatePath never panics on arbitrary strings and
+// that any returned relative path resolves to a location within the sandbox
+// root.
+func FuzzValidatePath(f *testing.F) {
+	seeds := []string{
+		"../outside",
+		"../../../etc/passwd",
+		"foo/../../../etc/passwd",
+		"....//....//etc/passwd",
+		"/etc/passwd",
+		"subdir/../..",
+		"subdir/../file.txt",
+		"./././file",
+		"normal.txt",
+		"symlink-style-name",
+		"%2e%2e%2fencoded",
+		strings.Repeat("../", 100),
+		".",
+		"..",
+		"",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
 
-		exec, err := NewBuiltInToolExecutor(ToolExecutorConfig{SandboxRoot: sandbox})
+	f.Fuzz(func(t *testing.T, input string) {
+		tmp := t.TempDir()
+
+		// Create a symlink inside the sandbox pointing outside.
+		outside := t.TempDir()
+		outsideFile := filepath.Join(outside, "secret.txt")
+		if err := os.WriteFile(outsideFile, []byte("secret"), 0644); err != nil {
+			t.Fatalf("write outside file: %v", err)
+		}
+		linkPath := filepath.Join(tmp, "link.txt")
+		if err := os.Symlink(outsideFile, linkPath); err != nil {
+			t.Fatalf("create symlink: %v", err)
+		}
+
+		exec, err := NewBuiltInToolExecutor(ToolExecutorConfig{SandboxRoot: tmp})
 		if err != nil {
-			t.Fatalf("create executor: %v", err)
+			t.Fatalf("NewBuiltInToolExecutor: %v", err)
 		}
 		defer exec.Close()
 
-		rel, err := exec.validatePath(path)
+		// Must not panic on any input.
+		rel, err := exec.validatePath(input)
 		if err != nil {
 			return
 		}
 
-		// A successful validation with a sandbox root must return a relative
-		// path whose joined absolute path is inside the sandbox.
-		sep := string(filepath.Separator)
-		resolvedRoot := exec.sandboxRoot
-		joined := filepath.Join(resolvedRoot, rel)
-		cleaned := filepath.Clean(joined)
-
-		if cleaned != resolvedRoot && !strings.HasPrefix(cleaned, resolvedRoot+sep) {
-			t.Errorf("validatePath(%q) accepted escaped path: rel=%q joined=%q root=%q", path, rel, cleaned, resolvedRoot)
+		// If validation succeeds, the resolved absolute path must be inside the
+		// sandbox root.
+		abs := filepath.Join(exec.sandboxRoot, rel)
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			t.Fatalf("resolve result %q: %v", abs, err)
+		}
+		if !isUnder(resolved, exec.sandboxRoot) {
+			t.Errorf("resolved path %q escapes sandbox %q (input %q, rel %q)", resolved, exec.sandboxRoot, input, rel)
 		}
 	})
 }

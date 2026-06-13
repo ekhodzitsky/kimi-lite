@@ -66,6 +66,8 @@ func (ac *approvalController) approveCurrent(decision api.ApprovalDecision) (App
 // It returns done=true when all calls have been processed, along with the
 // aggregated approvals map. alwaysAll is true only when the user chose "always"
 // for the first call, meaning every call should be approved.
+// ApprovalDiff is treated as a non-final request for more information and does
+// not advance the state machine.
 func (ac *approvalController) handleResponse(resp ApprovalResponseMsg) (done bool, approvals map[string]api.ApprovalDecision, alwaysAll bool) {
 	if resp.Decision == api.ApprovalAlways {
 		approvals = make(map[string]api.ApprovalDecision)
@@ -73,6 +75,10 @@ func (ac *approvalController) handleResponse(resp ApprovalResponseMsg) (done boo
 			approvals[call.ID] = api.ApprovalYes
 		}
 		return true, approvals, true
+	}
+
+	if resp.Decision == api.ApprovalDiff {
+		return false, nil, false
 	}
 
 	ac.decisions[resp.CallID] = resp.Decision

@@ -26,15 +26,16 @@ type approvalPayload struct {
 
 // TurnManager orchestrates a single user input → LLM response cycle.
 type TurnManager struct {
-	llm        api.LLMClient
-	tools      api.ToolExecutor
-	approval   api.ApprovalGate
-	store      api.Store
-	cfg        api.ConfigProvider
-	hookRunner api.HookRunner
-	metrics    api.MetricsCollector
-	mu         sync.RWMutex
-	turn       *api.Turn
+	llm         api.LLMClient
+	tools       api.ToolExecutor
+	approval    api.ApprovalGate
+	store       api.Store
+	cfg         api.ConfigProvider
+	hookRunner  api.HookRunner
+	metrics     api.MetricsCollector
+	sandboxRoot string
+	mu          sync.RWMutex
+	turn        *api.Turn
 
 	pendingMu    sync.Mutex
 	pendingCalls []api.ToolCall
@@ -71,6 +72,11 @@ func (tm *TurnManager) SetMetricsCollector(m api.MetricsCollector) {
 		m = api.NoopMetricsCollector{}
 	}
 	tm.metrics = m
+}
+
+// SetSandboxRoot sets the root directory used for diff previews.
+func (tm *TurnManager) SetSandboxRoot(root string) {
+	tm.sandboxRoot = root
 }
 
 // CurrentTurn returns a deep copy of the current turn.
@@ -296,32 +302,69 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 				return
 			}
 
-			var payload approvalPayload
-			select {
-			case payload = <-tm.approvalCh:
-			case <-ctx.Done():
-				tm.setError(ctx, sessionID, turn, ctx.Err())
-				return
-			}
-
-			// Ignore stale approval payloads whose requestID does not match
-			// the current pending set.
-			tm.pendingMu.Lock()
-			currentID := tm.requestID
-			tm.pendingMu.Unlock()
-			if payload.requestID != currentID {
-				slog.Warn("ignoring stale approval payload", "got", payload.requestID, "want", currentID)
-				// Treat all pending calls as denied.
-				for _, call := range pending {
-					results = append(results, api.ToolResult{
-						CallID: call.ID,
-						Name:   call.Name,
-						Error:  "tool call denied (stale approval)",
-					})
+		approvalLoop:
+			for {
+				var payload approvalPayload
+				select {
+				case payload = <-tm.approvalCh:
+				case <-ctx.Done():
+					tm.setError(ctx, sessionID, turn, ctx.Err())
+					return
 				}
-			} else {
-				for _, call := range pending {
 
+				// Ignore stale approval payloads whose requestID does not match
+				// the current pending set.
+				tm.pendingMu.Lock()
+				currentID := tm.requestID
+				tm.pendingMu.Unlock()
+				if payload.requestID != currentID {
+					slog.Warn("ignoring stale approval payload", "got", payload.requestID, "want", currentID)
+					// Treat all pending calls as denied.
+					for _, call := range pending {
+						results = append(results, api.ToolResult{
+							CallID: call.ID,
+							Name:   call.Name,
+							Error:  "tool call denied (stale approval)",
+						})
+					}
+					break approvalLoop
+				}
+
+				// Determine whether every decision in the payload is a diff request.
+				diffOnly := len(payload.decisions) > 0
+				for _, decision := range payload.decisions {
+					if decision != api.ApprovalDiff {
+						diffOnly = false
+						break
+					}
+				}
+
+				if diffOnly {
+					for callID, decision := range payload.decisions {
+						if decision != api.ApprovalDiff {
+							continue
+						}
+						for _, call := range pending {
+							if call.ID != callID {
+								continue
+							}
+							select {
+							case eventCh <- api.TurnEvent{
+								Type:        api.TurnEventApprovalDiff,
+								DiffCallID:  call.ID,
+								DiffContent: ToolCallDiff(call, tm.sandboxRoot),
+							}:
+							case <-ctx.Done():
+								tm.setError(ctx, sessionID, turn, ctx.Err())
+								return
+							}
+						}
+					}
+					// Keep the same pending calls and requestID; wait for a final decision.
+					continue approvalLoop
+				}
+
+				for _, call := range pending {
 					if err := ctx.Err(); err != nil {
 						results = append(results, api.ToolResult{
 							CallID: call.ID,
@@ -349,6 +392,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 					}
 					results = append(results, result)
 				}
+				break approvalLoop
 			}
 
 			tm.runApprovalHook(ctx, api.HookApprovalDecision, sessionID, turn.ID, pending)

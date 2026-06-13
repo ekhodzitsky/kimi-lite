@@ -235,16 +235,20 @@ const (
 	TurnEventApprovalRequest
 	// TurnEventToolResult signals that a tool call has produced a result.
 	TurnEventToolResult
+	// TurnEventApprovalDiff carries a diff preview for a pending tool call.
+	TurnEventApprovalDiff
 )
 
 // TurnEvent is emitted by TurnManager.RunTurn to report streaming progress.
 type TurnEvent struct {
-	Type      TurnEventType
-	Content   string
-	Error     error
-	ToolCalls []ToolCall
-	RequestID int64      // only used for TurnEventApprovalRequest
-	Result    ToolResult // only used for TurnEventToolResult
+	Type        TurnEventType
+	Content     string
+	Error       error
+	ToolCalls   []ToolCall
+	RequestID   int64      // only used for TurnEventApprovalRequest
+	Result      ToolResult // only used for TurnEventToolResult
+	DiffCallID  string     // only used for TurnEventApprovalDiff
+	DiffContent string     // only used for TurnEventApprovalDiff
 }
 
 // ModelInfo describes a configured LLM model.
@@ -311,6 +315,8 @@ const (
 	ApprovalYes
 	// ApprovalAlways always approves this tool.
 	ApprovalAlways
+	// ApprovalDiff requests a diff preview before deciding.
+	ApprovalDiff
 )
 
 // String returns the human-readable name of the approval decision.
@@ -322,6 +328,8 @@ func (d ApprovalDecision) String() string {
 		return "yes"
 	case ApprovalAlways:
 		return "always"
+	case ApprovalDiff:
+		return "diff"
 	default:
 		return "unknown"
 	}
@@ -702,5 +710,6 @@ type KeybindingConfig struct {
 	ApproveYes     string `mapstructure:"approve_yes"`
 	ApproveNo      string `mapstructure:"approve_no"`
 	ApproveAlways  string `mapstructure:"approve_always"`
+	ApproveDiff    string `mapstructure:"approve_diff"`
 	ExternalEditor string `mapstructure:"external_editor"`
 }

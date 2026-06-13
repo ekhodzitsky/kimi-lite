@@ -361,6 +361,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ApprovalResponseMsg:
 		cmds = append(cmds, m.handleApprovalResponse(msg)...)
 
+	case ApprovalDiffMsg:
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Diff preview for %s:\n%s", msg.CallID, msg.Diff), m.styles))
+		m.setState(api.TurnWaitingApproval)
+
 	case SessionsMsg:
 		cmds = append(cmds, m.handleSessions()...)
 
@@ -558,6 +562,11 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 			return cmds
 		case m.config.Keybindings.ApproveAlways:
 			if resp, ok := m.approval.approveCurrent(api.ApprovalAlways); ok {
+				cmds = append(cmds, func() tea.Msg { return resp })
+			}
+			return cmds
+		case m.config.Keybindings.ApproveDiff:
+			if resp, ok := m.approval.approveCurrent(api.ApprovalDiff); ok {
 				cmds = append(cmds, func() tea.Msg { return resp })
 			}
 			return cmds
@@ -761,6 +770,8 @@ func (m *Model) readStreamChunk() tea.Cmd {
 			return ApprovalRequestMsg{Calls: event.ToolCalls, RequestID: event.RequestID}
 		case api.TurnEventToolResult:
 			return ToolResultMsg{Result: event.Result}
+		case api.TurnEventApprovalDiff:
+			return ApprovalDiffMsg{CallID: event.DiffCallID, Diff: event.DiffContent}
 		default:
 			return nil
 		}
@@ -874,6 +885,21 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 
 	done, approvals, alwaysAll := m.approval.handleResponse(resp)
+
+	if resp.Decision == api.ApprovalDiff {
+		// Forward the diff request to the turn manager so it can emit a
+		// TurnEventApprovalDiff while keeping the pending call active.
+		reqID := m.approval.requestID()
+		cmds = append(cmds, func() tea.Msg {
+			if m.turnManager != nil && m.session != nil {
+				_ = m.turnManager.ResumeWithApproval(m.appCtx, m.session.ID, reqID, map[string]api.ApprovalDecision{resp.CallID: api.ApprovalDiff})
+			}
+			return StateChangeMsg{State: api.TurnWaitingApproval}
+		})
+		cmds = append(cmds, m.readStreamChunk())
+		return cmds
+	}
+
 	if !done {
 		return cmds
 	}
@@ -944,7 +970,7 @@ func (m *Model) renderApprovalDialog(background string) string {
 	} else {
 		fmt.Fprintf(&b, "Arguments: %s\n", call.Arguments)
 	}
-	fmt.Fprintf(&b, "\n[%s] yes  [%s] no  [%s] always", m.config.Keybindings.ApproveYes, m.config.Keybindings.ApproveNo, m.config.Keybindings.ApproveAlways)
+	fmt.Fprintf(&b, "\n[%s] yes  [%s] no  [%s] always  [%s] diff", m.config.Keybindings.ApproveYes, m.config.Keybindings.ApproveNo, m.config.Keybindings.ApproveAlways, m.config.Keybindings.ApproveDiff)
 
 	dialog := m.styles.ApprovalDialog.Render(b.String())
 	return overlayDialog(background, dialog, m.width, m.height)

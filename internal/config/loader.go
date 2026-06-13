@@ -72,6 +72,7 @@ func NewLoader() *Loader {
 	v.SetDefault("keybindings.approve_yes", defaults.Keybindings.ApproveYes)
 	v.SetDefault("keybindings.approve_no", defaults.Keybindings.ApproveNo)
 	v.SetDefault("keybindings.approve_always", defaults.Keybindings.ApproveAlways)
+	v.SetDefault("keybindings.approve_diff", defaults.Keybindings.ApproveDiff)
 	v.SetDefault("keybindings.external_editor", defaults.Keybindings.ExternalEditor)
 	v.SetDefault("ui.editor", defaults.UI.Editor)
 	v.SetDefault("permission.rules", []api.PermissionRule{})

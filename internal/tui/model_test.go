@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
@@ -117,6 +118,48 @@ func TestCommandCompact(t *testing.T) {
 	msg := cmd()
 	if _, ok := msg.(CompactMsg); !ok {
 		t.Errorf("expected CompactMsg, got %T", msg)
+	}
+	if len(model.messages) != 1 {
+		t.Errorf("messages length = %d, want 1", len(model.messages))
+	}
+}
+
+type recordingCompressor struct {
+	gotKeepRecent int
+}
+
+func (c *recordingCompressor) Compact(ctx context.Context, store api.MessageStore, sessionID string, keepRecent int) (int, error) {
+	c.gotKeepRecent = keepRecent
+	return 3, nil
+}
+
+func TestCommandCompact_KeepRecentFromConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Behavior.CompactKeepRecent = 7
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	comp := &recordingCompressor{}
+	m.SetCompressor(comp)
+	m.SetStore(&mockStore{})
+
+	updated, cmd := m.Update(input.SendMsg{Content: "/compact"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected command for compact")
+	}
+	msg := cmd()
+	if _, ok := msg.(CompactResultMsg); !ok {
+		t.Fatalf("expected CompactResultMsg, got %T", msg)
+	}
+	if comp.gotKeepRecent != 7 {
+		t.Errorf("Compact keepRecent = %d, want 7", comp.gotKeepRecent)
 	}
 	if len(model.messages) != 1 {
 		t.Errorf("messages length = %d, want 1", len(model.messages))
@@ -403,6 +446,218 @@ func TestApprovalResponse(t *testing.T) {
 	}
 	if len(model.approval.pending()) != 0 {
 		t.Errorf("pending approvals length = %d, want 0", len(model.approval.pending()))
+	}
+}
+
+func TestApprovalResponse_DiffDoesNotFinalize(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	calls := []api.ToolCall{
+		{ID: "1", Name: "edit_file", Arguments: `{}`},
+	}
+	m.Update(ApprovalRequestMsg{Calls: calls})
+
+	updated, _ := m.Update(ApprovalResponseMsg{Decision: api.ApprovalDiff, CallID: "1"})
+	model := updated.(*Model)
+
+	if model.state != api.TurnWaitingApproval {
+		t.Errorf("state = %d, want TurnWaitingApproval", model.state)
+	}
+	if len(model.approval.pending()) != 1 {
+		t.Errorf("pending approvals length = %d, want 1", len(model.approval.pending()))
+	}
+	if model.approval.currentIndex() != 0 {
+		t.Errorf("currentIndex = %d, want 0", model.approval.currentIndex())
+	}
+}
+
+type recordingTurnManager struct {
+	resumeCalls []struct {
+		requestID int64
+		approvals map[string]api.ApprovalDecision
+	}
+}
+
+func (r *recordingTurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+	r.resumeCalls = append(r.resumeCalls, struct {
+		requestID int64
+		approvals map[string]api.ApprovalDecision
+	}{requestID: requestID, approvals: approvals})
+	return nil
+}
+
+func TestApprovalResponse_DiffForwardsToTurnManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	rtm := &recordingTurnManager{}
+	m.SetTurnManager(rtm)
+
+	calls := []api.ToolCall{
+		{ID: "1", Name: "edit_file", Arguments: `{}`},
+	}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 42})
+
+	updated, cmd := m.Update(ApprovalResponseMsg{Decision: api.ApprovalDiff, CallID: "1"})
+	model := updated.(*Model)
+
+	if model.state != api.TurnWaitingApproval {
+		t.Errorf("state = %d, want TurnWaitingApproval", model.state)
+	}
+
+	if cmd == nil {
+		t.Fatal("expected command to forward diff request")
+	}
+
+	// The returned command is a batch containing the ResumeWithApproval command
+	// and the stream-polling command. Execute the batch to trigger the resume.
+	batchMsg := cmd()
+	batch, ok := batchMsg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected tea.BatchMsg, got %T", batchMsg)
+	}
+	var stateChangeSeen bool
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		if _, ok := c().(StateChangeMsg); ok {
+			stateChangeSeen = true
+		}
+	}
+	if !stateChangeSeen {
+		t.Error("expected a StateChangeMsg in the batch")
+	}
+
+	if len(rtm.resumeCalls) != 1 {
+		t.Fatalf("expected 1 ResumeWithApproval call, got %d", len(rtm.resumeCalls))
+	}
+	if rtm.resumeCalls[0].requestID != 42 {
+		t.Errorf("requestID = %d, want 42", rtm.resumeCalls[0].requestID)
+	}
+	if rtm.resumeCalls[0].approvals["1"] != api.ApprovalDiff {
+		t.Errorf("approvals[1] = %v, want ApprovalDiff", rtm.resumeCalls[0].approvals["1"])
+	}
+}
+
+func TestApprovalDiffMsg_AddsMessageAndKeepsWaiting(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	calls := []api.ToolCall{
+		{ID: "1", Name: "edit_file", Arguments: `{}`},
+	}
+	m.Update(ApprovalRequestMsg{Calls: calls})
+
+	updated, _ := m.Update(ApprovalDiffMsg{CallID: "1", Diff: "--- a\n+++ a\n@@\n-old\n+new"})
+	model := updated.(*Model)
+
+	if model.state != api.TurnWaitingApproval {
+		t.Errorf("state = %d, want TurnWaitingApproval", model.state)
+	}
+	if len(model.approval.pending()) != 1 {
+		t.Errorf("pending approvals length = %d, want 1", len(model.approval.pending()))
+	}
+	found := false
+	for _, msg := range model.messages {
+		if strings.Contains(msg.Content, "Diff preview") && strings.Contains(msg.Content, "-old") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected diff preview message, got %+v", model.messages)
+	}
+}
+
+func TestApprovalDialog_WideRunes(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: t.TempDir()}
+	m, _ := New(cfg, session, context.Background())
+	m.sidebar.Toggle()
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	// Build a background containing CJK characters so the overlay must handle
+	// wide runes outside the dialog as well as inside it.
+	m.addMessage(msgcomp.NewUserMessage("背景に広い文字があります", m.styles))
+
+	calls := []api.ToolCall{
+		{ID: "1", Name: "read_file", Arguments: `{"path": "文件.txt"}`},
+	}
+	updated, _ := m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+	model := updated.(*Model)
+
+	view := model.View().Content
+	lines := strings.Split(view, "\n")
+	if len(lines) != model.height {
+		t.Errorf("view line count = %d, want %d", len(lines), model.height)
+	}
+	for i, line := range lines {
+		if w := lipgloss.Width(line); w > model.width {
+			t.Errorf("line %d width = %d, want <= %d", i, w, model.width)
+		}
+	}
+	if !strings.Contains(view, "文件.txt") {
+		t.Errorf("view should contain wide-rune path, got %q", view)
+	}
+}
+
+func TestApprovalDialog_NarrowTerminal(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: t.TempDir()}
+	m, _ := New(cfg, session, context.Background())
+	m.sidebar.Toggle()
+	m.width = 30
+	m.height = 10
+	m.updateLayout()
+
+	calls := []api.ToolCall{
+		{ID: "1", Name: "read_file", Arguments: `{"path": "/very/long/path/that/exceeds/terminal/width/file.txt"}`},
+	}
+	updated, _ := m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+	model := updated.(*Model)
+
+	view := model.View().Content
+	lines := strings.Split(view, "\n")
+	if len(lines) != model.height {
+		t.Errorf("view line count = %d, want %d", len(lines), model.height)
+	}
+	for i, line := range lines {
+		if w := lipgloss.Width(line); w > model.width {
+			t.Errorf("line %d width = %d, want <= %d", i, w, model.width)
+		}
+	}
+	if !strings.Contains(view, "Tool call requires approval") {
+		t.Errorf("view should contain approval dialog, got %q", view)
 	}
 }
 

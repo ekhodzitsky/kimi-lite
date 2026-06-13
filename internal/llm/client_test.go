@@ -781,8 +781,9 @@ data: [DONE]
 		},
 		{
 			// Both the finish_reason payload and the trailing [DONE] sentinel
-			// yield a chunk with Done=true, so two consecutive terminal chunks
-			// are expected. Consumers break on the first Done (see turn.go:350).
+			// yield a chunk with Done=true, so two consecutive Done chunks are
+			// expected. Callers must treat the first Done chunk as terminal and
+			// stop reading; see internal/core/turn.go:350.
 			name: "done via finish_reason",
 			input: `data: {"choices":[{"delta":{"content":"Done"}}]}
 

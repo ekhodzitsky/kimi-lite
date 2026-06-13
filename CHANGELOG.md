@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-06-13
+
+### Added
+
+- **`list_directory` built-in tool** — read-only directory listing is now available to the model and auto-approved by default.
+- **Approval diff preview** — pressing `d` in the approval dialog shows an in-memory unified diff for pending `write_file`/`str_replace_file` calls before deciding.
+- **Fuzz targets** — added `FuzzReadChunk` (LLM SSE parsing), `FuzzIsBlockedHost`, and `FuzzValidatePath` (core sandbox escape).
+- **End-to-end integration test** — `tests/integration` now exercises a full user-input → LLM → tool-call → tool-result → final-response cycle with real SQLite, executor, and httptest LLM.
+- **CI fuzz smoke step** — GitHub Actions now runs all fuzz targets for 10 seconds each on Ubuntu.
+
+### Changed
+
+- **SQLite hardening** — DSN is now path-escaped, in-memory DBs use a named shared DSN, and all connection-scoped PRAGMAs (`foreign_keys`, `journal_mode`, `busy_timeout`) are applied via the driver `_pragma` DSN key so every connection is consistently configured.
+- **File-tool hardening** — file operations use `os.Root` to close the `validatePath` TOCTOU/hardlink/symlink-escape hole.
+- **Compaction** — leading system/identity prompts are preserved across `/compact`, the keepRecent boundary is pair-aware (won't split assistant tool_calls from their tool results), and tool activity is included in summaries.
+- **Input history** — history is now bounded by `session.max_history` and de-duplicates consecutive identical entries.
+- **External editor** — `ui.editor` is wired through `tea.ExecProcess`; falls back to `$EDITOR` and then a default editor.
+- **Status bar** — token/context usage is estimated and displayed live when `ui.show_token_count` is enabled.
+- **Sidebar** — vertical scrolling keeps the cursor/selection visible in large file trees.
+
+### Removed
+
+- Dead advertised surfaces: `/goal`, `/btw`, and plan mode (Shift+Tab) were no-ops and have been removed from code, config, and docs.
+
 ## [0.2.7] - 2026-06-13
 
 ### Changed

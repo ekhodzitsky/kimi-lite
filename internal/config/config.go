@@ -224,6 +224,7 @@ func DefaultConfig() *api.Config {
 			ApproveYes:     "y",
 			ApproveNo:      "n",
 			ApproveAlways:  "a",
+			ApproveDiff:    "d",
 			ExternalEditor: "ctrl+g",
 		},
 		Hooks: []api.HookConfig{},
