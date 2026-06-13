@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/glamour"
+	"charm.land/glamour/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
