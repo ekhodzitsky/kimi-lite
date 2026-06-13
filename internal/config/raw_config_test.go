@@ -50,7 +50,6 @@ guard_config = "/tmp/mcp.toml"
 [ui]
 theme = "light"
 show_token_count = false
-editor = "vim"
 
 [keybindings]
 send = "enter"
@@ -138,7 +137,6 @@ approve_always = "a"
 
 	// UI
 	assertNotEmpty("ui.theme", cfg.UI.Theme)
-	assertNotEmpty("ui.editor", cfg.UI.Editor)
 	// ShowTokenCount is intentionally false in the TOML; assert it decoded correctly.
 	if cfg.UI.ShowTokenCount {
 		t.Error("expected ui.show_token_count to be false")
@@ -161,9 +159,6 @@ approve_always = "a"
 	// RawConfig mirror.
 	if cfg.Behavior.CompactKeepRecent != 7 {
 		t.Errorf("expected behavior.compact_keep_recent = 7, got %d", cfg.Behavior.CompactKeepRecent)
-	}
-	if cfg.UI.Editor != "vim" {
-		t.Errorf("expected ui.editor = vim, got %q", cfg.UI.Editor)
 	}
 	if cfg.Keybindings.ToggleSidebar != "ctrl+b" {
 		t.Errorf("expected keybindings.toggle_sidebar = ctrl+b, got %q", cfg.Keybindings.ToggleSidebar)

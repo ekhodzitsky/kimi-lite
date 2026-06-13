@@ -435,7 +435,6 @@ type MCPConfig struct {
 type UIConfig struct {
 	Theme          string `mapstructure:"theme"`
 	ShowTokenCount bool   `mapstructure:"show_token_count"`
-	Editor         string `mapstructure:"editor"`
 }
 
 // KeybindingConfig holds keybinding settings.
