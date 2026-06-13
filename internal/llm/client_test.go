@@ -363,6 +363,7 @@ func TestClientChatStream(t *testing.T) {
 		name             string
 		streamData       string
 		wantContents     []string
+		wantToolCalls    []api.ToolCall
 		wantDone         bool
 		wantErr          bool
 		wantErrContain   string
@@ -392,7 +393,7 @@ data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"funct
 
 data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}}]}
 
-data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"path\":\"test.txt"}}]}}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"path\":\"test.txt\""}}]}}]}
 
 data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}
 
@@ -402,7 +403,32 @@ data: [DONE]
 
 `,
 			wantContents: []string{"Let me", " check"},
-			wantDone:     true,
+			wantToolCalls: []api.ToolCall{
+				{ID: "call_1", Name: "read_file", Arguments: `{"path":"test.txt"}`},
+			},
+			wantDone: true,
+		},
+		{
+			name: "sparse non-zero-based tool-call indices",
+			streamData: `data: {"choices":[{"delta":{"tool_calls":[{"index":2,"id":"call_2","type":"function","function":{"name":"grep"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","type":"function","function":{"name":"read_file"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{\"q\":\"x\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"a.txt\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+`,
+			wantContents: nil,
+			wantToolCalls: []api.ToolCall{
+				{ID: "call_0", Name: "read_file", Arguments: `{"path":"a.txt"}`},
+				{ID: "call_2", Name: "grep", Arguments: `{"q":"x"}`},
+			},
+			wantDone: true,
 		},
 		{
 			name:             "stream server error",
@@ -494,18 +520,12 @@ data: [DONE]
 				}
 			}
 
-			if tt.name == "stream with tool calls" {
-				if len(finalToolCalls) != 1 {
-					t.Fatalf("finalToolCalls = %d, want 1", len(finalToolCalls))
-				}
-				if finalToolCalls[0].ID != "call_1" {
-					t.Errorf("toolCall.ID = %q, want call_1", finalToolCalls[0].ID)
-				}
-				if finalToolCalls[0].Name != "read_file" {
-					t.Errorf("toolCall.Name = %q, want read_file", finalToolCalls[0].Name)
-				}
-				if !strings.Contains(finalToolCalls[0].Arguments, "path") {
-					t.Errorf("toolCall.Arguments = %q, want containing path", finalToolCalls[0].Arguments)
+			if len(finalToolCalls) != len(tt.wantToolCalls) {
+				t.Fatalf("finalToolCalls = %v, want %v", finalToolCalls, tt.wantToolCalls)
+			}
+			for i, want := range tt.wantToolCalls {
+				if finalToolCalls[i] != want {
+					t.Errorf("finalToolCalls[%d] = %+v, want %+v", i, finalToolCalls[i], want)
 				}
 			}
 		})
