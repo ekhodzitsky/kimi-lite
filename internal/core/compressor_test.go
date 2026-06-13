@@ -651,3 +651,45 @@ func hasOrphanedToolResult(msgs []api.Message) bool {
 	}
 	return false
 }
+
+// scalingEstimator returns len(msgs) * factor tokens.
+type scalingEstimator struct {
+	factor int
+}
+
+func (s *scalingEstimator) Estimate(msgs []api.Message) int { return len(msgs) * s.factor }
+
+func TestContextCompressor_SetTokenEstimator(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	for i := 0; i < 10; i++ {
+		_ = store.AppendMessage(ctx, sess.ID, api.Message{
+			ID:        fmt.Sprintf("m%d", i),
+			Role:      api.RoleUser,
+			Content:   fmt.Sprintf("message %d", i),
+			CreatedAt: time.Now().UTC(),
+		})
+	}
+
+	llm := &mockLLMClient{
+		chatFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+			return &api.Message{Role: api.RoleAssistant, Content: "summary", CreatedAt: time.Now().UTC()}, nil
+		},
+	}
+
+	// With contextWindow=1000 and an estimator that reports 100 tokens per
+	// message, the threshold (500) is exceeded and compaction should run.
+	compressor := NewContextCompressor(llm, 1000, 0)
+	compressor.SetTokenEstimator(&scalingEstimator{factor: 100})
+
+	summarized, err := compressor.Compact(ctx, store, sess.ID, 2)
+	if err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if summarized == 0 {
+		t.Error("expected compaction to run with high token estimate")
+	}
+}
