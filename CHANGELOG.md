@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-13
+
+### Changed
+
+- **CI/CD modernization** — bumped all GitHub Actions to Node 24 compatible versions (`actions/checkout` v6, `actions/setup-go` v6, `actions/upload-artifact` v7, `codecov/codecov-action` v7).
+- **Automated releases** — added `.github/workflows/release.yml` that runs GoReleaser on every `v*` tag, generates SBOMs with `syft`, and signs artifacts with keyless `cosign`.
+- **GoReleaser signing** — switched `.goreleaser.yml` to keyless cosign signing (`--yes`) and removed the Homebrew tap block until a dedicated tap repository token is configured.
+
 ## [0.2.1] - 2026-06-13
 
 ### Fixed
@@ -61,6 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `--debug` flag, sanitized error logging, structured `slog` output.
 - **Cross-platform** — static binary with `CGO_ENABLED=0`, supports macOS, Linux (glibc & musl), ARM64.
 
+[0.2.2]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.2
 [0.2.1]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.1
 [0.2.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.1.0
