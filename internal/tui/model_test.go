@@ -967,6 +967,64 @@ func TestLayoutGeometryConsistency(t *testing.T) {
 	}
 }
 
+func TestRawModeToggle_FocusedMessagePath(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	assistant := msgcomp.NewAssistantMessage("**bold**", m.styles)
+	m.addMessage(assistant)
+
+	// Process an Update to clear dirty state and render the assistant message.
+	updated, _ := m.Update(StateChangeMsg{State: api.TurnIdle})
+	model := updated.(*Model)
+
+	// Focus the viewport and press "r".
+	model.focused = focusViewport
+	updated2, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model2 := updated2.(*Model)
+
+	if len(model2.messages) != 1 {
+		t.Fatalf("messages length = %d, want 1", len(model2.messages))
+	}
+	if !model2.messages[0].RawMode {
+		t.Error("assistant message RawMode should be true after pressing r in viewport focus")
+	}
+}
+
+func TestRawModeToggle_InputFocusIgnored(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	assistant := msgcomp.NewAssistantMessage("**bold**", m.styles)
+	m.addMessage(assistant)
+
+	updated, _ := m.Update(StateChangeMsg{State: api.TurnIdle})
+	model := updated.(*Model)
+
+	// Input is focused by default; pressing "r" should not toggle raw mode.
+	updated2, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model2 := updated2.(*Model)
+
+	if len(model2.messages) != 1 {
+		t.Fatalf("messages length = %d, want 1", len(model2.messages))
+	}
+	if model2.messages[0].RawMode {
+		t.Error("assistant message RawMode should remain false when input is focused")
+	}
+}
+
 func TestDirtyFlag_StreamChunkSetsDirty(t *testing.T) {
 	t.Parallel()
 

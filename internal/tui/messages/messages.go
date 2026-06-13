@@ -40,7 +40,8 @@ const (
 
 // KeyMap defines keybindings for the message component.
 type KeyMap struct {
-	ToggleExpand key.Binding
+	ToggleExpand  key.Binding
+	ToggleRawMode key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings.
@@ -49,6 +50,10 @@ func DefaultKeyMap() KeyMap {
 		ToggleExpand: key.NewBinding(
 			key.WithKeys("enter"),
 			key.WithHelp("enter", "toggle expand"),
+		),
+		ToggleRawMode: key.NewBinding(
+			key.WithKeys("r"),
+			key.WithHelp("r", "toggle raw markdown"),
 		),
 	}
 }
@@ -69,6 +74,7 @@ type Message struct {
 	// Assistant rendering
 	Rendered    string // cached glamour output
 	renderCache string // content that was rendered
+	RawMode     bool   // when true, bypass glamour and show raw markdown
 
 	// Debounce state
 	needsRender bool
@@ -150,6 +156,10 @@ func (m *Message) UpdateMsg(msg tea.Msg) tea.Cmd {
 			m.Expanded = !m.Expanded
 			m.cacheWidth = -1
 		}
+		if key.Matches(msg, m.KeyMap.ToggleRawMode) && m.Type == TypeAssistant {
+			m.ToggleRawMode()
+			return func() tea.Msg { return RenderInvalidateMsg{} }
+		}
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft && m.Type == TypeToolCall {
 			m.Expanded = !m.Expanded
@@ -200,6 +210,26 @@ func (m *Message) SetStreaming(streaming bool) {
 	}
 }
 
+// SetRawMode toggles raw markdown rendering for assistant messages.
+// It clears the render cache so the next View() reflects the new mode.
+func (m *Message) SetRawMode(raw bool) {
+	if m.RawMode == raw {
+		return
+	}
+	m.RawMode = raw
+	m.Rendered = ""
+	m.renderCache = ""
+	m.needsRender = true
+}
+
+// ToggleRawMode flips the current raw-mode state.
+func (m *Message) ToggleRawMode() {
+	m.SetRawMode(!m.RawMode)
+}
+
+// RenderInvalidateMsg signals that the transcript render cache needs to be rebuilt.
+type RenderInvalidateMsg struct{}
+
 // SetToolResult sets the result for a tool call message.
 func (m *Message) SetToolResult(r api.ToolResult) {
 	m.ToolResult = &r
@@ -227,6 +257,13 @@ func (m *Message) viewAssistant() string {
 func (m *Message) renderedContent() string {
 	if !m.Streaming && m.Rendered != "" && m.renderCache == m.Content && !m.needsRender {
 		return m.Rendered
+	}
+
+	// Raw mode bypasses glamour for finished assistant messages.
+	if m.RawMode && !m.Streaming {
+		m.renderCache = m.Content
+		m.needsRender = false
+		return m.Content
 	}
 
 	shouldRender := !m.Streaming

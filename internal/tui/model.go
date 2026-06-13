@@ -388,6 +388,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setState(api.TurnIdle)
 
+	case msgcomp.RenderInvalidateMsg:
+		m.rebuildRenderedContent()
+
 	case input.SendMsg:
 		cmds = append(cmds, m.handleSend(msg.Content)...)
 
@@ -419,8 +422,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncInputCandidates()
 	}
 
-	// Update messages - do not pass KeyMsg to message components (mouse only)
-	if _, ok := msg.(tea.KeyMsg); !ok {
+	// Update messages - pass KeyMsg through only when the viewport is focused
+	// so message-level bindings (e.g. "r" to toggle raw markdown) are reachable.
+	if _, ok := msg.(tea.KeyMsg); ok {
+		if m.focused == focusViewport {
+			for i := range m.messages {
+				cmds = append(cmds, m.messages[i].UpdateMsg(msg))
+			}
+		}
+	} else {
 		for i := range m.messages {
 			cmds = append(cmds, m.messages[i].UpdateMsg(msg))
 		}

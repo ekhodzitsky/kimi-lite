@@ -192,6 +192,102 @@ func TestMessageViewAssistant(t *testing.T) {
 	}
 }
 
+func TestSetRawMode_InvalidatesCache(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewAssistantMessage("**bold**", st)
+	m.SetWidth(80)
+
+	// Prime the glamour cache.
+	_ = m.View()
+	if m.Rendered == "" {
+		t.Fatal("Rendered cache should be populated after View")
+	}
+	if m.needsRender {
+		t.Fatal("needsRender should be false after render")
+	}
+
+	m.SetRawMode(true)
+
+	if !m.RawMode {
+		t.Error("RawMode should be true")
+	}
+	if m.Rendered != "" {
+		t.Errorf("Rendered cache should be cleared, got %q", m.Rendered)
+	}
+	if m.renderCache != "" {
+		t.Errorf("renderCache should be cleared, got %q", m.renderCache)
+	}
+	if !m.needsRender {
+		t.Error("needsRender should be true after SetRawMode")
+	}
+}
+
+func TestSetRawMode_BypassesGlamour(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	content := "**bold** and `code`"
+	m := NewAssistantMessage(content, st)
+	m.SetWidth(80)
+
+	rendered := m.renderedContent()
+	if rendered == content {
+		t.Fatal("rendered content should differ from raw content")
+	}
+
+	m.SetRawMode(true)
+	raw := m.renderedContent()
+	if raw != content {
+		t.Errorf("raw renderedContent = %q, want %q", raw, content)
+	}
+	if strings.Contains(raw, "\x1b[") {
+		t.Error("raw renderedContent should not contain ANSI escape codes")
+	}
+
+	m.SetRawMode(false)
+	renderedAgain := m.renderedContent()
+	if renderedAgain == content {
+		t.Error("rendered content should differ from raw content after disabling raw mode")
+	}
+}
+
+func TestToggleRawModeKeyBinding(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewAssistantMessage("**bold**", st)
+
+	cmd := m.UpdateMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd == nil {
+		t.Fatal("UpdateMsg should return a command for raw-mode toggle")
+	}
+	if !m.RawMode {
+		t.Error("RawMode should be true after toggling")
+	}
+
+	msg := cmd()
+	if _, ok := msg.(RenderInvalidateMsg); !ok {
+		t.Errorf("cmd() returned %T, want RenderInvalidateMsg", msg)
+	}
+}
+
+func TestToggleRawModeKeyBinding_NonAssistantIgnored(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewUserMessage("**bold**", st)
+
+	cmd := m.UpdateMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd != nil {
+		t.Error("UpdateMsg should not return a command for non-assistant messages")
+	}
+	if m.RawMode {
+		t.Error("RawMode should remain false for non-assistant messages")
+	}
+}
+
 func TestMessageViewToolCall(t *testing.T) {
 	t.Parallel()
 
