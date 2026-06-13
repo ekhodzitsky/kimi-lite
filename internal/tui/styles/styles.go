@@ -1,27 +1,31 @@
 // Package styles provides Lipgloss styles for the kimi-lite TUI.
 package styles
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"image/color"
+
+	"charm.land/lipgloss/v2"
+)
 
 // Theme represents a UI theme with color definitions.
 type Theme struct {
 	Name            string
-	Background      lipgloss.Color
-	Foreground      lipgloss.Color
-	Primary         lipgloss.Color
-	Secondary       lipgloss.Color
-	Success         lipgloss.Color
-	Warning         lipgloss.Color
-	Error           lipgloss.Color
-	Muted           lipgloss.Color
-	Border          lipgloss.Color
-	UserBubble      lipgloss.Color
-	AssistantBubble lipgloss.Color
-	ToolBubble      lipgloss.Color
-	StatusBarBg     lipgloss.Color
-	SidebarBg       lipgloss.Color
-	InputBg         lipgloss.Color
-	Highlight       lipgloss.Color
+	Background      color.Color
+	Foreground      color.Color
+	Primary         color.Color
+	Secondary       color.Color
+	Success         color.Color
+	Warning         color.Color
+	Error           color.Color
+	Muted           color.Color
+	Border          color.Color
+	UserBubble      color.Color
+	AssistantBubble color.Color
+	ToolBubble      color.Color
+	StatusBarBg     color.Color
+	SidebarBg       color.Color
+	InputBg         color.Color
+	Highlight       color.Color
 }
 
 // DarkTheme is the default dark theme.
