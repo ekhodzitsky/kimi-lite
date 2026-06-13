@@ -39,6 +39,11 @@ func (r *StreamReader) Close() error {
 // client.go can access the index field for incremental tool-call accumulation.
 // The caller is responsible for ensuring the context can unblock the underlying
 // reader (e.g. by closing the body on cancellation).
+//
+// Quirk: OpenAI-style streams may signal the end of the stream twice: once
+// through a payload with a non-empty finish_reason, and again through the
+// "[DONE]" sentinel. Both cases set Done=true, so consumers must tolerate
+// duplicate terminal markers.
 func (r *StreamReader) readRawChunk(_ context.Context) (rawChunk, error) {
 	var data strings.Builder
 
