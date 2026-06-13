@@ -23,6 +23,7 @@ as a new top-level workflow rather than retrofitting a dead config field.
 
 - `pkg/api.UIConfig` no longer carries `Editor`.
 - Existing TOML files with `ui.editor` will be silently ignored.
+
 ## Amendment: external-editor workflow
 
 External editor integration was implemented as a real workflow. The `Editor`
