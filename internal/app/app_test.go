@@ -2187,6 +2187,7 @@ func TestApp_New_StoreError(t *testing.T) {
 func TestApp_New_ConfigDirError(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 
 	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
 	app, err := New(cfg, false)
@@ -2205,7 +2206,11 @@ func TestApp_New_DiscoverSkillsError(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	configDir := filepath.Join(tmpDir, "Library", "Application Support", "kimi-lite")
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error: %v", err)
+	}
+	configDir := filepath.Join(userConfigDir, "kimi-lite")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}

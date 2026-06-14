@@ -551,7 +551,11 @@ func TestEnsureConfigDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureConfigDir() error: %v", err)
 	}
-	want := filepath.Join(tmpDir, "Library", "Application Support", "kimi-lite")
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error: %v", err)
+	}
+	want := filepath.Join(configDir, "kimi-lite")
 	if dir != want {
 		t.Errorf("EnsureConfigDir() = %q, want %q", dir, want)
 	}
@@ -580,7 +584,11 @@ func TestWriteDefaultConfig_UsesConfigDir(t *testing.T) {
 		t.Fatalf("WriteDefaultConfig() error: %v", err)
 	}
 
-	configPath := filepath.Join(tmpDir, "Library", "Application Support", "kimi-lite", "config.toml")
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error: %v", err)
+	}
+	configPath := filepath.Join(configDir, "kimi-lite", "config.toml")
 	info, err := os.Stat(configPath)
 	if err != nil {
 		t.Fatalf("stat config file: %v", err)
