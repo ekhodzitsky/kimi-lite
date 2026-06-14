@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1297,6 +1300,64 @@ func TestSQLite_MigrationRunner(t *testing.T) {
 			t.Errorf("user_version after re-run = %d, want 2", version2)
 		}
 	})
+
+	t.Run("query user_version error", func(t *testing.T) {
+		t.Parallel()
+		db := newPartialErrDB(t, partialErrDriver{
+			queryErr: func(query string) error {
+				if strings.Contains(query, "user_version") {
+					return errors.New("user_version error")
+				}
+				return nil
+			},
+		})
+		defer db.Close()
+
+		if err := runMigrations(db, migrationFiles, "migrations"); err == nil {
+			t.Fatal("expected error when user_version query fails")
+		}
+	})
+
+	t.Run("begin error", func(t *testing.T) {
+		t.Parallel()
+		db := newPartialErrDB(t, partialErrDriver{
+			beginErr: errors.New("begin error"),
+		})
+		defer db.Close()
+
+		if err := runMigrations(db, migrationFiles, "migrations"); err == nil {
+			t.Fatal("expected error when begin fails")
+		}
+	})
+
+	t.Run("set user_version error", func(t *testing.T) {
+		t.Parallel()
+		db := newPartialErrDB(t, partialErrDriver{
+			execErr: func(query string) error {
+				if strings.Contains(query, "PRAGMA user_version") {
+					return errors.New("set user_version error")
+				}
+				return nil
+			},
+		})
+		defer db.Close()
+
+		if err := runMigrations(db, migrationFiles, "migrations"); err == nil {
+			t.Fatal("expected error when setting user_version fails")
+		}
+	})
+
+	t.Run("commit error", func(t *testing.T) {
+		t.Parallel()
+		db := newPartialErrDB(t, partialErrDriver{
+			commitErr: errors.New("commit error"),
+		})
+		defer db.Close()
+
+		if err := runMigrations(db, migrationFiles, "migrations"); err == nil {
+			t.Fatal("expected error when commit fails")
+		}
+	})
 }
 
 func TestSQLite_WALSHMPermissions(t *testing.T) {
@@ -1432,4 +1493,1417 @@ func TestSQLite_Close_NilSafe(t *testing.T) {
 	if err := s2.Close(); err != nil {
 		t.Errorf("nil db Close returned error: %v", err)
 	}
+}
+
+func TestSQLite_CountTurns(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, err := s.CreateSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, err := s.CountTurns(ctx, "", api.TurnIdle); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+
+	count, err := s.CountTurns(ctx, sess.ID, api.TurnIdle)
+	if err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+
+	for i, state := range []api.TurnState{api.TurnIdle, api.TurnIdle, api.TurnThinking} {
+		turn := api.Turn{
+			ID:        fmt.Sprintf("turn-%d", i),
+			State:     state,
+			StartedAt: time.Now().UTC(),
+		}
+		if err := s.SaveTurn(ctx, sess.ID, turn); err != nil {
+			t.Fatalf("save turn %d: %v", i, err)
+		}
+	}
+
+	count, err = s.CountTurns(ctx, sess.ID, api.TurnIdle)
+	if err != nil {
+		t.Fatalf("count idle turns: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("idle count = %d, want 2", count)
+	}
+
+	count, err = s.CountTurns(ctx, sess.ID, api.TurnThinking)
+	if err != nil {
+		t.Fatalf("count thinking turns: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("thinking count = %d, want 1", count)
+	}
+}
+
+func TestParseMigrationVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		input  string
+		want   int
+		wantOK bool
+	}{
+		{"valid", "001_initial.sql", 1, true},
+		{"large prefix", "123_migration.sql", 123, true},
+		{"no underscore", "initial.sql", 0, false},
+		{"non numeric prefix", "abc_initial.sql", 0, false},
+		{"zero prefix", "000_initial.sql", 0, false},
+		{"negative prefix", "-001_initial.sql", 0, false},
+		{"empty", "", 0, false},
+		{"only number", "001.sql", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := parseMigrationVersion(tt.input)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("parseMigrationVersion(%q) = (%d, %v), want (%d, %v)", tt.input, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestInitialCapacity(t *testing.T) {
+	t.Parallel()
+
+	if got := initialCapacity(100); got != 100 {
+		t.Errorf("initialCapacity(100) = %d, want 100", got)
+	}
+	if got := initialCapacity(0); got != 16 {
+		t.Errorf("initialCapacity(0) = %d, want 16", got)
+	}
+	if got := initialCapacity(-5); got != 16 {
+		t.Errorf("initialCapacity(-5) = %d, want 16", got)
+	}
+}
+
+func TestRunMigrations_Errors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("read dir error", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		badFS := &failFS{readDirErr: errors.New("boom")}
+		if err := runMigrations(db, badFS, "."); err == nil {
+			t.Fatal("expected error for read dir failure")
+		}
+	})
+
+	t.Run("read file error", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		tmpDir := t.TempDir()
+		migrationsDir := filepath.Join(tmpDir, "migrations")
+		if err := os.MkdirAll(migrationsDir, 0755); err != nil {
+			t.Fatalf("create migrations dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(migrationsDir, "001_initial.sql"), []byte("SELECT 1;"), 0644); err != nil {
+			t.Fatalf("write migration: %v", err)
+		}
+
+		badFS := &failFS{
+			delegate:    os.DirFS(migrationsDir),
+			readFileErr: errors.New("read boom"),
+		}
+		if err := runMigrations(db, badFS, "."); err == nil {
+			t.Fatal("expected error for read file failure")
+		}
+	})
+
+	t.Run("invalid migration sql", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		tmpDir := t.TempDir()
+		migrationsDir := filepath.Join(tmpDir, "migrations")
+		if err := os.MkdirAll(migrationsDir, 0755); err != nil {
+			t.Fatalf("create migrations dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(migrationsDir, "001_bad.sql"), []byte("THIS IS NOT SQL"), 0644); err != nil {
+			t.Fatalf("write migration: %v", err)
+		}
+
+		if err := runMigrations(db, os.DirFS(migrationsDir), "."); err == nil {
+			t.Fatal("expected error for invalid migration SQL")
+		}
+	})
+
+	t.Run("non sql files ignored", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		tmpDir := t.TempDir()
+		migrationsDir := filepath.Join(tmpDir, "migrations")
+		if err := os.MkdirAll(migrationsDir, 0755); err != nil {
+			t.Fatalf("create migrations dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(migrationsDir, "001_initial.sql"), []byte("SELECT 1;"), 0644); err != nil {
+			t.Fatalf("write migration: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(migrationsDir, "README.md"), []byte("docs"), 0644); err != nil {
+			t.Fatalf("write readme: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(migrationsDir, "002invalid.sql"), []byte("SELECT 2;"), 0644); err != nil {
+			t.Fatalf("write invalid migration: %v", err)
+		}
+
+		if err := runMigrations(db, os.DirFS(migrationsDir), "."); err != nil {
+			t.Fatalf("run migrations: %v", err)
+		}
+
+		var version int
+		if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+			t.Fatalf("read user_version: %v", err)
+		}
+		if version != 1 {
+			t.Errorf("user_version = %d, want 1", version)
+		}
+	})
+
+	t.Run("migrations sorted", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		tmpDir := t.TempDir()
+		migrationsDir := filepath.Join(tmpDir, "migrations")
+		if err := os.MkdirAll(migrationsDir, 0755); err != nil {
+			t.Fatalf("create migrations dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(migrationsDir, "002_second.sql"), []byte("CREATE TABLE second (id TEXT PRIMARY KEY);"), 0644); err != nil {
+			t.Fatalf("write migration 2: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(migrationsDir, "001_first.sql"), []byte("CREATE TABLE first (id TEXT PRIMARY KEY);"), 0644); err != nil {
+			t.Fatalf("write migration 1: %v", err)
+		}
+
+		if err := runMigrations(db, os.DirFS(migrationsDir), "."); err != nil {
+			t.Fatalf("run migrations: %v", err)
+		}
+
+		for _, table := range []string{"first", "second"} {
+			var count int
+			if err := db.QueryRow(fmt.Sprintf(`SELECT count(*) FROM %s`, table)).Scan(&count); err != nil {
+				t.Errorf("table %s missing: %v", table, err)
+			}
+		}
+	})
+}
+
+func TestMigrateToolCallIDColumn_Errors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("messages table missing", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		if err := migrateToolCallIDColumn(db); err == nil {
+			t.Fatal("expected error when messages table missing")
+		}
+	})
+
+	t.Run("column already present", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		if _, err := db.Exec(`CREATE TABLE messages (id TEXT, tool_call_id TEXT)`); err != nil {
+			t.Fatalf("create messages table: %v", err)
+		}
+
+		if err := migrateToolCallIDColumn(db); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+	})
+
+	t.Run("rows iteration error", func(t *testing.T) {
+		t.Parallel()
+		db := newErrRowsDB(t, errors.New("rows error"))
+		defer db.Close()
+
+		if err := migrateToolCallIDColumn(db); err == nil {
+			t.Fatal("expected error when rows iteration fails")
+		}
+	})
+
+	t.Run("alter table error", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		if _, err := db.Exec(`CREATE TABLE messages (id TEXT)`); err != nil {
+			t.Fatalf("create messages table: %v", err)
+		}
+		if _, err := db.Exec(`PRAGMA query_only = 1`); err != nil {
+			t.Fatalf("set query_only: %v", err)
+		}
+
+		if err := migrateToolCallIDColumn(db); err == nil {
+			t.Fatal("expected error when ALTER TABLE fails")
+		}
+	})
+}
+
+func TestMigrateTurnsStateColumn_Errors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("query error", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		db.Close()
+
+		if err := migrateTurnsStateColumn(db); err == nil {
+			t.Fatal("expected error when db is closed")
+		}
+	})
+
+	t.Run("no migration needed", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		if _, err := db.Exec(`CREATE TABLE turns (id TEXT, state TEXT)`); err != nil {
+			t.Fatalf("create turns table: %v", err)
+		}
+
+		if err := migrateTurnsStateColumn(db); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+	})
+
+	t.Run("rows iteration error", func(t *testing.T) {
+		t.Parallel()
+		db := newErrRowsDB(t, errors.New("rows error"))
+		defer db.Close()
+
+		if err := migrateTurnsStateColumn(db); err == nil {
+			t.Fatal("expected error when rows iteration fails")
+		}
+	})
+
+	t.Run("migration sql error", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		if _, err := db.Exec(`CREATE TABLE turns (id TEXT, state INTEGER)`); err != nil {
+			t.Fatalf("create turns table: %v", err)
+		}
+		if _, err := db.Exec(`CREATE TABLE turns_old (id TEXT)`); err != nil {
+			t.Fatalf("create turns_old table: %v", err)
+		}
+
+		if err := migrateTurnsStateColumn(db); err == nil {
+			t.Fatal("expected error when migration SQL fails")
+		}
+	})
+}
+
+func TestNewSQLite_Errors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("directory as db path", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		_, err := NewSQLite(dir)
+		if err == nil {
+			t.Fatal("expected error when db path is a directory")
+		}
+	})
+
+	t.Run("nonexistent parent directory", func(t *testing.T) {
+		t.Parallel()
+		_, err := NewSQLite(filepath.Join(t.TempDir(), "missing", "test.db"))
+		if err == nil {
+			t.Fatal("expected error when parent directory missing")
+		}
+	})
+
+	t.Run("corrupted db file", func(t *testing.T) {
+		t.Parallel()
+		dbPath := filepath.Join(t.TempDir(), "corrupt.db")
+		if err := os.WriteFile(dbPath, []byte("not a sqlite database"), 0644); err != nil {
+			t.Fatalf("write corrupt file: %v", err)
+		}
+		_, err := NewSQLite(dbPath)
+		if err == nil {
+			t.Fatal("expected error for corrupted db file")
+		}
+	})
+
+	t.Run("read only parent directory", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0555); err != nil {
+			t.Fatalf("chmod dir: %v", err)
+		}
+		defer os.Chmod(dir, 0755)
+
+		dbPath := filepath.Join(dir, "test.db")
+		_, err := NewSQLite(dbPath)
+		if err == nil {
+			t.Fatal("expected error when parent directory is read only")
+		}
+	})
+
+	t.Run("main db chmod error", func(t *testing.T) {
+		t.Parallel()
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		_, err := newSQLiteWithOptions(dbPath, withChmod(func(string, os.FileMode) error {
+			return errors.New("chmod denied")
+		}))
+		if err == nil {
+			t.Fatal("expected error when main db chmod fails")
+		}
+	})
+
+	t.Run("wal chmod error", func(t *testing.T) {
+		t.Parallel()
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		_, err := newSQLiteWithOptions(dbPath, withChmod(func(path string, mode os.FileMode) error {
+			if strings.HasSuffix(path, "-wal") || strings.HasSuffix(path, "-shm") {
+				return errors.New("wal chmod denied")
+			}
+			return os.Chmod(path, mode)
+		}))
+		if err == nil {
+			t.Fatal("expected error when wal chmod fails")
+		}
+	})
+
+	t.Run("migrate tool_call_id fails on virtual messages table", func(t *testing.T) {
+		t.Parallel()
+		dbPath := filepath.Join(t.TempDir(), "virtual.db")
+		db, err := sql.Open("sqlite", sqliteDSN(dbPath))
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		// sessions and turns tables satisfy runMigrations; messages as virtual
+		// table cannot be ALTERed, causing migrateToolCallIDColumn to fail.
+		stmts := []string{
+			`CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, path TEXT, created_at DATETIME, updated_at DATETIME);`,
+			`CREATE VIRTUAL TABLE messages USING fts5(id, content);`,
+			`CREATE TABLE turns (id TEXT, session_id TEXT, state TEXT, input TEXT, response TEXT, tool_calls TEXT, results TEXT, error TEXT, started_at DATETIME, ended_at DATETIME, PRIMARY KEY (id, session_id));`,
+		}
+		for _, stmt := range stmts {
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatalf("exec stmt: %v", err)
+			}
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+
+		_, err = NewSQLite(dbPath)
+		if err == nil {
+			t.Fatal("expected error when migrateToolCallIDColumn fails")
+		}
+	})
+
+	t.Run("migrate turns state fails when turns_old exists", func(t *testing.T) {
+		t.Parallel()
+		dbPath := filepath.Join(t.TempDir(), "turnsold.db")
+		db, err := sql.Open("sqlite", sqliteDSN(dbPath))
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		stmts := []string{
+			`CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, path TEXT, created_at DATETIME, updated_at DATETIME);`,
+			`CREATE TABLE messages (id TEXT, session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT, tool_calls TEXT, created_at DATETIME, PRIMARY KEY (id, session_id));`,
+			`CREATE TABLE turns_old (id TEXT);`,
+			`CREATE TABLE turns (id TEXT, session_id TEXT, state INTEGER, input TEXT, response TEXT, tool_calls TEXT, results TEXT, error TEXT, started_at DATETIME, ended_at DATETIME, PRIMARY KEY (id, session_id));`,
+		}
+		for _, stmt := range stmts {
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatalf("exec stmt: %v", err)
+			}
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+
+		_, err = NewSQLite(dbPath)
+		if err == nil {
+			t.Fatal("expected error when migrateTurnsStateColumn fails")
+		}
+	})
+
+	t.Run("cleanup orphaned turns fails when state column missing", func(t *testing.T) {
+		t.Parallel()
+		dbPath := filepath.Join(t.TempDir(), "cleanup.db")
+		db, err := sql.Open("sqlite", sqliteDSN(dbPath))
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		stmts := []string{
+			`CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, path TEXT, created_at DATETIME, updated_at DATETIME);`,
+			`CREATE TABLE messages (id TEXT, session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT, tool_calls TEXT, created_at DATETIME, PRIMARY KEY (id, session_id));`,
+			`CREATE TABLE turns (id TEXT, session_id TEXT, input TEXT, response TEXT, tool_calls TEXT, results TEXT, error TEXT, started_at DATETIME, ended_at DATETIME, PRIMARY KEY (id, session_id));`,
+		}
+		for _, stmt := range stmts {
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatalf("exec stmt: %v", err)
+			}
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+
+		_, err = NewSQLite(dbPath)
+		if err == nil {
+			t.Fatal("expected error when cleanup orphaned turns fails")
+		}
+	})
+}
+
+func TestSQLite_CreateSession_Error(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.CreateSession(ctx, ""); err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+func TestSQLite_GetSession_Error(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.GetSession(ctx, ""); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+}
+
+func TestSQLite_GetLastSession_EmptyPath(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.GetLastSession(ctx, ""); err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+func TestSQLite_ListSessions_Limit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	s1 := createSessionAt(t, s, "/tmp/proj", base, base)
+	s2 := createSessionAt(t, s, "/tmp/proj", base.Add(time.Second), base.Add(time.Second))
+
+	list, err := s.ListSessions(ctx, "/tmp/proj", 2)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(list))
+	}
+	if list[0].ID != s2.ID {
+		t.Errorf("first session = %q, want %q", list[0].ID, s2.ID)
+	}
+	if list[1].ID != s1.ID {
+		t.Errorf("second session = %q, want %q", list[1].ID, s1.ID)
+	}
+}
+
+func TestSQLite_GetMessages_Limit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+	for i := 0; i < 5; i++ {
+		msg := api.Message{
+			ID:        fmt.Sprintf("msg-%d", i),
+			Role:      api.RoleUser,
+			Content:   fmt.Sprintf("content %d", i),
+			CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond),
+		}
+		if err := s.AppendMessage(ctx, sess.ID, msg); err != nil {
+			t.Fatalf("append message %d: %v", i, err)
+		}
+	}
+
+	msgs, err := s.GetMessages(ctx, sess.ID, 2)
+	if err != nil {
+		t.Fatalf("get messages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].ID != "msg-0" {
+		t.Errorf("first message = %q, want msg-0", msgs[0].ID)
+	}
+	if msgs[1].ID != "msg-1" {
+		t.Errorf("second message = %q, want msg-1", msgs[1].ID)
+	}
+}
+
+func TestSQLite_GetTurns_Limit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+	for i := 0; i < 5; i++ {
+		turn := api.Turn{
+			ID:        fmt.Sprintf("turn-%d", i),
+			State:     api.TurnIdle,
+			StartedAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond),
+		}
+		if err := s.SaveTurn(ctx, sess.ID, turn); err != nil {
+			t.Fatalf("save turn %d: %v", i, err)
+		}
+	}
+
+	turns, err := s.GetTurns(ctx, sess.ID, 2)
+	if err != nil {
+		t.Fatalf("get turns: %v", err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("expected 2 turns, got %d", len(turns))
+	}
+	if turns[0].ID != "turn-0" {
+		t.Errorf("first turn = %q, want turn-0", turns[0].ID)
+	}
+	if turns[1].ID != "turn-1" {
+		t.Errorf("second turn = %q, want turn-1", turns[1].ID)
+	}
+}
+
+func TestSQLite_GetMessages_CorruptToolCalls(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"bad-msg", sess.ID, string(api.RoleAssistant), "content", "", "not-json", time.Now().UTC()); err != nil {
+		t.Fatalf("insert corrupt message: %v", err)
+	}
+
+	if _, err := s.GetMessages(ctx, sess.ID, 0); err == nil {
+		t.Fatal("expected error for corrupt tool_calls JSON")
+	}
+}
+
+func TestSQLite_GetTurns_CorruptJSON(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO turns (id, session_id, state, input, response, tool_calls, results, error, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"bad-turn", sess.ID, api.TurnIdle.String(), "input", "response", "not-json", "null", "", time.Now().UTC(), nil); err != nil {
+		t.Fatalf("insert corrupt turn: %v", err)
+	}
+
+	if _, err := s.GetTurns(ctx, sess.ID, 0); err == nil {
+		t.Fatal("expected error for corrupt tool_calls JSON")
+	}
+
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM turns WHERE id = ?`, "bad-turn"); err != nil {
+		t.Fatalf("delete corrupt turn: %v", err)
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO turns (id, session_id, state, input, response, tool_calls, results, error, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"bad-turn2", sess.ID, api.TurnIdle.String(), "input", "response", "null", "not-json", "", time.Now().UTC(), nil); err != nil {
+		t.Fatalf("insert corrupt results: %v", err)
+	}
+
+	if _, err := s.GetTurns(ctx, sess.ID, 0); err == nil {
+		t.Fatal("expected error for corrupt results JSON")
+	}
+}
+
+func TestSQLite_AppendMessage_Errors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	msg := api.Message{ID: "m1", Role: api.RoleUser, Content: "hi", CreatedAt: time.Now().UTC()}
+
+	if err := s.AppendMessage(ctx, "", msg); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+
+	if err := s.AppendMessage(ctx, "nonexistent", msg); err == nil {
+		t.Error("expected error appending to nonexistent session")
+	}
+}
+
+func TestSQLite_ClearMessages_Error(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ClearMessages(ctx, ""); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+}
+
+func TestSQLite_ReplaceMessages_Error(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ReplaceMessages(ctx, "", []api.Message{}); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+}
+
+func TestSQLite_SaveTurn_Errors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	turn := api.Turn{ID: "t1", State: api.TurnIdle, StartedAt: time.Now().UTC()}
+
+	if err := s.SaveTurn(ctx, "", turn); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+
+	if err := s.SaveTurn(ctx, "nonexistent", turn); err == nil {
+		t.Error("expected error saving turn to nonexistent session")
+	}
+}
+
+func TestSQLite_DeleteSession_Error(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.DeleteSession(ctx, ""); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+}
+
+func TestSQLite_DBClosedErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Create a session so there is data to query.
+	sess, err := s.CreateSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	msg := api.Message{ID: "m1", Role: api.RoleUser, Content: "hi", CreatedAt: time.Now().UTC()}
+	if err := s.AppendMessage(ctx, sess.ID, msg); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+	turn := api.Turn{ID: "t1", State: api.TurnIdle, StartedAt: time.Now().UTC()}
+	if err := s.SaveTurn(ctx, sess.ID, turn); err != nil {
+		t.Fatalf("save turn: %v", err)
+	}
+
+	// Close the underlying database directly; subsequent calls must error.
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	if _, err := s.GetSession(ctx, sess.ID); err == nil {
+		t.Error("expected error from GetSession after db closed")
+	}
+	if _, err := s.GetLastSession(ctx, "/tmp/proj"); err == nil {
+		t.Error("expected error from GetLastSession after db closed")
+	}
+	if _, err := s.ListSessions(ctx, "/tmp/proj", 0); err == nil {
+		t.Error("expected error from ListSessions after db closed")
+	}
+	if _, err := s.GetMessages(ctx, sess.ID, 0); err == nil {
+		t.Error("expected error from GetMessages after db closed")
+	}
+	if _, err := s.GetTurns(ctx, sess.ID, 0); err == nil {
+		t.Error("expected error from GetTurns after db closed")
+	}
+	if _, err := s.CountTurns(ctx, sess.ID, api.TurnIdle); err == nil {
+		t.Error("expected error from CountTurns after db closed")
+	}
+	if err := s.AppendMessage(ctx, sess.ID, msg); err == nil {
+		t.Error("expected error from AppendMessage after db closed")
+	}
+	if err := s.ClearMessages(ctx, sess.ID); err == nil {
+		t.Error("expected error from ClearMessages after db closed")
+	}
+	if err := s.ReplaceMessages(ctx, sess.ID, []api.Message{msg}); err == nil {
+		t.Error("expected error from ReplaceMessages after db closed")
+	}
+	if err := s.SaveTurn(ctx, sess.ID, turn); err == nil {
+		t.Error("expected error from SaveTurn after db closed")
+	}
+	if err := s.UpdateSession(ctx, sess); err == nil {
+		t.Error("expected error from UpdateSession after db closed")
+	}
+	if err := s.DeleteSession(ctx, sess.ID); err == nil {
+		t.Error("expected error from DeleteSession after db closed")
+	}
+	if _, err := s.CreateSession(ctx, "/tmp/proj"); err == nil {
+		t.Error("expected error from CreateSession after db closed")
+	}
+}
+
+func TestSQLite_ContextCancelled(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, err := s.CreateSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	msg := api.Message{ID: "m1", Role: api.RoleUser, Content: "hi", CreatedAt: time.Now().UTC()}
+	turn := api.Turn{ID: "t1", State: api.TurnIdle, StartedAt: time.Now().UTC()}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if _, err := s.GetSession(cancelled, sess.ID); err == nil {
+		t.Error("expected error from GetSession with cancelled context")
+	}
+	if _, err := s.GetLastSession(cancelled, "/tmp/proj"); err == nil {
+		t.Error("expected error from GetLastSession with cancelled context")
+	}
+	if _, err := s.ListSessions(cancelled, "/tmp/proj", 0); err == nil {
+		t.Error("expected error from ListSessions with cancelled context")
+	}
+	if _, err := s.GetMessages(cancelled, sess.ID, 0); err == nil {
+		t.Error("expected error from GetMessages with cancelled context")
+	}
+	if _, err := s.GetTurns(cancelled, sess.ID, 0); err == nil {
+		t.Error("expected error from GetTurns with cancelled context")
+	}
+	if _, err := s.CountTurns(cancelled, sess.ID, api.TurnIdle); err == nil {
+		t.Error("expected error from CountTurns with cancelled context")
+	}
+	if err := s.AppendMessage(cancelled, sess.ID, msg); err == nil {
+		t.Error("expected error from AppendMessage with cancelled context")
+	}
+	if err := s.ClearMessages(cancelled, sess.ID); err == nil {
+		t.Error("expected error from ClearMessages with cancelled context")
+	}
+	if err := s.ReplaceMessages(cancelled, sess.ID, []api.Message{msg}); err == nil {
+		t.Error("expected error from ReplaceMessages with cancelled context")
+	}
+	if err := s.SaveTurn(cancelled, sess.ID, turn); err == nil {
+		t.Error("expected error from SaveTurn with cancelled context")
+	}
+	if err := s.UpdateSession(cancelled, sess); err == nil {
+		t.Error("expected error from UpdateSession with cancelled context")
+	}
+	if err := s.DeleteSession(cancelled, sess.ID); err == nil {
+		t.Error("expected error from DeleteSession with cancelled context")
+	}
+}
+
+func TestSQLite_UpdateSession_Nonexistent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess := &api.Session{
+		ID:   "nonexistent",
+		Name: "name",
+		Path: "/tmp/proj",
+	}
+	if err := s.UpdateSession(ctx, sess); err != nil {
+		t.Fatalf("update nonexistent session: %v", err)
+	}
+
+	// Verify it was inserted (SQLite UPDATE without WHERE match is no-op but no error).
+	// The important part is that UpdateSession did not return an error.
+}
+
+func TestSQLite_ListSessions_EmptyPathError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.ListSessions(ctx, "", 0); err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+func TestSQLite_GetMessages_EmptySessionID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.GetMessages(ctx, "", 0); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+}
+
+func TestSQLite_GetTurns_EmptySessionID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.GetTurns(ctx, "", 0); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+}
+
+func TestSQLite_ReplaceMessages_PartialErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	msg := api.Message{ID: "m1", Role: api.RoleUser, Content: "hi", CreatedAt: time.Now().UTC()}
+	fakeErr := errors.New("partial error")
+
+	t.Run("delete error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			execErr: func(query string) error {
+				if strings.HasPrefix(query, "DELETE") {
+					return fakeErr
+				}
+				return nil
+			},
+		})}
+		defer s.Close()
+		if err := s.ReplaceMessages(ctx, "s1", []api.Message{msg}); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("prepare error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			prepareErr: fakeErr,
+		})}
+		defer s.Close()
+		if err := s.ReplaceMessages(ctx, "s1", []api.Message{msg}); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("stmt exec error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			stmtExecErr: fakeErr,
+		})}
+		defer s.Close()
+		if err := s.ReplaceMessages(ctx, "s1", []api.Message{msg}); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("update timestamp error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			execErr: func(query string) error {
+				if strings.HasPrefix(query, "UPDATE sessions") {
+					return fakeErr
+				}
+				return nil
+			},
+		})}
+		defer s.Close()
+		if err := s.ReplaceMessages(ctx, "s1", []api.Message{msg}); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("commit error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			commitErr: fakeErr,
+		})}
+		defer s.Close()
+		if err := s.ReplaceMessages(ctx, "s1", []api.Message{msg}); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestSQLite_AppendMessage_PartialErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	msg := api.Message{ID: "m1", Role: api.RoleUser, Content: "hi", CreatedAt: time.Now().UTC()}
+	fakeErr := errors.New("partial error")
+
+	t.Run("insert error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			execErr: func(query string) error {
+				if strings.HasPrefix(query, "INSERT INTO messages") {
+					return fakeErr
+				}
+				return nil
+			},
+		})}
+		defer s.Close()
+		if err := s.AppendMessage(ctx, "s1", msg); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("update timestamp error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			execErr: func(query string) error {
+				if strings.HasPrefix(query, "UPDATE sessions") {
+					return fakeErr
+				}
+				return nil
+			},
+		})}
+		defer s.Close()
+		if err := s.AppendMessage(ctx, "s1", msg); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("commit error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			commitErr: fakeErr,
+		})}
+		defer s.Close()
+		if err := s.AppendMessage(ctx, "s1", msg); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestSQLite_SaveTurn_PartialErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	turn := api.Turn{ID: "t1", State: api.TurnIdle, StartedAt: time.Now().UTC()}
+	fakeErr := errors.New("partial error")
+
+	t.Run("upsert error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			execErr: func(query string) error {
+				if strings.HasPrefix(query, "INSERT INTO turns") {
+					return fakeErr
+				}
+				return nil
+			},
+		})}
+		defer s.Close()
+		if err := s.SaveTurn(ctx, "s1", turn); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("update timestamp error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			execErr: func(query string) error {
+				if strings.HasPrefix(query, "UPDATE sessions") {
+					return fakeErr
+				}
+				return nil
+			},
+		})}
+		defer s.Close()
+		if err := s.SaveTurn(ctx, "s1", turn); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("commit error", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newPartialErrDB(t, partialErrDriver{
+			commitErr: fakeErr,
+		})}
+		defer s.Close()
+		if err := s.SaveTurn(ctx, "s1", turn); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestSQLite_RowsIterationErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	rowsErr := errors.New("rows iteration error")
+
+	t.Run("ListSessions", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newErrRowsDB(t, rowsErr)}
+		defer s.Close()
+		if _, err := s.ListSessions(ctx, "/tmp/proj", 0); err == nil {
+			t.Fatal("expected error from ListSessions")
+		}
+	})
+
+	t.Run("GetMessages", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newErrRowsDB(t, rowsErr)}
+		defer s.Close()
+		if _, err := s.GetMessages(ctx, "s1", 0); err == nil {
+			t.Fatal("expected error from GetMessages")
+		}
+	})
+
+	t.Run("GetTurns", func(t *testing.T) {
+		t.Parallel()
+		s := &SQLite{db: newErrRowsDB(t, rowsErr)}
+		defer s.Close()
+		if _, err := s.GetTurns(ctx, "s1", 0); err == nil {
+			t.Fatal("expected error from GetTurns")
+		}
+	})
+}
+
+func TestSQLite_FakeDBErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fakeErr := errors.New("fake db error")
+
+	s := &SQLite{db: newErrDB(t, fakeErr)}
+	defer s.Close()
+
+	sess := &api.Session{ID: "s1", Name: "n", Path: "/tmp/proj"}
+	msg := api.Message{ID: "m1", Role: api.RoleUser, Content: "hi", CreatedAt: time.Now().UTC()}
+	turn := api.Turn{ID: "t1", State: api.TurnIdle, StartedAt: time.Now().UTC()}
+
+	if _, err := s.CreateSession(ctx, "/tmp/proj"); err == nil {
+		t.Error("expected error from CreateSession")
+	}
+	if _, err := s.GetSession(ctx, "s1"); err == nil {
+		t.Error("expected error from GetSession")
+	}
+	if _, err := s.GetLastSession(ctx, "/tmp/proj"); err == nil {
+		t.Error("expected error from GetLastSession")
+	}
+	if _, err := s.ListSessions(ctx, "/tmp/proj", 0); err == nil {
+		t.Error("expected error from ListSessions")
+	}
+	if _, err := s.GetMessages(ctx, "s1", 0); err == nil {
+		t.Error("expected error from GetMessages")
+	}
+	if _, err := s.GetTurns(ctx, "s1", 0); err == nil {
+		t.Error("expected error from GetTurns")
+	}
+	if _, err := s.CountTurns(ctx, "s1", api.TurnIdle); err == nil {
+		t.Error("expected error from CountTurns")
+	}
+	if err := s.AppendMessage(ctx, "s1", msg); err == nil {
+		t.Error("expected error from AppendMessage")
+	}
+	if err := s.ClearMessages(ctx, "s1"); err == nil {
+		t.Error("expected error from ClearMessages")
+	}
+	if err := s.ReplaceMessages(ctx, "s1", []api.Message{msg}); err == nil {
+		t.Error("expected error from ReplaceMessages")
+	}
+	if err := s.SaveTurn(ctx, "s1", turn); err == nil {
+		t.Error("expected error from SaveTurn")
+	}
+	if err := s.UpdateSession(ctx, sess); err == nil {
+		t.Error("expected error from UpdateSession")
+	}
+	if err := s.DeleteSession(ctx, "s1"); err == nil {
+		t.Error("expected error from DeleteSession")
+	}
+}
+
+func TestSQLite_CountTurns_EmptySessionID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.CountTurns(ctx, "", api.TurnIdle); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+}
+
+// failFS is a test double that delegates to an optional fs.FS and can fail
+// specific operations.
+type failFS struct {
+	delegate    fs.FS
+	readDirErr  error
+	readFileErr error
+}
+
+func (f *failFS) Open(name string) (fs.File, error) {
+	if f.delegate != nil {
+		return f.delegate.Open(name)
+	}
+	return nil, fs.ErrNotExist
+}
+
+func (f *failFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if f.readDirErr != nil {
+		return nil, f.readDirErr
+	}
+	if f.delegate != nil {
+		return fs.ReadDir(f.delegate, name)
+	}
+	return nil, fs.ErrNotExist
+}
+
+func (f *failFS) ReadFile(name string) ([]byte, error) {
+	if f.readFileErr != nil {
+		return nil, f.readFileErr
+	}
+	if f.delegate != nil {
+		return fs.ReadFile(f.delegate, name)
+	}
+	return nil, fs.ErrNotExist
+}
+
+// errDriver is a minimal sql.Driver that always returns a configured error.
+// It is used to exercise error branches in store methods without touching a
+// real database.
+type errDriver struct {
+	err error
+}
+
+func (d *errDriver) Open(string) (driver.Conn, error) {
+	return &errConn{err: d.err}, nil
+}
+
+type errConn struct {
+	err error
+}
+
+func (c *errConn) Prepare(string) (driver.Stmt, error) { return nil, c.err }
+func (c *errConn) Close() error                        { return c.err }
+func (c *errConn) Begin() (driver.Tx, error)           { return nil, c.err }
+
+func (c *errConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+	return nil, c.err
+}
+
+func (c *errConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	return nil, c.err
+}
+
+func (c *errConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return nil, c.err
+}
+
+func newErrDB(t *testing.T, err error) *sql.DB {
+	t.Helper()
+	driverName := fmt.Sprintf("errdriver-%d", time.Now().UnixNano())
+	sql.Register(driverName, &errDriver{err: err})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open err db: %v", err)
+	}
+	return db
+}
+
+// fakeResult implements driver.Result for tests.
+type fakeResult struct{}
+
+func (fakeResult) LastInsertId() (int64, error) { return 0, nil }
+func (fakeResult) RowsAffected() (int64, error) { return 1, nil }
+
+// fakeRows implements driver.Rows for tests.
+type fakeRows struct {
+	cols    []string
+	values  []driver.Value
+	done    bool
+	nextErr error
+}
+
+func (r *fakeRows) Columns() []string { return r.cols }
+func (r *fakeRows) Close() error      { return nil }
+func (r *fakeRows) Next(dest []driver.Value) error {
+	if r.nextErr != nil {
+		return r.nextErr
+	}
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	copy(dest, r.values)
+	return nil
+}
+
+// fakeStmt implements driver.Stmt for tests.
+type fakeStmt struct {
+	execErr  error
+	queryErr error
+	closeErr error
+}
+
+func (s *fakeStmt) Close() error  { return s.closeErr }
+func (s *fakeStmt) NumInput() int { return -1 }
+func (s *fakeStmt) Exec(args []driver.Value) (driver.Result, error) {
+	return fakeResult{}, s.execErr
+}
+func (s *fakeStmt) Query(args []driver.Value) (driver.Rows, error) {
+	return &fakeRows{}, s.queryErr
+}
+
+// fakeTx implements driver.Tx for tests.
+type fakeTx struct {
+	commitErr   error
+	rollbackErr error
+}
+
+func (tx *fakeTx) Commit() error   { return tx.commitErr }
+func (tx *fakeTx) Rollback() error { return tx.rollbackErr }
+
+// partialErrDriver is a sql.Driver whose connection succeeds or fails per
+// operation. It is used to exercise error branches after BeginTx.
+type partialErrDriver struct {
+	beginErr    error
+	execErr     func(query string) error
+	queryErr    func(query string) error
+	prepareErr  error
+	commitErr   error
+	stmtExecErr error
+}
+
+func (d *partialErrDriver) Open(string) (driver.Conn, error) {
+	return &partialErrConn{
+		beginErr:    d.beginErr,
+		execErr:     d.execErr,
+		queryErr:    d.queryErr,
+		prepareErr:  d.prepareErr,
+		commitErr:   d.commitErr,
+		stmtExecErr: d.stmtExecErr,
+	}, nil
+}
+
+type partialErrConn struct {
+	beginErr    error
+	execErr     func(query string) error
+	queryErr    func(query string) error
+	prepareErr  error
+	commitErr   error
+	stmtExecErr error
+}
+
+func (c *partialErrConn) Prepare(string) (driver.Stmt, error) {
+	return &fakeStmt{execErr: c.stmtExecErr, queryErr: c.stmtExecErr}, c.prepareErr
+}
+func (c *partialErrConn) Close() error { return nil }
+func (c *partialErrConn) Begin() (driver.Tx, error) {
+	return &fakeTx{commitErr: c.commitErr}, c.beginErr
+}
+func (c *partialErrConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	if c.execErr != nil {
+		if err := c.execErr(query); err != nil {
+			return nil, err
+		}
+	}
+	return fakeResult{}, nil
+}
+func (c *partialErrConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if c.queryErr != nil {
+		if err := c.queryErr(query); err != nil {
+			return nil, err
+		}
+	}
+	if strings.Contains(query, "user_version") {
+		return &fakeRows{cols: []string{"user_version"}, values: []driver.Value{int64(0)}}, nil
+	}
+	return &fakeRows{}, nil
+}
+func (c *partialErrConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return &fakeTx{commitErr: c.commitErr}, c.beginErr
+}
+
+func newPartialErrDB(t *testing.T, cfg partialErrDriver) *sql.DB {
+	t.Helper()
+	driverName := fmt.Sprintf("partialdriver-%d", time.Now().UnixNano())
+	sql.Register(driverName, &cfg)
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open partial err db: %v", err)
+	}
+	return db
+}
+
+// errRowsDriver returns a single row whose Next call returns the configured
+// error. It is used to exercise rows.Err() branches.
+type errRowsDriver struct{ err error }
+
+func (d *errRowsDriver) Open(string) (driver.Conn, error) {
+	return &errRowsConn{err: d.err}, nil
+}
+
+type errRowsConn struct{ err error }
+
+func (c *errRowsConn) Prepare(string) (driver.Stmt, error) { return &fakeStmt{}, nil }
+func (c *errRowsConn) Close() error                        { return nil }
+func (c *errRowsConn) Begin() (driver.Tx, error)           { return &fakeTx{}, nil }
+func (c *errRowsConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+	return fakeResult{}, nil
+}
+func (c *errRowsConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	return &fakeRows{nextErr: c.err}, nil
+}
+func (c *errRowsConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return &fakeTx{}, nil
+}
+
+func newErrRowsDB(t *testing.T, err error) *sql.DB {
+	t.Helper()
+	driverName := fmt.Sprintf("errrowsdriver-%d", time.Now().UnixNano())
+	sql.Register(driverName, &errRowsDriver{err: err})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open err rows db: %v", err)
+	}
+	return db
 }

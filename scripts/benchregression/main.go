@@ -6,37 +6,54 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 )
 
+// osExit is swapped out in tests so main() can be exercised without killing the
+// test process.
+var osExit = os.Exit
+
+// exitError carries a specific exit code so main() can distinguish usage errors
+// (code 2) from benchmark regressions (code 1).
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+
 func main() {
-	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: benchregression <baseline> <new> [threshold]")
-		os.Exit(2)
-	}
-	threshold := 0.20
-	if len(os.Args) > 3 {
-		v, err := strconv.ParseFloat(os.Args[3], 64)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid threshold: %v\n", err)
-			os.Exit(2)
-		}
-		threshold = v
-	}
-	if err := run(os.Args[1], os.Args[2], threshold); err != nil {
+	if err := run(os.Args, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		code := 1
+		if ee, ok := err.(*exitError); ok {
+			code = ee.code
+		}
+		osExit(code)
 	}
 }
 
-func run(baselinePath, newPath string, threshold float64) error {
-	baseline, err := parseFile(baselinePath)
+func run(args []string, out io.Writer) error {
+	if len(args) < 3 {
+		return &exitError{code: 2, err: fmt.Errorf("usage: benchregression <baseline> <new> [threshold]")}
+	}
+	threshold := 0.20
+	if len(args) > 3 {
+		v, err := strconv.ParseFloat(args[3], 64)
+		if err != nil {
+			return &exitError{code: 2, err: fmt.Errorf("invalid threshold: %w", err)}
+		}
+		threshold = v
+	}
+
+	baseline, err := parseFile(args[1])
 	if err != nil {
 		return fmt.Errorf("parse baseline: %w", err)
 	}
-	newResults, err := parseFile(newPath)
+	newResults, err := parseFile(args[2])
 	if err != nil {
 		return fmt.Errorf("parse new results: %w", err)
 	}
@@ -45,24 +62,24 @@ func run(baselinePath, newPath string, threshold float64) error {
 	for name, ns := range newResults {
 		base, ok := baseline[name]
 		if !ok {
-			fmt.Printf("new benchmark: %s\n", name)
+			_, _ = fmt.Fprintf(out, "new benchmark: %s\n", name)
 			continue
 		}
 		if base == 0 {
-			fmt.Printf("no baseline measurement for %s\n", name)
+			_, _ = fmt.Fprintf(out, "no baseline measurement for %s\n", name)
 			continue
 		}
 		increase := (ns - base) / base
 		if increase > threshold {
-			fmt.Printf("REGRESSION: %s %.2f%% slower (%.2f -> %.2f ns/op)\n", name, increase*100, base, ns)
+			_, _ = fmt.Fprintf(out, "REGRESSION: %s %.2f%% slower (%.2f -> %.2f ns/op)\n", name, increase*100, base, ns)
 			failed = true
 		} else {
-			fmt.Printf("ok: %s %.2f%% change (%.2f -> %.2f ns/op)\n", name, increase*100, base, ns)
+			_, _ = fmt.Fprintf(out, "ok: %s %.2f%% change (%.2f -> %.2f ns/op)\n", name, increase*100, base, ns)
 		}
 	}
 	for name := range baseline {
 		if _, ok := newResults[name]; !ok {
-			fmt.Printf("missing benchmark: %s\n", name)
+			_, _ = fmt.Fprintf(out, "missing benchmark: %s\n", name)
 			failed = true
 		}
 	}

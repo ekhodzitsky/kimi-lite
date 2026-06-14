@@ -250,3 +250,64 @@ func TestMouseWheelSingleScrollDistance(t *testing.T) {
 		t.Errorf("YOffset = %d, want %d (scrolled %d lines)", after, want, before-after)
 	}
 }
+
+func TestKeyNavigationUpDown(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80, 5)
+	m.SetContent("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10")
+	m.GotoBottom()
+
+	// Up arrow disables auto-scroll and moves up one line.
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	vm := updated.(*Model)
+	if vm.autoScroll {
+		t.Error("autoScroll should be false after up arrow")
+	}
+
+	// Down arrow to bottom re-enables auto-scroll.
+	updated, _ = vm.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	vm = updated.(*Model)
+	if !vm.AtBottom() {
+		t.Error("should be at bottom after down arrow from one line up")
+	}
+	if !vm.autoScroll {
+		t.Error("autoScroll should be true when scrolled to bottom")
+	}
+}
+
+func TestUpdateMsgIgnoresUnrecognizedKey(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80, 5)
+	m.SetContent("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10")
+	m.GotoBottom()
+
+	before := m.vp.YOffset()
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	vm := updated.(*Model)
+	if vm.vp.YOffset() != before {
+		t.Error("unrecognized key should not change viewport offset")
+	}
+}
+
+func TestUpdateMsgIgnoresOtherMessages(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80, 5)
+	m.SetContent("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10")
+	m.GotoBottom()
+
+	before := m.vp.YOffset()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	vm := updated.(*Model)
+	if vm.vp.YOffset() != before {
+		t.Error("ignored message should not change viewport offset")
+	}
+}

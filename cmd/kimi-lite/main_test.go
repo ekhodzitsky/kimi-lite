@@ -37,6 +37,9 @@ type mockApp struct {
 	runErr              error
 
 	exportReturn *api.SessionExport
+	exportErr    error
+	importReturn *api.Session
+	importErr    error
 	closeErr     error
 }
 
@@ -71,10 +74,10 @@ func (m *mockApp) RunTurn(_ context.Context, sessionID string, input string) (<-
 	return m.runTurnReturn, m.runTurnErr
 }
 func (m *mockApp) ExportSession(_ context.Context, _ string) (*api.SessionExport, error) {
-	return m.exportReturn, nil
+	return m.exportReturn, m.exportErr
 }
 func (m *mockApp) ImportSession(_ context.Context, _ *api.SessionExport) (*api.Session, error) {
-	return nil, nil
+	return m.importReturn, m.importErr
 }
 
 func TestVersionFlag(t *testing.T) {

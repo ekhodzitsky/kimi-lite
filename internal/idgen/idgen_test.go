@@ -2,6 +2,7 @@ package idgen
 
 import (
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,60 @@ func TestGenerateIDError(t *testing.T) {
 	if _, err := hex.DecodeString(id); err != nil {
 		t.Errorf("expected valid hex, got %q: %v", id, err)
 	}
+}
+
+func TestGenerateIDError_ReadFailure(t *testing.T) {
+	mock := func(b []byte) (int, error) { return 0, errors.New("mock read error") }
+	oldRandRead := swapRandRead(mock)
+	defer swapRandRead(oldRandRead)
+
+	id, err := GenerateIDError()
+	if err == nil {
+		t.Fatalf("expected error, got id %q", id)
+	}
+	if id != "" {
+		t.Errorf("expected empty id on error, got %q", id)
+	}
+	if !strings.Contains(err.Error(), "mock read error") {
+		t.Errorf("expected error to mention mock read error, got %v", err)
+	}
+}
+
+func TestGenerateID_PanicOnReadFailure(t *testing.T) {
+	mock := func(b []byte) (int, error) { return 0, errors.New("mock read error") }
+	oldRandRead := swapRandRead(mock)
+	defer swapRandRead(oldRandRead)
+
+	var recovered bool
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatalf("expected panic, got nil")
+			}
+			msg, ok := r.(string)
+			if !ok {
+				t.Fatalf("expected string panic, got %T", r)
+			}
+			if !strings.Contains(msg, "mock read error") {
+				t.Errorf("expected panic message to mention mock read error, got %q", msg)
+			}
+			recovered = true
+		}()
+		_ = GenerateID()
+	}()
+
+	if !recovered {
+		t.Fatalf("GenerateID did not panic")
+	}
+}
+
+func swapRandRead(f func([]byte) (int, error)) func([]byte) (int, error) {
+	randReadMu.Lock()
+	defer randReadMu.Unlock()
+	old := randRead
+	randRead = f
+	return old
 }
 
 func BenchmarkGenerateID(b *testing.B) {

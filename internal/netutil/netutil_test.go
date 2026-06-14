@@ -304,3 +304,27 @@ func TestSecureTransport_DialContext_EmptyIPList(t *testing.T) {
 		t.Fatalf("expected no IPs resolved error, got: %v", err)
 	}
 }
+
+func TestSecureTransport_DialContext_DialError(t *testing.T) {
+	t.Parallel()
+
+	dialErr := errors.New("connection refused")
+	mockLookup := func(ctx context.Context, host string) ([]string, error) {
+		return []string{"93.184.216.34"}, nil
+	}
+	fakeDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, dialErr
+	}
+
+	transport := secureTransport(mockLookup, fakeDial)
+	_, err := transport.DialContext(context.Background(), "tcp", "example.com:80")
+	if err == nil {
+		t.Fatal("expected dial error")
+	}
+	if !errors.Is(err, dialErr) {
+		t.Fatalf("expected wrapped dial error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "dial") {
+		t.Fatalf("expected dial error message, got: %v", err)
+	}
+}

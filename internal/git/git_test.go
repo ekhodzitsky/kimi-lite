@@ -752,3 +752,415 @@ func TestProvider_Integration_DiffPathValidation(t *testing.T) {
 		t.Fatalf("expected escape error, got %q", err.Error())
 	}
 }
+
+func TestProvider_Dir(t *testing.T) {
+	t.Parallel()
+
+	p := NewProvider("/some/path")
+	if got := p.Dir(); got != "/some/path" {
+		t.Fatalf("expected dir %q, got %q", "/some/path", got)
+	}
+}
+
+func TestExecRunner_Output(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		dir        string
+		setup      func(t *testing.T) string
+		wantErr    bool
+		wantErrMsg string
+	}{
+		{
+			name: "success with valid directory",
+			setup: func(t *testing.T) string {
+				return t.TempDir()
+			},
+		},
+		{
+			name: "empty directory runs in current working directory",
+			setup: func(t *testing.T) string {
+				return ""
+			},
+		},
+		{
+			name: "missing directory",
+			setup: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing")
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid directory",
+		},
+		{
+			name: "path is a file",
+			setup: func(t *testing.T) string {
+				f := filepath.Join(t.TempDir(), "file")
+				if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+					t.Fatalf("write file failed: %v", err)
+				}
+				return f
+			},
+			wantErr:    true,
+			wantErrMsg: "not a directory",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := &execRunner{}
+			dir := tt.setup(t)
+			stdout, stderr, err := r.Output(context.Background(), dir, "go", "version")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.wantErrMsg != "" && !strings.Contains(err.Error(), tt.wantErrMsg) {
+					t.Fatalf("expected error containing %q, got %q", tt.wantErrMsg, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(stdout) == 0 {
+				t.Fatal("expected non-empty stdout")
+			}
+			if len(stderr) != 0 {
+				t.Fatalf("expected empty stderr, got %q", stderr)
+			}
+		})
+	}
+}
+
+type sequenceRunner struct {
+	mu        sync.Mutex
+	calls     []mockCall
+	responses []sequenceResponse
+}
+
+type sequenceResponse struct {
+	stdout []byte
+	stderr []byte
+	err    error
+}
+
+func (r *sequenceRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, mockCall{dir: dir, name: name, args: args})
+	idx := len(r.calls) - 1
+	if idx >= len(r.responses) {
+		return nil, nil, errors.New("unexpected call")
+	}
+	resp := r.responses[idx]
+	return resp.stdout, resp.stderr, resp.err
+}
+
+func TestProvider_Commit_AddError(t *testing.T) {
+	t.Parallel()
+
+	r := &sequenceRunner{
+		responses: []sequenceResponse{
+			{stderr: []byte("add failed"), err: errors.New("exit status 1")},
+		},
+	}
+	p := newProvider(r, "/project")
+
+	err := p.Commit(context.Background(), "msg")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "git add failed") {
+		t.Fatalf("expected git add failed error, got %q", err.Error())
+	}
+}
+
+func TestProvider_Commit_CommitError(t *testing.T) {
+	t.Parallel()
+
+	r := &sequenceRunner{
+		responses: []sequenceResponse{
+			{err: nil},
+			{stderr: []byte("commit failed"), err: errors.New("exit status 1")},
+		},
+	}
+	p := newProvider(r, "/project")
+
+	err := p.Commit(context.Background(), "msg")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "git commit failed") {
+		t.Fatalf("expected git commit failed error, got %q", err.Error())
+	}
+}
+
+type commitAddDelayRunner struct {
+	delay time.Duration
+}
+
+func (r *commitAddDelayRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+	if r.delay > 0 {
+		timer := time.NewTimer(r.delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+	return nil, nil, nil
+}
+
+func TestProvider_Commit_AddCanceled(t *testing.T) {
+	t.Parallel()
+
+	r := &commitAddDelayRunner{delay: 10 * time.Second}
+	p := newProvider(r, "/project")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err := p.Commit(ctx, "msg")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "git add canceled") {
+		t.Fatalf("expected git add canceled error, got %q", err.Error())
+	}
+}
+
+type commitAddOkRunner struct {
+	delay time.Duration
+}
+
+func (r *commitAddOkRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+	if len(args) > 0 && args[0] == "add" {
+		return nil, nil, nil
+	}
+	if r.delay > 0 {
+		timer := time.NewTimer(r.delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+	return nil, nil, nil
+}
+
+func TestProvider_Commit_CommitTimeout(t *testing.T) {
+	t.Parallel()
+
+	r := &commitAddOkRunner{delay: 10 * time.Second}
+	p := newProvider(r, "/project")
+
+	start := time.Now()
+	err := p.Commit(context.Background(), "msg")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "git commit timed out") {
+		t.Fatalf("expected git commit timed out error, got %q", err.Error())
+	}
+	if elapsed > gitTimeout+500*time.Millisecond {
+		t.Fatalf("expected prompt timeout, took %v", elapsed)
+	}
+}
+
+func TestProvider_Commit_CommitCanceled(t *testing.T) {
+	t.Parallel()
+
+	r := &commitAddOkRunner{delay: 10 * time.Second}
+	p := newProvider(r, "/project")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err := p.Commit(ctx, "msg")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "git commit canceled") {
+		t.Fatalf("expected git commit canceled error, got %q", err.Error())
+	}
+}
+
+func TestProvider_IsRepo_GenericError(t *testing.T) {
+	t.Parallel()
+
+	m := &mockRunner{stderr: []byte("weird failure"), err: errors.New("exit status 128")}
+	p := newProvider(m, "/project")
+
+	got, err := p.IsRepo(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if got {
+		t.Fatal("expected false")
+	}
+	if !strings.Contains(err.Error(), "git is-repo failed") {
+		t.Fatalf("expected git is-repo failed error, got %q", err.Error())
+	}
+}
+
+func TestProvider_IsRepo_Canceled(t *testing.T) {
+	t.Parallel()
+
+	m := &mockRunner{delay: 10 * time.Second}
+	p := newProvider(m, "/project")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := p.IsRepo(ctx)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "git is-repo canceled") {
+		t.Fatalf("expected git is-repo canceled error, got %q", err.Error())
+	}
+}
+
+func TestProvider_Diff_Canceled(t *testing.T) {
+	t.Parallel()
+
+	m := &mockRunner{delay: 10 * time.Second}
+	p := newProvider(m, "/project")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := p.Diff(ctx, "main.go")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "git diff canceled") {
+		t.Fatalf("expected git diff canceled error, got %q", err.Error())
+	}
+}
+
+func TestProvider_Diff_NoChanges(t *testing.T) {
+	t.Parallel()
+
+	m := &mockRunner{stdout: []byte("")}
+	p := newProvider(m, "/project")
+
+	got, err := p.Diff(context.Background(), "main.go")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("expected empty diff, got %q", got)
+	}
+}
+
+func TestProvider_Integration_IsRepo_OutsideRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	dir := t.TempDir()
+	p := NewProvider(dir)
+
+	isRepo, err := p.IsRepo(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if isRepo {
+		t.Fatalf("expected false for directory outside a git repo")
+	}
+}
+
+func TestProvider_Integration_Diff_NoChanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	dir := t.TempDir()
+	p := NewProvider(dir)
+	ctx := context.Background()
+
+	if err := exec.CommandContext(ctx, "git", "init", dir).Run(); err != nil {
+		t.Fatalf("git init failed: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "config", "user.email", "test@example.com").Run(); err != nil {
+		t.Fatalf("git config user.email failed: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "config", "user.name", "Test User").Run(); err != nil {
+		t.Fatalf("git config user.name failed: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+	if err := p.Commit(ctx, "add hello"); err != nil {
+		t.Fatalf("commit failed: %v", err)
+	}
+
+	diff, err := p.Diff(ctx, "hello.txt")
+	if err != nil {
+		t.Fatalf("diff failed: %v", err)
+	}
+	if strings.TrimSpace(diff) != "" {
+		t.Fatalf("expected empty diff for unchanged file, got %q", diff)
+	}
+}
+
+func TestProvider_Integration_Diff_Binary(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	dir := t.TempDir()
+	p := NewProvider(dir)
+	ctx := context.Background()
+
+	if err := exec.CommandContext(ctx, "git", "init", dir).Run(); err != nil {
+		t.Fatalf("git init failed: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "config", "user.email", "test@example.com").Run(); err != nil {
+		t.Fatalf("git config user.email failed: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "config", "user.name", "Test User").Run(); err != nil {
+		t.Fatalf("git config user.name failed: %v", err)
+	}
+
+	binPath := filepath.Join(dir, "data.bin")
+	if err := os.WriteFile(binPath, []byte{0x00, 0x01, 0x02}, 0o644); err != nil {
+		t.Fatalf("write binary file failed: %v", err)
+	}
+	if err := p.Commit(ctx, "add binary"); err != nil {
+		t.Fatalf("commit failed: %v", err)
+	}
+
+	if err := os.WriteFile(binPath, []byte{0x00, 0x01, 0x03}, 0o644); err != nil {
+		t.Fatalf("modify binary file failed: %v", err)
+	}
+
+	diff, err := p.Diff(ctx, "data.bin")
+	if err != nil {
+		t.Fatalf("diff failed: %v", err)
+	}
+	if !strings.Contains(diff, "Binary") {
+		t.Fatalf("expected binary diff, got %q", diff)
+	}
+}

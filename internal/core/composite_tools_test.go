@@ -177,3 +177,40 @@ func TestCompositeToolExecutor_Empty(t *testing.T) {
 		t.Fatal("expected error for empty executor")
 	}
 }
+
+func TestCompositeToolExecutor_NewCompositeToolExecutor_SkipsNil(t *testing.T) {
+	t.Parallel()
+	exec1 := &mockToolExecutor{
+		defs: []api.ToolDefinition{{Name: "tool_a", Description: "a"}},
+	}
+	composite := NewCompositeToolExecutor(exec1, nil)
+	defs := composite.Definitions(context.Background())
+	if len(defs) != 1 {
+		t.Errorf("expected 1 definition, got %d", len(defs))
+	}
+}
+
+func TestCompositeToolExecutor_NewCompositeToolExecutor_LogsCollision(t *testing.T) {
+	t.Parallel()
+	exec1 := &mockToolExecutor{
+		defs: []api.ToolDefinition{{Name: "shared", Description: "first"}},
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Output: "first"}, nil
+		},
+	}
+	exec2 := &mockToolExecutor{
+		defs: []api.ToolDefinition{{Name: "shared", Description: "second"}},
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Output: "second"}, nil
+		},
+	}
+	composite := NewCompositeToolExecutor(exec1, exec2)
+	// First registration should win for execution.
+	result, err := composite.Execute(context.Background(), api.ToolCall{ID: "1", Name: "shared"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Output != "first" {
+		t.Errorf("expected first to win, got %q", result.Output)
+	}
+}

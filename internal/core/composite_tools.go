@@ -43,6 +43,9 @@ func (c *CompositeToolExecutor) Definitions(ctx context.Context) []api.ToolDefin
 	defs := make([]api.ToolDefinition, 0, 16)
 	seen := make(map[string]bool)
 	for _, exec := range c.executors {
+		if exec == nil {
+			continue
+		}
 		for _, def := range exec.Definitions(ctx) {
 			if seen[def.Name] {
 				continue

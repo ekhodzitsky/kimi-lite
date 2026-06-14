@@ -18,6 +18,7 @@ type fakeMCPClient struct {
 	listErr    error
 	callResult string
 	callErr    error
+	closeErr   error
 	closed     bool
 
 	lastCallName string
@@ -43,7 +44,7 @@ func (f *fakeMCPClient) CallTool(ctx context.Context, name string, args map[stri
 
 func (f *fakeMCPClient) Close() error {
 	f.closed = true
-	return nil
+	return f.closeErr
 }
 
 func TestMultiClient_ListTools_AggregatesAndDisambiguates(t *testing.T) {
@@ -250,6 +251,95 @@ func TestMultiClient_ListTools_AllFail(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("expected unavailable error, got: %v", err)
+	}
+}
+
+func TestMultiClient_CallTool_Error(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeMCPClient{
+		tools:      []api.ToolDefinition{{Name: "tool", Description: "A tool"}},
+		callResult: "",
+		callErr:    errors.New("tool failed"),
+	}
+	multi := NewMultiClient(
+		map[string]api.MCPClient{"srv": client},
+		map[string]api.MCPServerConfig{"srv": {Enabled: true, Transport: api.MCPTransportStdio, Command: "cmd"}},
+	)
+	if _, err := multi.ListTools(context.Background()); err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	_, err := multi.CallTool(context.Background(), "tool", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "tool failed") {
+		t.Fatalf("expected tool failed error, got: %v", err)
+	}
+}
+
+func TestMultiClient_Connect_Timeout(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeMCPClient{
+		connectErr: context.DeadlineExceeded,
+	}
+	multi := NewMultiClient(
+		map[string]api.MCPClient{"srv": client},
+		map[string]api.MCPServerConfig{"srv": {Enabled: true, Transport: api.MCPTransportStdio, Command: "cmd", StartupTimeoutMs: 1}},
+	)
+
+	err := multi.Connect(context.Background())
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "deadline exceeded") && !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("expected deadline exceeded error, got: %v", err)
+	}
+}
+
+func TestMultiClient_Close_Error(t *testing.T) {
+	t.Parallel()
+
+	alpha := &fakeMCPClient{}
+	beta := &fakeMCPClient{closeErr: errors.New("beta close failed")}
+	multi := NewMultiClient(
+		map[string]api.MCPClient{"alpha": alpha, "beta": beta},
+		map[string]api.MCPServerConfig{"alpha": {}, "beta": {}},
+	)
+
+	err := multi.Close()
+	if err == nil {
+		t.Fatal("expected combined close error")
+	}
+	if !strings.Contains(err.Error(), "beta close failed") {
+		t.Fatalf("expected beta close error, got: %v", err)
+	}
+}
+
+func TestMultiClient_CallTool_NoTimeoutError(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeMCPClient{
+		tools:      []api.ToolDefinition{{Name: "tool", Description: "A tool"}},
+		callResult: "",
+		callErr:    errors.New("tool failed"),
+	}
+	multi := NewMultiClient(
+		map[string]api.MCPClient{"srv": client},
+		map[string]api.MCPServerConfig{"srv": {Enabled: true, Transport: api.MCPTransportStdio, Command: "cmd", ToolTimeoutMs: 0}},
+	)
+	if _, err := multi.ListTools(context.Background()); err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	_, err := multi.CallTool(context.Background(), "tool", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "tool failed") {
+		t.Fatalf("expected tool failed error, got: %v", err)
 	}
 }
 

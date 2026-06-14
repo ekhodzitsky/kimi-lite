@@ -688,13 +688,16 @@ type MetricsCollector interface {
 type NoopMetricsCollector struct{}
 
 // IncCounter does nothing.
-func (NoopMetricsCollector) IncCounter(string, ...string) {}
+func (NoopMetricsCollector) IncCounter(name string, _ ...string) { _ = name }
 
 // RecordLatency does nothing.
-func (NoopMetricsCollector) RecordLatency(string, time.Duration, ...string) {}
+func (NoopMetricsCollector) RecordLatency(name string, d time.Duration, _ ...string) {
+	_ = name
+	_ = d
+}
 
 // RecordError does nothing.
-func (NoopMetricsCollector) RecordError(string) {}
+func (NoopMetricsCollector) RecordError(name string) { _ = name }
 
 // TokenEstimator estimates the number of tokens consumed by a message list.
 type TokenEstimator interface {

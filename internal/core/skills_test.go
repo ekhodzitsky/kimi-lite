@@ -167,6 +167,63 @@ func TestDiscoverSkills_DeduplicatesNames(t *testing.T) {
 	}
 }
 
+func TestDiscoverSkills_ContextCancel(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.md"), []byte("a"), 0644); err != nil {
+		t.Fatalf("write a.md: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := DiscoverSkills(ctx, tmpDir)
+	if err == nil {
+		t.Fatal("expected error for cancelled context")
+	}
+}
+
+func TestDiscoverSkills_WalkError(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "unreadable"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "unreadable", "skill.md"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write skill.md: %v", err)
+	}
+	// Remove read permission from the directory so the walk fails when reading entries.
+	if err := os.Chmod(filepath.Join(tmpDir, "unreadable"), 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(tmpDir, "unreadable"), 0755)
+	})
+
+	_, err := DiscoverSkills(context.Background(), tmpDir)
+	if err == nil {
+		t.Fatal("expected walk error")
+	}
+}
+
+func TestDiscoverSkills_OpenError(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "locked.md"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write locked.md: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(tmpDir, "locked.md"), 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(tmpDir, "locked.md"), 0644)
+	})
+
+	_, err := DiscoverSkills(context.Background(), tmpDir)
+	if err == nil {
+		t.Fatal("expected open error")
+	}
+}
+
 func contains(s, substr string) bool {
 	return containsString(s, substr)
 }

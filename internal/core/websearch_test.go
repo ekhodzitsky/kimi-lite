@@ -43,6 +43,14 @@ func TestNewHTTPWebSearcher_RequiresEndpoint(t *testing.T) {
 	}
 }
 
+func TestNewHTTPWebSearcher_InvalidURL(t *testing.T) {
+	t.Parallel()
+	_, err := NewHTTPWebSearcher("http://[::1]:namedport", "", nil, 0)
+	if err == nil {
+		t.Fatal("expected error for malformed URL")
+	}
+}
+
 func TestNewHTTPWebSearcher_InvalidScheme(t *testing.T) {
 	t.Parallel()
 	_, err := NewHTTPWebSearcher("ftp://example.com", "", nil, 0)
@@ -219,5 +227,79 @@ func TestHTTPWebSearcher_Search_RejectsNull(t *testing.T) {
 	_, err = searcher.Search(context.Background(), "test", api.WebSearchOptions{})
 	if err == nil {
 		t.Fatal("expected error for null results")
+	}
+}
+
+func TestHTTPWebSearcher_Search_ReadBodyError(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "{")
+	}))
+	defer server.Close()
+
+	searcher, err := NewHTTPWebSearcher("http://example.com", "", testFetchClient(server), 0)
+	if err != nil {
+		t.Fatalf("NewHTTPWebSearcher: %v", err)
+	}
+	_, err = searcher.Search(context.Background(), "test", api.WebSearchOptions{})
+	if err == nil {
+		t.Fatal("expected error reading response body")
+	}
+}
+
+func TestHTTPWebSearcher_Search_ContextCancel(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]api.WebSearchResult{})
+	}))
+	defer server.Close()
+
+	searcher, err := NewHTTPWebSearcher("http://example.com", "", testFetchClient(server), 0)
+	if err != nil {
+		t.Fatalf("NewHTTPWebSearcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = searcher.Search(ctx, "test", api.WebSearchOptions{})
+	if err == nil {
+		t.Fatal("expected error for cancelled context")
+	}
+}
+
+func TestHTTPWebSearcher_Search_NilReceiver(t *testing.T) {
+	t.Parallel()
+	var searcher *HTTPWebSearcher
+	_, err := searcher.Search(context.Background(), "test", api.WebSearchOptions{})
+	if !errors.Is(err, ErrWebSearchNotConfigured) {
+		t.Fatalf("expected ErrWebSearchNotConfigured, got: %v", err)
+	}
+}
+
+func TestHTTPWebSearcher_NilClientUsesSecureClient(t *testing.T) {
+	t.Parallel()
+	searcher, err := NewHTTPWebSearcher("http://example.com", "", nil, 0)
+	if err != nil {
+		t.Fatalf("NewHTTPWebSearcher: %v", err)
+	}
+	if searcher.client == nil {
+		t.Fatal("expected default client to be set")
+	}
+}
+
+func TestHTTPWebSearcher_NilClientAppliesTimeout(t *testing.T) {
+	t.Parallel()
+	searcher, err := NewHTTPWebSearcher("http://example.com", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatalf("NewHTTPWebSearcher: %v", err)
+	}
+	if searcher.client.Timeout != 5*time.Second {
+		t.Errorf("timeout = %v, want 5s", searcher.client.Timeout)
 	}
 }

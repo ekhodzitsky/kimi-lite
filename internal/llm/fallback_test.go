@@ -10,9 +10,11 @@ import (
 )
 
 type mockLLM struct {
-	chatStreamFunc func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error)
-	chatFunc       func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error)
-	modelsFunc     func() []api.ModelInfo
+	chatStreamFunc   func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error)
+	chatFunc         func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error)
+	modelsFunc       func() []api.ModelInfo
+	setMetricsFunc   func(api.MetricsCollector)
+	metricsCollector api.MetricsCollector
 }
 
 func (m *mockLLM) Chat(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
@@ -37,6 +39,13 @@ func (m *mockLLM) Models() []api.ModelInfo {
 		return m.modelsFunc()
 	}
 	return nil
+}
+
+func (m *mockLLM) SetMetricsCollector(collector api.MetricsCollector) {
+	m.metricsCollector = collector
+	if m.setMetricsFunc != nil {
+		m.setMetricsFunc(collector)
+	}
 }
 
 func TestFallbackClient_ChatStream_PreContentError(t *testing.T) {
@@ -338,3 +347,46 @@ func TestFallbackClient_ChatStream_CancelsPrimaryOnFallback(t *testing.T) {
 		t.Fatal("primary context was not canceled after fallback")
 	}
 }
+
+func TestFallbackClient_SetMetricsCollector(t *testing.T) {
+	t.Parallel()
+
+	primary := &mockLLM{}
+	fallback := &mockLLM{}
+	client := NewFallbackClient(primary, fallback)
+
+	collector := api.NoopMetricsCollector{}
+	client.SetMetricsCollector(collector)
+
+	if primary.metricsCollector != collector {
+		t.Error("primary metrics collector was not set")
+	}
+	if fallback.metricsCollector != collector {
+		t.Error("fallback metrics collector was not set")
+	}
+
+	// Nil fallback should not panic.
+	client = NewFallbackClient(primary, nil)
+	client.SetMetricsCollector(collector)
+
+	// Primary without SetMetricsCollector method should not panic.
+	nonMetricsPrimary := &bareMockLLM{}
+	client = NewFallbackClient(nonMetricsPrimary, fallback)
+	client.SetMetricsCollector(collector)
+}
+
+// bareMockLLM implements api.LLMClient without a SetMetricsCollector method.
+type bareMockLLM struct{}
+
+func (b *bareMockLLM) Chat(context.Context, []api.Message, []api.ToolDefinition) (*api.Message, error) {
+	return &api.Message{Role: api.RoleAssistant, Content: "ok"}, nil
+}
+
+func (b *bareMockLLM) ChatStream(context.Context, []api.Message, []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+	ch := make(chan api.StreamChunk, 1)
+	ch <- api.StreamChunk{Done: true}
+	close(ch)
+	return ch, nil
+}
+
+func (b *bareMockLLM) Models() []api.ModelInfo { return nil }

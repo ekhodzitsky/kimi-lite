@@ -442,6 +442,164 @@ func TestExecHook_ParentDeadlineDistinguishesFromHookTimeout(t *testing.T) {
 	}
 }
 
+func TestLimitedWriter_ZeroLimit(t *testing.T) {
+	t.Parallel()
+	w := &limitedWriter{limit: 0}
+	n, err := w.Write([]byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Fatalf("n = %d, want 5", n)
+	}
+	if len(w.Bytes()) != 0 {
+		t.Fatalf("unexpected bytes: %q", w.Bytes())
+	}
+	if w.Truncated() {
+		t.Fatal("should not be truncated with zero limit")
+	}
+}
+
+func TestRunCommandWithContext_AlreadyCancelled(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", "echo ok")
+	out, truncated, err := runCommandWithContext(ctx, cmd)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "context cancelled") {
+		t.Fatalf("expected context cancelled error, got: %v", err)
+	}
+	if out != nil {
+		t.Fatalf("expected nil output, got %q", out)
+	}
+	if truncated {
+		t.Fatal("expected truncated=false")
+	}
+}
+
+func TestRunCommandWithContext_StartError(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "/nonexistent/kimi/hook/binary")
+	out, truncated, err := runCommandWithContext(ctx, cmd)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "start command") {
+		t.Fatalf("expected start command error, got: %v", err)
+	}
+	if out != nil {
+		t.Fatalf("expected nil output, got %q", out)
+	}
+	if truncated {
+		t.Fatal("expected truncated=false")
+	}
+}
+
+func TestExecHook_ParentContextCancelled(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cfg := api.HookConfig{
+		Event:   api.HookToolCall,
+		Command: "sh",
+		Args:    []string{"-c", "echo ok"},
+	}
+	err := execHook(ctx, cfg, api.HookData{Event: api.HookToolCall})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "parent context") {
+		t.Fatalf("expected parent context error, got: %v", err)
+	}
+}
+
+func TestExecHook_ContextCanceled(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	cfg := api.HookConfig{
+		Event:   api.HookToolCall,
+		Command: "sh",
+		Args:    []string{"-c", "sleep 10"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		defer close(done)
+		runErr = execHook(ctx, cfg, api.HookData{Event: api.HookToolCall})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancellation took too long")
+	}
+	if runErr == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(runErr.Error(), "canceled") {
+		t.Fatalf("expected canceled error, got: %v", runErr)
+	}
+}
+
+func TestExecHook_TimeoutTruncated(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	cfg := api.HookConfig{
+		Event:   api.HookToolCall,
+		Command: "sh",
+		Args:    []string{"-c", `yes | head -c 2097152; sleep 10`},
+		Timeout: 200 * time.Millisecond,
+	}
+	start := time.Now()
+	err := execHook(context.Background(), cfg, api.HookData{Event: api.HookToolCall})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timed out error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("expected truncated marker, got: %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("timeout took too long: %v", elapsed)
+	}
+}
+
+func TestKillProcessGroupPID_Error(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	err := killProcessGroupPID(999999)
+	if err == nil {
+		t.Fatal("expected error for non-existent process group")
+	}
+	if !strings.Contains(err.Error(), "kill process group") {
+		t.Fatalf("expected kill process group error, got: %v", err)
+	}
+}
+
 func envMap(env []string) map[string]string {
 	m := make(map[string]string, len(env))
 	for _, e := range env {

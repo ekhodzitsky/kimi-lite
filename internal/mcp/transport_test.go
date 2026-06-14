@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -864,5 +865,418 @@ func TestIsClosedError(t *testing.T) {
 				t.Errorf("isClosedError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestJSONRPCError_Error(t *testing.T) {
+	t.Parallel()
+
+	var nilErr *JSONRPCError
+	if got := nilErr.Error(); got != "" {
+		t.Fatalf("nil JSONRPCError.Error() = %q, want empty", got)
+	}
+
+	err := &JSONRPCError{Code: -32600, Message: "bad request"}
+	if got := err.Error(); !strings.Contains(got, "JSON-RPC error -32600") {
+		t.Fatalf("expected error message to contain code, got: %q", got)
+	}
+}
+
+func TestBoundedBuffer_String(t *testing.T) {
+	t.Parallel()
+
+	b := newBoundedBuffer(4)
+	if got := b.String(); got != "" {
+		t.Fatalf("empty buffer String() = %q, want empty", got)
+	}
+
+	// Partial fill: String should return bytes in order.
+	_, _ = b.Write([]byte("ab"))
+	if got := b.String(); got != "ab" {
+		t.Fatalf("partial buffer String() = %q, want ab", got)
+	}
+
+	// Fill exactly to capacity.
+	_, _ = b.Write([]byte("cd"))
+	if got := b.String(); got != "abcd" {
+		t.Fatalf("full buffer String() = %q, want abcd", got)
+	}
+
+	// Overfill: String should be the last cap bytes in order.
+	_, _ = b.Write([]byte("ef"))
+	if got := b.String(); got != "cdef" {
+		t.Fatalf("wrapped buffer String() = %q, want cdef", got)
+	}
+}
+
+func TestStdioTransport_SetCWD(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+while read line; do
+  :
+done
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "loop.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	tr.SetCWD(tmpDir)
+
+	ctx := context.Background()
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer tr.Close()
+
+	tr.mu.Lock()
+	gotDir := tr.cmd.Dir
+	tr.mu.Unlock()
+	if gotDir != tmpDir {
+		t.Fatalf("cmd.Dir = %q, want %q", gotDir, tmpDir)
+	}
+}
+
+func TestStdioTransport_Connect_ImmediateExitSuccess(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("/bin/sh", "-c", "exit 0")
+	if err := tr.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	_ = tr.Close()
+}
+
+func TestStdioTransport_Connect_CwdMissing(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("/bin/sh", "-c", "exit 0")
+	tr.SetCWD(filepath.Join(t.TempDir(), "missing"))
+	err := tr.Connect(context.Background())
+	if err == nil {
+		t.Fatal("expected error for missing cwd")
+	}
+	if !strings.Contains(err.Error(), "start") {
+		t.Fatalf("expected start error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Connect_StdinPipeError(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("/bin/sh", "-c", "exit 0")
+	tr.newCmd = func(name string, arg ...string) *exec.Cmd {
+		cmd := exec.Command(name, arg...)
+		cmd.Stdin = &bytes.Buffer{}
+		return cmd
+	}
+
+	err := tr.Connect(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "create stdin pipe") {
+		t.Fatalf("expected stdin pipe error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Connect_StdoutPipeError(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("/bin/sh", "-c", "exit 0")
+	tr.newCmd = func(name string, arg ...string) *exec.Cmd {
+		cmd := exec.Command(name, arg...)
+		cmd.Stdout = &bytes.Buffer{}
+		return cmd
+	}
+
+	err := tr.Connect(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "create stdout pipe") {
+		t.Fatalf("expected stdout pipe error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_IncompleteFrame(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+read line
+printf '{"jsonrpc":"2.0","id":1,"result":{'
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "partial.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	tr.closeTimeout = 100 * time.Millisecond
+	ctx := context.Background()
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer tr.Close()
+
+	_, err := tr.Send(ctx, "ping", nil)
+	if err == nil {
+		t.Fatal("expected error for incomplete frame")
+	}
+	if !strings.Contains(err.Error(), "parse error") && !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("expected parse/incomplete error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Send_MarshalError(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+while read line; do
+  :
+done
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "loop.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	if err := tr.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer tr.Close()
+
+	_, err := tr.Send(context.Background(), "bad", map[string]any{"ch": make(chan int)})
+	if err == nil {
+		t.Fatal("expected marshal error")
+	}
+	if !strings.Contains(err.Error(), "marshal") {
+		t.Fatalf("expected marshal error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Send_ResponseError(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+read line
+echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad request"}}'
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "err.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	ctx := context.Background()
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer tr.Close()
+
+	resp, err := tr.Send(ctx, "bad", nil)
+	if err == nil {
+		t.Fatal("expected JSON-RPC error")
+	}
+	if resp == nil || resp.Error == nil {
+		t.Fatal("expected response with error")
+	}
+	if !strings.Contains(err.Error(), "bad request") {
+		t.Fatalf("expected bad request error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Notify_MarshalError(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+while read line; do
+  :
+done
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "loop.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	if err := tr.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer tr.Close()
+
+	err := tr.Notify(context.Background(), "bad", map[string]any{"ch": make(chan int)})
+	if err == nil {
+		t.Fatal("expected marshal error")
+	}
+	if !strings.Contains(err.Error(), "marshal") {
+		t.Fatalf("expected marshal error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Notify_Closed(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("/bin/sh", "-c", "exit 0")
+	if err := tr.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	err := tr.Notify(context.Background(), "ping", nil)
+	if err == nil {
+		t.Fatal("expected error after close")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("expected closed error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Notify_NotConnected(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("/bin/sh", "-c", "exit 0")
+	err := tr.Notify(context.Background(), "ping", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "not connected") {
+		t.Fatalf("expected not connected error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Notify_ContextCancel(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("sleep", "3600")
+	if err := tr.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer tr.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err := tr.Notify(ctx, "ping", map[string]string{"x": strings.Repeat("a", 1024*1024)})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "cancelled") && !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("expected context cancellation error, got: %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("expected fast return on cancellation, took %v", elapsed)
+	}
+}
+
+func TestStdioTransport_Close_DoubleClose(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("/bin/sh", "-c", "exit 0")
+	if err := tr.Close(); err != nil {
+		t.Fatalf("first Close error: %v", err)
+	}
+	if err := tr.Close(); err != nil {
+		t.Fatalf("second Close should be idempotent, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Send_WriteError(t *testing.T) {
+	t.Parallel()
+
+	// Close stdin immediately and keep stdout open so the write fails.
+	script := `#!/bin/sh
+exec 0<&-
+while :; do sleep 1; done
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "closedstdin.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	tr.closeTimeout = 100 * time.Millisecond
+	if err := tr.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer tr.Close()
+
+	_, err := tr.Send(context.Background(), "ping", nil)
+	if err == nil {
+		t.Fatal("expected write error")
+	}
+	if !strings.Contains(err.Error(), "write request") {
+		t.Fatalf("expected write request error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Notify_WriteError(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+exec 0<&-
+while :; do sleep 1; done
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "closedstdin2.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	tr := NewStdioTransport("/bin/sh", scriptPath)
+	tr.closeTimeout = 100 * time.Millisecond
+	if err := tr.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	defer tr.Close()
+
+	err := tr.Notify(context.Background(), "ping", nil)
+	if err == nil {
+		t.Fatal("expected write error")
+	}
+	if !strings.Contains(err.Error(), "write notification") {
+		t.Fatalf("expected write notification error, got: %v", err)
+	}
+}
+
+func TestStdioTransport_Close_WithPendingSend(t *testing.T) {
+	t.Parallel()
+
+	tr := NewStdioTransport("sleep", "3600")
+	if err := tr.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = tr.Send(context.Background(), "ping", nil)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending Send did not return after Close")
 	}
 }

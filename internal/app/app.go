@@ -27,6 +27,13 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
+// osGetwd is a seam for tests that need to simulate get-working-directory failures.
+var osGetwd = os.Getwd
+
+// turnShutdownTimeout is how long Close waits for in-flight turns. It is a
+// package-level variable so tests can use a short value without blocking.
+var turnShutdownTimeout = 10 * time.Second
+
 // teaProgram is the minimal interface Bubble Tea programs satisfy.
 type teaProgram interface {
 	Run() (tea.Model, error)
@@ -115,7 +122,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	a.resolvedModel = resolvedModel
 
 	// Determine sandbox root (current working directory)
-	sandboxRoot, err := os.Getwd()
+	sandboxRoot, err := osGetwd()
 	if err != nil {
 		sandboxRoot = "."
 	}
@@ -320,7 +327,7 @@ func (a *App) setApprovalMode(mode int) {
 
 // StartSession creates a new session in the current directory.
 func (a *App) StartSession(ctx context.Context) (*api.Session, error) {
-	wd, err := os.Getwd()
+	wd, err := osGetwd()
 	if err != nil {
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
@@ -334,7 +341,7 @@ func (a *App) ResumeSession(ctx context.Context, id string) (*api.Session, error
 
 // ContinueLastSession resumes the most recent session in the current directory.
 func (a *App) ContinueLastSession(ctx context.Context) (*api.Session, error) {
-	wd, err := os.Getwd()
+	wd, err := osGetwd()
 	if err != nil {
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
@@ -378,8 +385,11 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	model.SetToolCount(len(a.toolExecutor.Definitions(ctx)))
 
 	// Construct the git provider with the resolved session directory so the
-	// dir code path is exercised in production.
-	a.gitProvider = git.NewProvider(session.Path)
+	// dir code path is exercised in production. Tests may pre-wire a fake
+	// provider via the exported field.
+	if a.gitProvider == nil {
+		a.gitProvider = git.NewProvider(session.Path)
+	}
 	model.SetGitProvider(a.gitProvider)
 
 	now := time.Now().UTC()
@@ -547,7 +557,7 @@ func (a *App) Close() error {
 		}()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
+		case <-time.After(turnShutdownTimeout):
 			return errors.Join(append(errs, fmt.Errorf("turn shutdown timeout"))...)
 		}
 	}

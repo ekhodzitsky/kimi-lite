@@ -294,6 +294,170 @@ func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
+func TestResolveProviderFromConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		cfg            *api.Config
+		wantName       string
+		wantBaseURL    string
+		wantAPIKey     string
+		wantDefaultMdl string
+		wantErr        bool
+		wantErrContain string
+	}{
+		{
+			name: "legacy provider",
+			cfg: &api.Config{
+				LLM: api.LLMConfig{
+					Provider: "moonshot",
+					APIKey:   "legacy-key",
+					Model:    "kimi-k2.5",
+					BaseURL:  "https://api.moonshot.cn/v1",
+					Timeout:  60 * time.Second,
+				},
+			},
+			wantName:       "moonshot",
+			wantBaseURL:    "https://api.moonshot.cn/v1",
+			wantAPIKey:     "legacy-key",
+			wantDefaultMdl: "kimi-k2.5",
+		},
+		{
+			name: "providers table",
+			cfg: &api.Config{
+				LLM: api.LLMConfig{Timeout: 60 * time.Second},
+				Providers: map[string]api.ProviderConfig{
+					"openai": {
+						Type:         api.ProviderTypeOpenAI,
+						APIKey:       "openai-key",
+						BaseURL:      "https://api.openai.com/v1",
+						DefaultModel: "gpt-4o",
+					},
+				},
+				DefaultProvider: "openai",
+			},
+			wantName:       "openai",
+			wantBaseURL:    "https://api.openai.com/v1",
+			wantAPIKey:     "openai-key",
+			wantDefaultMdl: "gpt-4o",
+		},
+		{
+			name: "legacy empty base_url",
+			cfg: &api.Config{
+				LLM: api.LLMConfig{
+					Provider: "moonshot",
+					APIKey:   "key",
+					Model:    "kimi-k2.5",
+					Timeout:  60 * time.Second,
+				},
+			},
+			wantErr:        true,
+			wantErrContain: "base_url",
+		},
+		{
+			name: "providers missing default_provider",
+			cfg: &api.Config{
+				LLM: api.LLMConfig{Timeout: 60 * time.Second},
+				Providers: map[string]api.ProviderConfig{
+					"openai": {
+						Type:         api.ProviderTypeOpenAI,
+						APIKey:       "key",
+						BaseURL:      "https://api.openai.com/v1",
+						DefaultModel: "gpt-4o",
+					},
+				},
+			},
+			wantErr:        true,
+			wantErrContain: "default_provider",
+		},
+		{
+			name: "providers default not found",
+			cfg: &api.Config{
+				LLM: api.LLMConfig{Timeout: 60 * time.Second},
+				Providers: map[string]api.ProviderConfig{
+					"openai": {
+						Type:         api.ProviderTypeOpenAI,
+						APIKey:       "key",
+						BaseURL:      "https://api.openai.com/v1",
+						DefaultModel: "gpt-4o",
+					},
+				},
+				DefaultProvider: "missing",
+			},
+			wantErr:        true,
+			wantErrContain: "not found",
+		},
+		{
+			name: "providers empty base_url",
+			cfg: &api.Config{
+				LLM: api.LLMConfig{Timeout: 60 * time.Second},
+				Providers: map[string]api.ProviderConfig{
+					"openai": {
+						Type:         api.ProviderTypeOpenAI,
+						APIKey:       "key",
+						DefaultModel: "gpt-4o",
+					},
+				},
+				DefaultProvider: "openai",
+			},
+			wantErr:        true,
+			wantErrContain: "base_url",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			name, provider, err := ResolveProviderFromConfig(tt.cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if tt.wantErrContain != "" && !contains(err.Error(), tt.wantErrContain) {
+					t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErrContain)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if name != tt.wantName {
+				t.Errorf("name = %q, want %q", name, tt.wantName)
+			}
+			if provider.BaseURL != tt.wantBaseURL {
+				t.Errorf("BaseURL = %q, want %q", provider.BaseURL, tt.wantBaseURL)
+			}
+			if provider.APIKey != tt.wantAPIKey {
+				t.Errorf("APIKey = %q, want %q", provider.APIKey, tt.wantAPIKey)
+			}
+			if provider.DefaultModel != tt.wantDefaultMdl {
+				t.Errorf("DefaultModel = %q, want %q", provider.DefaultModel, tt.wantDefaultMdl)
+			}
+		})
+	}
+}
+
+func TestResolveModelFromConfig_Error(t *testing.T) {
+	t.Parallel()
+
+	cfg := &api.Config{
+		LLM: api.LLMConfig{Timeout: 60 * time.Second},
+		Providers: map[string]api.ProviderConfig{
+			"openai": {Type: api.ProviderTypeOpenAI, APIKey: "key", DefaultModel: "gpt-4o"},
+		},
+		DefaultProvider: "missing",
+	}
+
+	_, err := ResolveModelFromConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want containing not found", err.Error())
+	}
+}
+
 func TestNewClientFromConfig_EmptyBaseURL(t *testing.T) {
 	t.Parallel()
 

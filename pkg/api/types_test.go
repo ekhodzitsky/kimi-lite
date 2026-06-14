@@ -262,10 +262,14 @@ func TestSessionExport_VersionConstant(t *testing.T) {
 
 func TestNoopMetricsCollector(t *testing.T) {
 	t.Parallel()
+
 	var c MetricsCollector = NoopMetricsCollector{}
-	c.IncCounter("x")
-	c.RecordLatency("y", time.Second)
-	c.RecordError("z")
+	// All no-op methods must be safe to call with any arguments.
+	c.IncCounter("requests", "tool:read_file")
+	c.IncCounter("requests") // no tags
+	c.RecordLatency("llm", time.Millisecond, "provider:openai")
+	c.RecordLatency("llm", 0) // zero duration
+	c.RecordError("timeout")
 }
 
 func TestHookEvent_String(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -239,6 +240,32 @@ func TestToolExecutor_Definitions_DoesNotMutateInput(t *testing.T) {
 
 	if original[0].Name != "read_file" {
 		t.Fatalf("client's tool definition was mutated to %q", original[0].Name)
+	}
+}
+
+func TestToolExecutor_SetLogger(t *testing.T) {
+	t.Parallel()
+
+	handler := &testLogHandler{}
+	logger := slog.New(handler)
+
+	client := &mockMCPClient{
+		listToolsFunc: func(ctx context.Context) ([]api.ToolDefinition, error) {
+			return nil, errors.New("unavailable")
+		},
+	}
+	exec := NewToolExecutor(client)
+	exec.SetLogger(logger)
+
+	defs := exec.Definitions(context.Background())
+	if defs != nil {
+		t.Fatalf("expected nil definitions, got %+v", defs)
+	}
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.records) == 0 {
+		t.Fatal("expected log record from custom logger")
 	}
 }
 

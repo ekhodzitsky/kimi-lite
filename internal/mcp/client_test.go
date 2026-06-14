@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -596,6 +601,190 @@ func TestClient_Connect_ProtocolVersion(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestClient_Connect_ProtocolVersionCloseError(t *testing.T) {
+	t.Parallel()
+
+	closeErr := errors.New("close failed")
+	transport := &mockTransport{
+		sendFunc: func(ctx context.Context, method string, params any) (*JSONRPCResponse, error) {
+			if method == "initialize" {
+				return &JSONRPCResponse{
+					Result: mustMarshal(t, map[string]any{
+						"protocolVersion": "",
+					}),
+				}, nil
+			}
+			return &JSONRPCResponse{}, nil
+		},
+		closeFunc: func() error { return closeErr },
+	}
+
+	client := NewClient(transport)
+	err := client.Connect(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "empty protocol version") {
+		t.Fatalf("expected empty protocol version error, got: %v", err)
+	}
+}
+
+func TestNewClientFromServerConfig_Stdio(t *testing.T) {
+	t.Parallel()
+
+	script := `#!/bin/sh
+read line
+echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}'
+read line
+`
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "helper.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write helper script: %v", err)
+	}
+
+	cfg := api.MCPServerConfig{
+		Transport: api.MCPTransportStdio,
+		Command:   "/bin/sh",
+		Args:      []string{scriptPath},
+		Env:       map[string]string{"MCP_TEST_VAR": "value"},
+		CWD:       tmpDir,
+	}
+
+	client, err := NewClientFromServerConfig(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewClientFromServerConfig error: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected client")
+	}
+
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	_ = client.Close()
+}
+
+func TestNewClientFromServerConfig_HTTP(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req JSONRPCRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "initialize" {
+			_ = json.NewEncoder(w).Encode(JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result:  json.RawMessage(`{"protocolVersion":"2024-11-05"}`),
+			})
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	cfg := api.MCPServerConfig{
+		Transport:         api.MCPTransportHTTP,
+		URL:               server.URL,
+		Headers:           map[string]string{"X-Test": "yes"},
+		BearerTokenEnvVar: "",
+	}
+
+	client, err := NewClientFromServerConfig(cfg, server.Client())
+	if err != nil {
+		t.Fatalf("NewClientFromServerConfig error: %v", err)
+	}
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect error: %v", err)
+	}
+	_ = client.Close()
+}
+
+func TestNewClientFromServerConfig_UnsupportedTransport(t *testing.T) {
+	t.Parallel()
+
+	cfg := api.MCPServerConfig{Transport: "smtp"}
+	_, err := NewClientFromServerConfig(cfg, nil)
+	if err == nil {
+		t.Fatal("expected error for unsupported transport")
+	}
+	if !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("expected unsupported transport error, got: %v", err)
+	}
+}
+
+func TestClient_Connect_CloseErrorLogs(t *testing.T) {
+	// Not parallel because it replaces the default logger.
+	handler := &testLogHandler{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	defer slog.SetDefault(old)
+
+	transport := &mockTransport{
+		sendFunc: func(ctx context.Context, method string, params any) (*JSONRPCResponse, error) {
+			return nil, errors.New("initialize failed")
+		},
+		closeFunc: func() error {
+			return errors.New("close also failed")
+		},
+	}
+
+	client := NewClient(transport)
+	err := client.Connect(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	found := false
+	for _, r := range handler.records {
+		if r.Message == "failed to close mcp transport after initialize error" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected warning log for close error")
+	}
+}
+
+func TestClient_Connect_DecodeErrorCloseError(t *testing.T) {
+	handler := &testLogHandler{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	defer slog.SetDefault(old)
+
+	transport := &mockTransport{
+		sendFunc: func(ctx context.Context, method string, params any) (*JSONRPCResponse, error) {
+			return &JSONRPCResponse{Result: json.RawMessage(`{invalid}`)}, nil
+		},
+		closeFunc: func() error {
+			return errors.New("close failed")
+		},
+	}
+
+	client := NewClient(transport)
+	err := client.Connect(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	found := false
+	for _, r := range handler.records {
+		if strings.Contains(r.Message, "close mcp transport after initialize response decode error") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected warning log for close error after decode")
 	}
 }
 

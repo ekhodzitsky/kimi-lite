@@ -1540,3 +1540,207 @@ func TestClient_SetHeadersAndMetricsConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestClient_SetMetricsCollector_Nil(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(api.LLMConfig{BaseURL: "https://example.com", APIKey: "key", Model: "m"}, nil)
+	client.SetMetricsCollector(nil)
+
+	// A nil collector should be replaced by the noop collector; calling Chat
+	// must not panic.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+			Choices: []struct {
+				Message struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{{
+				Message: struct {
+					Role      string     `json:"role"`
+					Content   string     `json:"content"`
+					ToolCalls []toolCall `json:"tool_calls,omitempty"`
+				}{Role: "assistant", Content: "OK"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client = NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "key", Model: "m"}, server.Client())
+	client.SetMetricsCollector(nil)
+
+	_, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewClient_InvalidBaseURLFallback(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(api.LLMConfig{BaseURL: ":", APIKey: "key", Model: "m"}, nil)
+	if client.endpoint != ":/chat/completions" {
+		t.Errorf("endpoint = %q, want :/chat/completions", client.endpoint)
+	}
+}
+
+func TestClientChat_DecodeError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "key", Model: "m"}, server.Client())
+	_, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "decode chat response") {
+		t.Errorf("error = %q, want decode chat response", err.Error())
+	}
+}
+
+func TestClientChat_FinishReasonWarnings(t *testing.T) {
+	t.Parallel()
+
+	finishReasons := []string{"length", "content_filter"}
+	for _, reason := range finishReasons {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(chatCompletionResponse{
+					Choices: []struct {
+						Message struct {
+							Role      string     `json:"role"`
+							Content   string     `json:"content"`
+							ToolCalls []toolCall `json:"tool_calls,omitempty"`
+						} `json:"message"`
+						FinishReason string `json:"finish_reason"`
+					}{{
+						Message: struct {
+							Role      string     `json:"role"`
+							Content   string     `json:"content"`
+							ToolCalls []toolCall `json:"tool_calls,omitempty"`
+						}{Role: "assistant", Content: "truncated"},
+						FinishReason: reason,
+					}},
+				})
+			}))
+			defer server.Close()
+
+			client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "key", Model: "m"}, server.Client())
+			msg, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "hi"}}, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if msg.FinishReason != reason {
+				t.Errorf("FinishReason = %q, want %q", msg.FinishReason, reason)
+			}
+		})
+	}
+}
+
+func TestDoRequestWithRetry_NonRetryableNetworkError(t *testing.T) {
+	t.Parallel()
+
+	httpClient := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}
+		}),
+	}
+
+	client := NewClient(api.LLMConfig{BaseURL: "http://localhost", APIKey: "key", Model: "m"}, httpClient)
+	_, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "do request") {
+		t.Errorf("error = %q, want do request", err.Error())
+	}
+}
+
+func TestDoRequestWithRetry_MaxRetriesExceeded(t *testing.T) {
+	t.Parallel()
+
+	callCount := atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"overloaded"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "key", Model: "m"}, server.Client())
+	client.maxRetries = 2
+
+	_, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "max retries exceeded") {
+		t.Errorf("error = %q, want max retries exceeded", err.Error())
+	}
+	if callCount.Load() != 3 {
+		t.Errorf("callCount = %d, want 3", callCount.Load())
+	}
+}
+
+func TestDoRequest_ReadResponseError(t *testing.T) {
+	t.Parallel()
+
+	httpClient := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       &errorReadCloser{err: errors.New("read failed")},
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+			}, nil
+		}),
+	}
+
+	client := NewClient(api.LLMConfig{BaseURL: "http://localhost", APIKey: "key", Model: "m"}, httpClient)
+	_, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "read response") {
+		t.Errorf("error = %q, want read response", err.Error())
+	}
+}
+
+func TestParseRetryAfter_InvalidValue(t *testing.T) {
+	t.Parallel()
+
+	got := parseRetryAfter("not-a-number-or-date")
+	if got != 0 {
+		t.Errorf("parseRetryAfter = %v, want 0", got)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type errorReadCloser struct {
+	err error
+}
+
+func (e *errorReadCloser) Read([]byte) (int, error) {
+	return 0, e.err
+}
+
+func (e *errorReadCloser) Close() error {
+	return nil
+}

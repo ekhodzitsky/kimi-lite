@@ -317,3 +317,84 @@ func TestApprovalGate_RiskEvaluator_Yolo(t *testing.T) {
 		t.Fatalf("expected yolo approval, got decision=%v auto=%v", decision, auto)
 	}
 }
+
+func TestApprovalGate_RiskEvaluator_ReadOnlyTool_HighRiskRule(t *testing.T) {
+	t.Parallel()
+	rules := []api.RiskRule{{Tool: "read_file", Level: api.RiskLevelHigh, Message: "custom high"}}
+	gate := NewApprovalGate(ModeAuto, []string{"read_file"}, func(name string) bool { return name == "read_file" }, nil)
+	gate.SetRiskEvaluator(NewRiskEvaluator(rules, "/tmp"), api.RiskLevelMedium)
+
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "read_file", Arguments: `{"path":"/tmp/file.txt"}`})
+	if auto {
+		t.Fatal("expected high-risk read_file to require approval")
+	}
+	if decision != api.ApprovalNo {
+		t.Errorf("decision = %v, want ApprovalNo", decision)
+	}
+}
+
+func TestApprovalGate_GetMode(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeManual, nil, testIsReadOnly, nil)
+	if got := gate.GetMode(); got != ModeManual {
+		t.Errorf("GetMode() = %v, want ModeManual", got)
+	}
+	gate.SetMode(ModeAuto)
+	if got := gate.GetMode(); got != ModeAuto {
+		t.Errorf("GetMode() = %v, want ModeAuto", got)
+	}
+}
+
+func TestApprovalGate_NewApprovalGate_NilIsReadOnly(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeAuto, []string{"read_file"}, nil, nil)
+	// nil isReadOnly defaults to "always false", so read_file should not auto-approve.
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "read_file"})
+	if auto {
+		t.Error("expected manual approval with nil isReadOnly")
+	}
+	if decision != api.ApprovalNo {
+		t.Errorf("decision = %v, want ApprovalNo", decision)
+	}
+}
+
+func TestApprovalGate_evaluateRules_LowerPrecedenceDoesNotOverride(t *testing.T) {
+	t.Parallel()
+	rules := []api.PermissionRule{
+		{Tool: "read_file", Decision: api.PermissionAllow, Scope: api.PermissionScopeTurn},
+		{Tool: "read_file", Decision: api.PermissionDeny, Scope: api.PermissionScopeUser},
+	}
+	gate := NewApprovalGate(ModeAuto, []string{}, testIsReadOnly, rules)
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "read_file"})
+	if !auto {
+		t.Fatal("expected auto decision")
+	}
+	if decision != api.ApprovalYes {
+		t.Errorf("decision = %v, want ApprovalYes", decision)
+	}
+}
+
+func TestApprovalGate_evaluateRules_GlobMismatch(t *testing.T) {
+	t.Parallel()
+	rules := []api.PermissionRule{
+		{Tool: "mcp_*", Decision: api.PermissionAllow, Scope: api.PermissionScopeUser},
+	}
+	gate := NewApprovalGate(ModeAuto, []string{}, func(string) bool { return true }, rules)
+	// "other" does not match the glob rule.
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "other"})
+	if auto {
+		t.Fatal("expected no rule match")
+	}
+	if decision != api.ApprovalNo {
+		t.Errorf("decision = %v, want ApprovalNo", decision)
+	}
+}
+
+func TestApprovalGate_SetRiskEvaluator_InvalidThresholdDefaults(t *testing.T) {
+	t.Parallel()
+	gate := NewApprovalGate(ModeAuto, []string{"read_file"}, testIsReadOnly, nil)
+	gate.SetRiskEvaluator(NewRiskEvaluator(nil, "/tmp"), api.RiskLevel("invalid"))
+	if gate.riskThreshold != api.RiskLevelMedium {
+		t.Errorf("riskThreshold = %v, want medium", gate.riskThreshold)
+	}
+}

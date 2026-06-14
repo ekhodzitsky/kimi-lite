@@ -54,6 +54,16 @@ func TestStartPprofCancelledContext(t *testing.T) {
 	}
 }
 
+func TestStartPprofInvalidAddr(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := StartPprof(ctx, "127.0.0.1:abc")
+	if err == nil {
+		t.Fatal("invalid addr should return error, got nil")
+	}
+}
+
 func TestStartPprofHTTPRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

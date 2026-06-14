@@ -219,6 +219,168 @@ func TestHTTPTransport_NilClientUsesSecureHTTPClient(t *testing.T) {
 	}
 }
 
+func TestHTTPTransport_Close(t *testing.T) {
+	t.Parallel()
+
+	tr := NewHTTPTransport("http://example.com", nil, "", nil)
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	client := &http.Client{}
+	tr2 := NewHTTPTransport("http://example.com", nil, "", client)
+	if err := tr2.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+}
+
+func TestHTTPTransport_Send_JSONRPCError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Error:   &JSONRPCError{Code: -32600, Message: "bad request"},
+		})
+	}))
+	defer server.Close()
+
+	tr := NewHTTPTransport(server.URL, nil, "", server.Client())
+	resp, err := tr.Send(context.Background(), "bad", nil)
+	if err == nil {
+		t.Fatal("expected JSON-RPC error")
+	}
+	if resp == nil || resp.Error == nil {
+		t.Fatal("expected response with error")
+	}
+	if !strings.Contains(err.Error(), "bad request") {
+		t.Fatalf("expected bad request error, got: %v", err)
+	}
+}
+
+func TestHTTPTransport_Send_MarshalError(t *testing.T) {
+	t.Parallel()
+
+	tr := NewHTTPTransport("http://example.com", nil, "", nil)
+	_, err := tr.Send(context.Background(), "bad", map[string]any{"ch": make(chan int)})
+	if err == nil {
+		t.Fatal("expected marshal error")
+	}
+	if !strings.Contains(err.Error(), "marshal") {
+		t.Fatalf("expected marshal error, got: %v", err)
+	}
+}
+
+func TestHTTPTransport_Notify_ParamsAndSuccess(t *testing.T) {
+	t.Parallel()
+
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	tr := NewHTTPTransport(server.URL, nil, "", server.Client())
+	if err := tr.Notify(context.Background(), "notifications/initialized", map[string]any{"x": 1}); err != nil {
+		t.Fatalf("Notify error: %v", err)
+	}
+	if body["method"] != "notifications/initialized" {
+		t.Fatalf("expected method in body, got %+v", body)
+	}
+	params, ok := body["params"].(map[string]any)
+	if !ok || params["x"] != float64(1) {
+		t.Fatalf("expected params x=1, got %+v", body)
+	}
+}
+
+func TestHTTPTransport_Notify_Non2xx(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"nope"}`, http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	tr := NewHTTPTransport(server.URL, nil, "", server.Client())
+	err := tr.Notify(context.Background(), "ping", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Fatalf("expected 400 error, got: %v", err)
+	}
+}
+
+func TestHTTPTransport_Notify_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	tr := NewHTTPTransport(server.URL, nil, "", server.Client())
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := tr.Notify(ctx, "slow", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "context") {
+		t.Fatalf("expected context error, got: %v", err)
+	}
+}
+
+func TestHTTPTransport_Send_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{not json`))
+	}))
+	defer server.Close()
+
+	tr := NewHTTPTransport(server.URL, nil, "", server.Client())
+	_, err := tr.Send(context.Background(), "bad", nil)
+	if err == nil {
+		t.Fatal("expected unmarshal error")
+	}
+	if !strings.Contains(err.Error(), "unmarshal") {
+		t.Fatalf("expected unmarshal error, got: %v", err)
+	}
+}
+
+func TestHTTPTransport_Notify_MarshalError(t *testing.T) {
+	t.Parallel()
+
+	tr := NewHTTPTransport("http://example.com", nil, "", nil)
+	err := tr.Notify(context.Background(), "bad", map[string]any{"ch": make(chan int)})
+	if err == nil {
+		t.Fatal("expected marshal error")
+	}
+	if !strings.Contains(err.Error(), "marshal") {
+		t.Fatalf("expected marshal error, got: %v", err)
+	}
+}
+
+func TestHTTPTransport_Notify_NetworkError(t *testing.T) {
+	t.Parallel()
+
+	tr := NewHTTPTransport("http://127.0.0.1:1", nil, "", nil)
+	err := tr.Notify(context.Background(), "ping", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "post notification") {
+		t.Fatalf("expected post notification error, got: %v", err)
+	}
+}
+
 func TestHTTPTransport_ResponseSizeLimit(t *testing.T) {
 	t.Parallel()
 

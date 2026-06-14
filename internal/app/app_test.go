@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -890,11 +891,12 @@ func turnsEqual(a, b api.Turn) bool {
 }
 
 type fakeAppMCPClient struct {
-	tools  []api.ToolDefinition
-	closed bool
+	tools      []api.ToolDefinition
+	closed     bool
+	connectErr error
 }
 
-func (f *fakeAppMCPClient) Connect(ctx context.Context) error { return nil }
+func (f *fakeAppMCPClient) Connect(ctx context.Context) error { return f.connectErr }
 func (f *fakeAppMCPClient) ListTools(ctx context.Context) ([]api.ToolDefinition, error) {
 	return f.tools, nil
 }
@@ -1461,5 +1463,975 @@ func TestSystemPrompt_NoLeadingTabs(t *testing.T) {
 		if strings.HasPrefix(line, "\t") {
 			t.Fatalf("line %d has leading tab: %q", i, line)
 		}
+	}
+}
+
+// errorInjectingStore wraps a real store and returns injected errors for selected methods.
+type errorInjectingStore struct {
+	api.Store
+	getSessionErr    error
+	getMessagesErr   error
+	getTurnsErr      error
+	createSessionErr error
+	updateSessionErr error
+	appendErr        error
+	saveTurnErr      error
+	clearMessagesErr error
+	deleteSessionErr error
+	closeErr         error
+}
+
+func (s *errorInjectingStore) GetSession(ctx context.Context, id string) (*api.Session, error) {
+	if s.getSessionErr != nil {
+		return nil, s.getSessionErr
+	}
+	return s.Store.GetSession(ctx, id)
+}
+
+func (s *errorInjectingStore) GetMessages(ctx context.Context, sessionID string, limit int) ([]api.Message, error) {
+	if s.getMessagesErr != nil {
+		return nil, s.getMessagesErr
+	}
+	return s.Store.GetMessages(ctx, sessionID, limit)
+}
+
+func (s *errorInjectingStore) GetTurns(ctx context.Context, sessionID string, limit int) ([]api.Turn, error) {
+	if s.getTurnsErr != nil {
+		return nil, s.getTurnsErr
+	}
+	return s.Store.GetTurns(ctx, sessionID, limit)
+}
+
+func (s *errorInjectingStore) CreateSession(ctx context.Context, path string) (*api.Session, error) {
+	if s.createSessionErr != nil {
+		return nil, s.createSessionErr
+	}
+	return s.Store.CreateSession(ctx, path)
+}
+
+func (s *errorInjectingStore) UpdateSession(ctx context.Context, session *api.Session) error {
+	if s.updateSessionErr != nil {
+		return s.updateSessionErr
+	}
+	return s.Store.UpdateSession(ctx, session)
+}
+
+func (s *errorInjectingStore) AppendMessage(ctx context.Context, sessionID string, msg api.Message) error {
+	if s.appendErr != nil {
+		return s.appendErr
+	}
+	return s.Store.AppendMessage(ctx, sessionID, msg)
+}
+
+func (s *errorInjectingStore) SaveTurn(ctx context.Context, sessionID string, turn api.Turn) error {
+	if s.saveTurnErr != nil {
+		return s.saveTurnErr
+	}
+	return s.Store.SaveTurn(ctx, sessionID, turn)
+}
+
+func (s *errorInjectingStore) ClearMessages(ctx context.Context, sessionID string) error {
+	if s.clearMessagesErr != nil {
+		return s.clearMessagesErr
+	}
+	return s.Store.ClearMessages(ctx, sessionID)
+}
+
+func (s *errorInjectingStore) DeleteSession(ctx context.Context, id string) error {
+	if s.deleteSessionErr != nil {
+		return s.deleteSessionErr
+	}
+	return s.Store.DeleteSession(ctx, id)
+}
+
+func (s *errorInjectingStore) Close() error {
+	if s.closeErr != nil {
+		return s.closeErr
+	}
+	return s.Store.Close()
+}
+
+type fakeMCPClientErr struct {
+	fakeAppMCPClient
+	closeErr error
+}
+
+func (f *fakeMCPClientErr) Close() error {
+	return f.closeErr
+}
+
+func TestApp_RunTurn(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	ctx := context.Background()
+	sess, err := a.StartSession(ctx)
+	if err != nil {
+		t.Fatalf("StartSession() error: %v", err)
+	}
+
+	llm := &mockLLM{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			ch := make(chan api.StreamChunk)
+			go func() {
+				defer close(ch)
+				select {
+				case ch <- api.StreamChunk{Done: true}:
+				case <-ctx.Done():
+				}
+			}()
+			return ch, nil
+		},
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{}, nil
+		},
+		defs:     []api.ToolDefinition{{Name: "read_file", Description: "read"}},
+		readOnly: map[string]bool{"read_file": true},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+
+	a.turnManager = core.NewTurnManager(llm, tools, approval, a.store, &configProvider{cfg: cfg})
+
+	events, err := a.RunTurn(ctx, sess.ID, "hello")
+	if err != nil {
+		t.Fatalf("RunTurn() error: %v", err)
+	}
+
+	var sawDone bool
+	for ev := range events {
+		if ev.Type == api.TurnEventDone {
+			sawDone = true
+			break
+		}
+	}
+	if !sawDone {
+		t.Fatal("expected a Done event from RunTurn")
+	}
+}
+
+func TestApp_ExportSession_Errors(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*errorInjectingStore)
+	}{
+		{"get session", func(s *errorInjectingStore) { s.getSessionErr = fmt.Errorf("boom session") }},
+		{"get messages", func(s *errorInjectingStore) { s.getMessagesErr = fmt.Errorf("boom messages") }},
+		{"get turns", func(s *errorInjectingStore) { s.getTurnsErr = fmt.Errorf("boom turns") }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("HOME", tmpDir)
+			cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+
+			a, err := New(cfg, false)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			defer a.Close()
+
+			sess, err := a.StartSession(context.Background())
+			if err != nil {
+				t.Fatalf("StartSession() error: %v", err)
+			}
+
+			wrapped := &errorInjectingStore{Store: a.store}
+			tt.set(wrapped)
+			a.store = wrapped
+
+			_, err = a.ExportSession(context.Background(), sess.ID)
+			if err == nil {
+				t.Fatal("expected ExportSession to return an error")
+			}
+		})
+	}
+}
+
+func TestApp_ImportSession_Errors(t *testing.T) {
+	tests := []struct {
+		name  string
+		set   func(*errorInjectingStore)
+		turns []api.Turn
+	}{
+		{"create session", func(s *errorInjectingStore) { s.createSessionErr = fmt.Errorf("boom create") }, nil},
+		{"update session", func(s *errorInjectingStore) { s.updateSessionErr = fmt.Errorf("boom update") }, nil},
+		{"save turn", func(s *errorInjectingStore) { s.saveTurnErr = fmt.Errorf("boom turn") }, []api.Turn{{ID: "t1", State: api.TurnThinking, Input: "hi"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("HOME", tmpDir)
+			cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+
+			a, err := New(cfg, false)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			defer a.Close()
+
+			wrapped := &errorInjectingStore{Store: a.store}
+			tt.set(wrapped)
+			a.store = wrapped
+
+			export := &api.SessionExport{
+				Version: "1.0",
+				Session: api.Session{Path: "/tmp/import-err", Name: "Named"},
+				Turns:   tt.turns,
+			}
+
+			_, err = a.ImportSession(context.Background(), export)
+			if err == nil {
+				t.Fatal("expected ImportSession to return an error")
+			}
+
+			sessions, err := wrapped.ListSessions(context.Background(), "/tmp/import-err", 0)
+			if err != nil {
+				t.Fatalf("ListSessions error: %v", err)
+			}
+			if len(sessions) != 0 {
+				t.Fatalf("expected cleanup to remove session, got %d", len(sessions))
+			}
+		})
+	}
+}
+
+func TestApp_deleteSessionAndData_Errors(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	sess, err := a.store.CreateSession(context.Background(), "/tmp/delete-err")
+	if err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+
+	a.store = &errorInjectingStore{
+		Store:            a.store,
+		clearMessagesErr: fmt.Errorf("clear failed"),
+		deleteSessionErr: fmt.Errorf("delete failed"),
+	}
+
+	err = a.deleteSessionAndData(context.Background(), sess.ID)
+	if err == nil {
+		t.Fatal("expected deleteSessionAndData to return an error")
+	}
+	if !strings.Contains(err.Error(), "clear messages") || !strings.Contains(err.Error(), "delete session") {
+		t.Fatalf("expected both errors, got: %v", err)
+	}
+}
+
+func TestApp_Close_Errors(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	a.mcpClient = &fakeMCPClientErr{closeErr: fmt.Errorf("mcp close failed")}
+	a.store = &errorInjectingStore{Store: a.store, closeErr: fmt.Errorf("store close failed")}
+
+	err = a.Close()
+	if err == nil {
+		t.Fatal("expected Close to return an error")
+	}
+	if !strings.Contains(err.Error(), "close mcp") || !strings.Contains(err.Error(), "close store") {
+		t.Fatalf("expected mcp and store close errors, got: %v", err)
+	}
+}
+
+func TestApp_New_InvalidWebSearchEndpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.WebSearch.Endpoint = "://not-a-url"
+
+	app, err := New(cfg, false)
+	if err == nil {
+		if app != nil {
+			_ = app.Close()
+		}
+		t.Fatal("expected error for invalid web search endpoint")
+	}
+	if !strings.Contains(err.Error(), "web search") {
+		t.Fatalf("expected web search error, got: %v", err)
+	}
+}
+
+func TestApp_New_WebSearchWiresTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.WebSearch.Endpoint = "https://search.example/api"
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	var found bool
+	for _, def := range a.builtInExec.Definitions(context.Background()) {
+		if def.Name == "web_search" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected web_search tool to be registered")
+	}
+}
+
+func TestApp_New_DropsNonReadOnlyAutoApprove(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.Behavior.AutoApprove = []string{"read_file", "write_file", "unknown_tool"}
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	decision, auto := a.approvalGate.ShouldAutoApprove(api.ToolCall{Name: "write_file"})
+	if auto || decision != api.ApprovalNo {
+		t.Fatalf("expected write_file to require manual approval, got decision=%v auto=%v", decision, auto)
+	}
+}
+
+func TestApp_New_MCPServerCreateError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.MCPServers = map[string]api.MCPServerConfig{
+		"local": {Enabled: true, Transport: api.MCPTransportStdio, Command: "fake"},
+	}
+
+	originalFactory := newMCPClientForServer
+	defer func() { newMCPClientForServer = originalFactory }()
+	newMCPClientForServer = func(cfg api.MCPServerConfig) (api.MCPClient, error) {
+		return nil, fmt.Errorf("injected create error")
+	}
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	if a.mcpClient != nil {
+		t.Fatalf("expected no mcp client when creation fails, got %T", a.mcpClient)
+	}
+}
+
+func TestApp_New_MCPServerConnectError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.MCPServers = map[string]api.MCPServerConfig{
+		"local": {Enabled: true, Transport: api.MCPTransportStdio, Command: "fake"},
+	}
+
+	originalFactory := newMCPClientForServer
+	defer func() { newMCPClientForServer = originalFactory }()
+	newMCPClientForServer = func(cfg api.MCPServerConfig) (api.MCPClient, error) {
+		return &fakeAppMCPClient{connectErr: fmt.Errorf("injected connect error")}, nil
+	}
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	if a.mcpClient != nil {
+		t.Fatalf("expected no mcp client when connect fails, got %T", a.mcpClient)
+	}
+}
+
+func TestApp_New_MCPUnsupportedTransport(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.MCPServers = map[string]api.MCPServerConfig{
+		"bad": {Enabled: true, Transport: "ftp"},
+	}
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	if a.mcpClient != nil {
+		t.Fatalf("expected no mcp client for unsupported transport, got %T", a.mcpClient)
+	}
+}
+
+func TestApp_Run_TUIError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	session := &api.Session{ID: "s1", Path: filepath.Join(tmpDir, "does-not-exist")}
+	err = a.Run(context.Background(), session)
+	if err == nil {
+		t.Fatal("expected Run to return an error when TUI creation fails")
+	}
+	if !strings.Contains(err.Error(), "create tui model") {
+		t.Fatalf("expected tui model error, got: %v", err)
+	}
+}
+
+func TestApp_Run_AppendsGitStatusAndLogsAppendErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "file.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	for _, cmd := range []*exec.Cmd{
+		exec.Command("git", "init", repoDir),
+		exec.Command("git", "-C", repoDir, "config", "user.email", "test@example.com"),
+		exec.Command("git", "-C", repoDir, "config", "user.name", "Test"),
+	} {
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git setup: %v\n%s", err, out)
+		}
+	}
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	session, err := a.store.CreateSession(context.Background(), repoDir)
+	if err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+
+	appendErr := fmt.Errorf("append failed")
+	a.store = &errorInjectingStore{Store: a.store, appendErr: appendErr}
+
+	a.newProgram = func(model tea.Model, opts ...tea.ProgramOption) teaProgram {
+		return &mockTeaProgram{err: nil}
+	}
+
+	if err := a.Run(context.Background(), session); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+}
+
+func TestApp_Run_AppendSystemMessageError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	session, err := a.store.CreateSession(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+
+	a.store = &errorInjectingStore{Store: a.store, appendErr: fmt.Errorf("append system message failed")}
+	a.newProgram = func(model tea.Model, opts ...tea.ProgramOption) teaProgram {
+		return &mockTeaProgram{err: nil}
+	}
+
+	if err := a.Run(context.Background(), session); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+}
+
+func TestApp_New_UnsupportedProvider(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.LLM.Provider = "anthropic"
+
+	app, err := New(cfg, false)
+	if err == nil {
+		if app != nil {
+			_ = app.Close()
+		}
+		t.Fatal("expected error for unsupported provider")
+	}
+	if !strings.Contains(err.Error(), "create llm client") {
+		t.Fatalf("expected llm client error, got: %v", err)
+	}
+}
+
+func TestApp_New_EmptyBaseURL(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.LLM.BaseURL = ""
+
+	app, err := New(cfg, false)
+	if err == nil {
+		if app != nil {
+			_ = app.Close()
+		}
+		t.Fatal("expected error for empty base_url")
+	}
+	if !strings.Contains(err.Error(), "create llm client") {
+		t.Fatalf("expected llm client error, got: %v", err)
+	}
+}
+
+func TestApp_New_GetwdError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	orig := osGetwd
+	osGetwd = func() (string, error) { return "", fmt.Errorf("injected getwd error") }
+	defer func() { osGetwd = orig }()
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+}
+
+func TestApp_StartSession_GetwdError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	a, err := New(testAppConfig(filepath.Join(tmpDir, "sessions.db")), false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	orig := osGetwd
+	osGetwd = func() (string, error) { return "", fmt.Errorf("injected getwd error") }
+	defer func() { osGetwd = orig }()
+
+	_, err = a.StartSession(context.Background())
+	if err == nil {
+		t.Fatal("expected StartSession to return an error")
+	}
+	if !strings.Contains(err.Error(), "get working directory") {
+		t.Fatalf("expected working directory error, got: %v", err)
+	}
+}
+
+func TestApp_ContinueLastSession_GetwdError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	a, err := New(testAppConfig(filepath.Join(tmpDir, "sessions.db")), false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	orig := osGetwd
+	osGetwd = func() (string, error) { return "", fmt.Errorf("injected getwd error") }
+	defer func() { osGetwd = orig }()
+
+	_, err = a.ContinueLastSession(context.Background())
+	if err == nil {
+		t.Fatal("expected ContinueLastSession to return an error")
+	}
+	if !strings.Contains(err.Error(), "get working directory") {
+		t.Fatalf("expected working directory error, got: %v", err)
+	}
+}
+
+func TestApp_ImportSession_EmptyVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	a, err := New(testAppConfig(filepath.Join(tmpDir, "sessions.db")), false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	export := &api.SessionExport{
+		Version: "",
+		Session: api.Session{Path: "/tmp/empty-version", Name: "EmptyVersion"},
+		Turns:   []api.Turn{{ID: "t1", State: api.TurnThinking, Input: "hi"}},
+	}
+
+	imported, err := a.ImportSession(context.Background(), export)
+	if err != nil {
+		t.Fatalf("ImportSession() error: %v", err)
+	}
+	if imported.Name != "EmptyVersion" {
+		t.Errorf("imported name = %q, want %q", imported.Name, "EmptyVersion")
+	}
+}
+
+func TestApp_Close_NoBuiltInExec(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	a, err := New(testAppConfig(filepath.Join(tmpDir, "sessions.db")), false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	a.builtInExec = nil
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+}
+
+func TestApp_Run_ContextCanceled(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	session, err := a.store.CreateSession(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	a.newProgram = func(model tea.Model, opts ...tea.ProgramOption) teaProgram {
+		return &mockTeaProgram{err: nil}
+	}
+
+	if err := a.Run(ctx, session); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+}
+
+func TestApp_New_DebugLogger(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	a, err := New(cfg, true)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+}
+
+func TestApp_New_StoreError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "sessions.db")
+	if err := os.MkdirAll(dbPath, 0o700); err != nil {
+		t.Fatalf("mkdir db path: %v", err)
+	}
+
+	cfg := testAppConfig(dbPath)
+	app, err := New(cfg, false)
+	if err == nil {
+		if app != nil {
+			_ = app.Close()
+		}
+		t.Fatal("expected error when DB path is a directory")
+	}
+	if !strings.Contains(err.Error(), "open store") {
+		t.Fatalf("expected open store error, got: %v", err)
+	}
+}
+
+func TestApp_New_ConfigDirError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", "")
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	app, err := New(cfg, false)
+	if err == nil {
+		if app != nil {
+			_ = app.Close()
+		}
+		t.Fatal("expected error when config dir cannot be determined")
+	}
+	if !strings.Contains(err.Error(), "ensure config dir") {
+		t.Fatalf("expected config dir error, got: %v", err)
+	}
+}
+
+func TestApp_New_DiscoverSkillsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	configDir := filepath.Join(tmpDir, "Library", "Application Support", "kimi-lite")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	skillsDir := filepath.Join(configDir, "skills")
+	if err := os.MkdirAll(skillsDir, 0o700); err != nil {
+		t.Fatalf("mkdir skills dir: %v", err)
+	}
+	if err := os.Chmod(skillsDir, 0o000); err != nil {
+		t.Fatalf("chmod skills: %v", err)
+	}
+	defer os.Chmod(skillsDir, 0o700)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+}
+
+func TestApp_New_BuiltInExecError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	sandboxFile := filepath.Join(tmpDir, "sandbox")
+	if err := os.WriteFile(sandboxFile, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write sandbox file: %v", err)
+	}
+
+	orig := osGetwd
+	osGetwd = func() (string, error) { return sandboxFile, nil }
+	defer func() { osGetwd = orig }()
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	app, err := New(cfg, false)
+	if err == nil {
+		if app != nil {
+			_ = app.Close()
+		}
+		t.Fatal("expected error when sandbox root is not a directory")
+	}
+	if !strings.Contains(err.Error(), "create built-in tool executor") {
+		t.Fatalf("expected built-in executor error, got: %v", err)
+	}
+}
+
+func TestApp_New_MCPServerDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.MCPServers = map[string]api.MCPServerConfig{
+		"disabled": {Enabled: false, Transport: api.MCPTransportStdio, Command: "fake"},
+	}
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	if a.mcpClient != nil {
+		t.Fatalf("expected no mcp client when only disabled servers are configured, got %T", a.mcpClient)
+	}
+}
+
+func TestApp_ImportSession_CleanupError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	a, err := New(testAppConfig(filepath.Join(tmpDir, "sessions.db")), false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	wrapped := &errorInjectingStore{
+		Store:            a.store,
+		updateSessionErr: fmt.Errorf("update failed"),
+		deleteSessionErr: fmt.Errorf("delete failed"),
+	}
+	a.store = wrapped
+
+	export := &api.SessionExport{
+		Version: "1.0",
+		Session: api.Session{Path: "/tmp/cleanup-err", Name: "Named"},
+	}
+
+	_, err = a.ImportSession(context.Background(), export)
+	if err == nil {
+		t.Fatal("expected ImportSession to return an error")
+	}
+	if !strings.Contains(err.Error(), "update session name") {
+		t.Fatalf("expected update session error, got: %v", err)
+	}
+}
+
+type fakeGitProvider struct {
+	isRepoFunc func(ctx context.Context) (bool, error)
+	statusFunc func(ctx context.Context) (string, error)
+	diffFunc   func(ctx context.Context, path string) (string, error)
+}
+
+func (f *fakeGitProvider) Status(ctx context.Context) (string, error) {
+	if f.statusFunc != nil {
+		return f.statusFunc(ctx)
+	}
+	return "", nil
+}
+
+func (f *fakeGitProvider) Diff(ctx context.Context, path string) (string, error) {
+	if f.diffFunc != nil {
+		return f.diffFunc(ctx, path)
+	}
+	return "", nil
+}
+
+func (f *fakeGitProvider) Commit(ctx context.Context, message string) error { return nil }
+
+func (f *fakeGitProvider) IsRepo(ctx context.Context) (bool, error) {
+	if f.isRepoFunc != nil {
+		return f.isRepoFunc(ctx)
+	}
+	return false, nil
+}
+
+func TestApp_Run_GitStatusError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	session, err := a.store.CreateSession(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+
+	a.gitProvider = &fakeGitProvider{
+		isRepoFunc: func(ctx context.Context) (bool, error) { return true, nil },
+		statusFunc: func(ctx context.Context) (string, error) { return "", fmt.Errorf("status failed") },
+	}
+	a.newProgram = func(model tea.Model, opts ...tea.ProgramOption) teaProgram {
+		return &mockTeaProgram{err: nil}
+	}
+
+	if err := a.Run(context.Background(), session); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+}
+
+func TestApp_Run_GitIsRepoError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	session, err := a.store.CreateSession(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+
+	a.gitProvider = &fakeGitProvider{
+		isRepoFunc: func(ctx context.Context) (bool, error) { return false, fmt.Errorf("is-repo failed") },
+	}
+	a.newProgram = func(model tea.Model, opts ...tea.ProgramOption) teaProgram {
+		return &mockTeaProgram{err: nil}
+	}
+
+	if err := a.Run(context.Background(), session); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+}
+
+func TestApp_New_MCPMixedEnabledDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.MCPServers = map[string]api.MCPServerConfig{
+		"local":  {Enabled: true, Transport: api.MCPTransportStdio, Command: "fake"},
+		"remote": {Enabled: false, Transport: api.MCPTransportHTTP, URL: "https://example.com/mcp"},
+	}
+
+	originalFactory := newMCPClientForServer
+	defer func() { newMCPClientForServer = originalFactory }()
+	newMCPClientForServer = func(cfg api.MCPServerConfig) (api.MCPClient, error) {
+		return &fakeAppMCPClient{tools: []api.ToolDefinition{{Name: "grep", Description: "Search"}}}, nil
+	}
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	if a.mcpClient == nil {
+		t.Fatal("expected mcp client for enabled server")
+	}
+}
+
+func TestApp_New_MCPStdioFactoryBranch(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
+	cfg.MCPServers = map[string]api.MCPServerConfig{
+		"local": {Enabled: true, Transport: api.MCPTransportStdio, Command: "false"},
+	}
+
+	a, err := New(cfg, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer a.Close()
+
+	if a.mcpClient != nil {
+		t.Fatalf("expected no mcp client when handshake fails, got %T", a.mcpClient)
 	}
 }

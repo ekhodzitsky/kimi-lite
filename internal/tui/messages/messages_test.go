@@ -450,6 +450,149 @@ func BenchmarkRenderMarkdown(b *testing.B) {
 	})
 }
 
+func TestToggleRawMode(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewAssistantMessage("**bold**", st)
+
+	m.ToggleRawMode()
+	if !m.RawMode {
+		t.Error("RawMode should be true after ToggleRawMode")
+	}
+
+	m.ToggleRawMode()
+	if m.RawMode {
+		t.Error("RawMode should be false after second ToggleRawMode")
+	}
+}
+
+func TestMax(t *testing.T) {
+	t.Parallel()
+
+	if got := max(5, 3); got != 5 {
+		t.Errorf("max(5, 3) = %d, want 5", got)
+	}
+	if got := max(2, 7); got != 7 {
+		t.Errorf("max(2, 7) = %d, want 7", got)
+	}
+	if got := max(4, 4); got != 4 {
+		t.Errorf("max(4, 4) = %d, want 4", got)
+	}
+}
+
+func TestWordWrap_ZeroAndNegativeWidth(t *testing.T) {
+	t.Parallel()
+
+	input := "hello world"
+	if got := wordWrap(input, 0); got != input {
+		t.Errorf("wordWrap(%q, 0) = %q, want %q", input, got, input)
+	}
+	if got := wordWrap(input, -5); got != input {
+		t.Errorf("wordWrap(%q, -5) = %q, want %q", input, got, input)
+	}
+}
+
+func TestSetRawModeLocked_NoOp(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewAssistantMessage("**bold**", st)
+	m.SetRawMode(true)
+	m.SetRawMode(true) // should be a no-op
+
+	if !m.RawMode {
+		t.Error("RawMode should remain true")
+	}
+	if m.Rendered != "" || m.renderCache != "" {
+		t.Error("cache should stay cleared after repeated SetRawMode(true)")
+	}
+}
+
+func TestSafeGlamourRender_BadCacheEntry(t *testing.T) {
+	// Not parallel because it mutates the package-level rendererCache.
+	theme := "bad-cache-entry-theme-unique"
+	rendererCache.Store(theme, "not-a-cached-renderer")
+	defer rendererCache.Delete(theme)
+
+	content := "# hello\n"
+	got := safeGlamourRender(content, theme)
+	if got != content {
+		t.Errorf("safeGlamourRender with bad cache entry = %q, want raw content %q", got, content)
+	}
+}
+
+func TestView_DefaultCase(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewUserMessage("hello", st)
+	m.Type = Type(99)
+
+	if got := m.View().Content; got != "" {
+		t.Errorf("View() for unknown message type = %q, want empty", got)
+	}
+}
+
+func TestViewUser_CacheHit(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewUserMessage("hello world this is a long message", st)
+	m.SetWidth(40)
+	v1 := m.View().Content
+	v2 := m.View().Content
+	if v1 != v2 {
+		t.Error("second View() at same width should return cached output")
+	}
+}
+
+func TestViewError_CacheHit(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewErrorMessage(errors.New("failure"), st)
+	m.SetWidth(80)
+	v1 := m.View().Content
+	v2 := m.View().Content
+	if v1 != v2 {
+		t.Error("second View() should return cached output")
+	}
+}
+
+func TestViewToolCall_CacheHit(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	call := api.ToolCall{ID: "1", Name: "read_file", Arguments: `{}`}
+	m := NewToolCallMessage(call, st)
+	m.SetWidth(80)
+	v1 := m.View().Content
+	v2 := m.View().Content
+	if v1 != v2 {
+		t.Error("second View() should return cached output")
+	}
+}
+
+func TestViewToolCall_ErrorResult(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	call := api.ToolCall{ID: "1", Name: "read_file", Arguments: `{}`}
+	m := NewToolCallMessage(call, st)
+	m.Expanded = true
+	m.SetToolResult(api.ToolResult{CallID: "1", Name: "read_file", Error: "something broke"})
+	m.SetWidth(80)
+
+	view := m.View().Content
+	if !strings.Contains(view, "error") {
+		t.Error("Tool call with error result should show error status")
+	}
+	if !strings.Contains(view, "something broke") {
+		t.Error("Tool call with error result should show error text")
+	}
+}
+
 func TestUserMessageCache(t *testing.T) {
 	t.Parallel()
 

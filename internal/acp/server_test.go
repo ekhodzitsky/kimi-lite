@@ -759,3 +759,632 @@ func TestServer_ApprovalDiffForwarded(t *testing.T) {
 		t.Fatalf("unexpected diff content: %v", params["diffContent"])
 	}
 }
+
+func TestNewServer_NilLogger(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, nil)
+	if srv.logger == nil {
+		t.Fatal("expected default logger when nil is passed")
+	}
+}
+
+func TestServer_InvalidJSONRPCVersion(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"1.0","id":1,"method":"initialize"}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32600 {
+		t.Fatalf("expected invalid request error, got %v", resp.Error)
+	}
+}
+
+func TestServer_InitializeInvalidParams(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":"not-an-object"}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("expected invalid params error, got %v", resp.Error)
+	}
+}
+
+func TestServer_InitializeUnsupportedProtocolVersion(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":99}}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("expected unsupported protocol version error, got %v", resp.Error)
+	}
+}
+
+func TestServer_SessionNewInvalidParams(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":"bad"}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("expected invalid params error, got %v", resp.Error)
+	}
+}
+
+func TestServer_SessionNewStartSessionError(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	}()
+
+	tmpDir := t.TempDir()
+	app := &fakeAppRunner{
+		startSessionErr: errors.New("session creation failed"),
+	}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"workingDir":"` + tmpDir + `"}}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("expected session creation error, got %v", resp.Error)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd after run: %v", err)
+	}
+	resolvedCwd, _ := filepath.EvalSymlinks(cwd)
+	resolvedOrig, _ := filepath.EvalSymlinks(origDir)
+	if resolvedCwd != resolvedOrig {
+		t.Fatalf("cwd not restored after StartSession error: got %q want %q", resolvedCwd, resolvedOrig)
+	}
+}
+
+func TestServer_SessionNewNotADirectory(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(tmpFile, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"workingDir":"` + tmpFile + `"}}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("expected invalid working directory error, got %v", resp.Error)
+	}
+}
+
+func TestServer_SessionLoadResumeError(t *testing.T) {
+	app := &fakeAppRunner{
+		resumeSessionErr: errors.New("resume failed"),
+	}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"missing"}}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("expected resume error, got %v", resp.Error)
+	}
+}
+
+func TestServer_SessionLoadPathChangeError(t *testing.T) {
+	app := &fakeAppRunner{
+		resumeSessionReturn: &api.Session{ID: "sess-bad-path", Path: "/does/not/exist"},
+	}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"sess-bad-path"}}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("expected invalid session path error, got %v", resp.Error)
+	}
+}
+
+func TestChangeWorkingDir_SameDirectory(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := changeWorkingDir(cwd); err != nil {
+		t.Fatalf("changeWorkingDir same dir: %v", err)
+	}
+}
+
+func TestChangeWorkingDir_ChdirError(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.Chmod(tmpDir, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() {
+		if err := os.Chmod(tmpDir, 0755); err != nil {
+			t.Fatalf("restore chmod: %v", err)
+		}
+	}()
+
+	if err := changeWorkingDir(tmpDir); err == nil {
+		t.Fatal("expected chdir error")
+	}
+}
+
+func TestServer_CancelNotification(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","method":"session/cancel"}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("expected no response for notification, got %s", stdout.String())
+	}
+}
+
+func TestServer_CancelNoPrompt(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/cancel"}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]any)
+	if result["cancelled"] != false {
+		t.Fatalf("expected cancelled=false, got %v", result["cancelled"])
+	}
+}
+
+func TestServer_PromptEmpty(t *testing.T) {
+	app := &fakeAppRunner{startSessionReturn: &api.Session{ID: "sess-empty", Path: "/tmp"}}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":""}}` + "\n",
+	)
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	resp := parseLine(t, lines[len(lines)-1])
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("expected empty prompt error, got %v", resp.Error)
+	}
+}
+
+func TestServer_PromptInvalidParams(t *testing.T) {
+	app := &fakeAppRunner{startSessionReturn: &api.Session{ID: "sess-bad-params", Path: "/tmp"}}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":"bad"}` + "\n",
+	)
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	resp := parseLine(t, lines[len(lines)-1])
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("expected invalid params error, got %v", resp.Error)
+	}
+}
+
+func TestServer_PromptRunTurnError(t *testing.T) {
+	app := &fakeAppRunner{
+		startSessionReturn: &api.Session{ID: "sess-runturn-err", Path: "/tmp"},
+		runTurnErr:         errors.New("run turn failed"),
+	}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":"go"}}` + "\n",
+	)
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	resp := parseLine(t, lines[len(lines)-1])
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("expected run turn error, got %v", resp.Error)
+	}
+}
+
+func TestServer_PromptTurnEventNilError(t *testing.T) {
+	ch := make(chan api.TurnEvent, 2)
+	ch <- api.TurnEvent{Type: api.TurnEventError, Error: nil}
+	ch <- api.TurnEvent{Type: api.TurnEventDone, Content: "ok"}
+	close(ch)
+
+	app := &fakeAppRunner{
+		startSessionReturn: &api.Session{ID: "sess-nil-err", Path: "/tmp"},
+		runTurnReturn:      ch,
+	}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":"x"}}` + "\n",
+	)
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	resp := parseLine(t, lines[len(lines)-1])
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]any)
+	if result["response"] != "ok" {
+		t.Fatalf("unexpected response: %v", result["response"])
+	}
+}
+
+func TestServer_PromptUnknownEventTypeIgnored(t *testing.T) {
+	ch := make(chan api.TurnEvent, 2)
+	ch <- api.TurnEvent{Type: api.TurnEventType(99)}
+	ch <- api.TurnEvent{Type: api.TurnEventDone, Content: "ok"}
+	close(ch)
+
+	app := &fakeAppRunner{
+		startSessionReturn: &api.Session{ID: "sess-unknown", Path: "/tmp"},
+		runTurnReturn:      ch,
+	}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":"x"}}` + "\n",
+	)
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d: %s", len(lines), stdout.String())
+	}
+	resp := parseLine(t, lines[1])
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
+
+// failingWriter returns an error after writing a configurable number of bytes.
+type failingWriter struct {
+	allowed int
+	written int
+	err     error
+}
+
+func (f *failingWriter) Write(p []byte) (int, error) {
+	if f.written >= f.allowed {
+		return 0, f.err
+	}
+	f.written += len(p)
+	return len(p), nil
+}
+
+func TestWriteError_ContextDone(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	enc := json.NewEncoder(&bytes.Buffer{})
+	if err := srv.writeError(ctx, enc, 1, -1, "msg", errors.New("cause")); err == nil {
+		t.Fatal("expected context cancelled error")
+	}
+}
+
+func TestWriteError_EncodeError(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	w := &failingWriter{allowed: 0, err: errors.New("write failed")}
+	enc := json.NewEncoder(w)
+	if err := srv.writeError(context.Background(), enc, 1, -1, "msg", errors.New("cause")); err == nil {
+		t.Fatal("expected encode error")
+	}
+}
+
+func TestWriteError_NilCause(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	var stdout bytes.Buffer
+	enc := json.NewEncoder(&stdout)
+	if err := srv.writeError(context.Background(), enc, 1, -1, "msg", nil); err != nil {
+		t.Fatalf("writeError: %v", err)
+	}
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Data != nil {
+		t.Fatalf("expected nil error data, got %v", resp.Error)
+	}
+}
+
+func TestWriteResult_ContextDone(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	enc := json.NewEncoder(&bytes.Buffer{})
+	if err := srv.writeResult(ctx, enc, 1, map[string]any{}); err == nil {
+		t.Fatal("expected context cancelled error")
+	}
+}
+
+func TestWriteResult_EncodeError(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	w := &failingWriter{allowed: 0, err: errors.New("write failed")}
+	enc := json.NewEncoder(w)
+	if err := srv.writeResult(context.Background(), enc, 1, map[string]any{}); err == nil {
+		t.Fatal("expected encode error")
+	}
+}
+
+func TestWriteNotification_ContextDone(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	enc := json.NewEncoder(&bytes.Buffer{})
+	if err := srv.writeNotification(ctx, enc, "session/update", map[string]any{}); err == nil {
+		t.Fatal("expected context cancelled error")
+	}
+}
+
+func TestWriteNotification_EncodeError(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	w := &failingWriter{allowed: 0, err: errors.New("write failed")}
+	enc := json.NewEncoder(w)
+	if err := srv.writeNotification(context.Background(), enc, "session/update", map[string]any{}); err == nil {
+		t.Fatal("expected encode error")
+	}
+}
+
+func TestServer_RunContextCancelled(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+
+	rStdin, wStdin := io.Pipe()
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var runErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runErr = srv.Run(ctx, rStdin, &stdout)
+	}()
+
+	send(t, wStdin, "initialize", 1, map[string]any{})
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	wStdin.Close()
+	wg.Wait()
+
+	if runErr == nil || (!errors.Is(runErr, context.Canceled) && !strings.Contains(runErr.Error(), "context canceled")) {
+		t.Fatalf("expected context cancelled error, got %v", runErr)
+	}
+}
+
+func TestServer_RunAppCloseError(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	app := &fakeAppRunner{closeErr: errors.New("close failed")}
+	srv := NewServer(app, logger)
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}` + "\n")
+	var stdout bytes.Buffer
+
+	err := srv.Run(context.Background(), stdin, &stdout)
+	if err != nil {
+		t.Fatalf("expected nil run error, got %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "app close failed") {
+		t.Fatalf("expected app close error log, got %s", logBuf.String())
+	}
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r *errorReader) Read(_ []byte) (int, error) {
+	return 0, r.err
+}
+
+func TestServer_RunReadError(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := &errorReader{err: errors.New("read failed")}
+	var stdout bytes.Buffer
+
+	err := srv.Run(context.Background(), stdin, &stdout)
+	if err == nil || !strings.Contains(err.Error(), "read stdin") {
+		t.Fatalf("expected read error, got %v", err)
+	}
+}
+
+func TestServer_EmptyLineSkipped(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader("\n" + `{"jsonrpc":"2.0","id":1,"method":"initialize"}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 response, got %d: %s", len(lines), stdout.String())
+	}
+	resp := parseLine(t, lines[0])
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
+
+func TestServer_OversizedFrameWriteError(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+
+	large := make([]byte, maxFrameSize+1)
+	for i := range large {
+		large[i] = 'x'
+	}
+	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"padding":"` + string(large) + `"}}` + "\n"
+
+	stdin := strings.NewReader(req)
+	w := &failingWriter{allowed: 0, err: errors.New("write failed")}
+
+	err := srv.Run(context.Background(), stdin, w)
+	if err == nil || !strings.Contains(err.Error(), "write oversized frame error") {
+		t.Fatalf("expected oversized frame write error, got %v", err)
+	}
+}
+
+func TestServer_ParseErrorWriteError(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader("not json\n")
+	w := &failingWriter{allowed: 0, err: errors.New("write failed")}
+
+	err := srv.Run(context.Background(), stdin, w)
+	if err == nil || !strings.Contains(err.Error(), "write parse error") {
+		t.Fatalf("expected parse error write failure, got %v", err)
+	}
+}
+
+func TestServer_PromptGoroutineErrorLogged(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	app := &fakeAppRunner{}
+	srv := NewServer(app, logger)
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"prompt":"hi"}}` + "\n")
+	w := &failingWriter{allowed: 0, err: errors.New("write failed")}
+
+	if err := srv.Run(context.Background(), stdin, w); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if !strings.Contains(logBuf.String(), "prompt handler failed") {
+		t.Fatalf("expected prompt handler error log, got %s", logBuf.String())
+	}
+}
+
+func TestServer_SyncHandleErrorReturned(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"1.0","id":1,"method":"initialize"}` + "\n")
+	w := &failingWriter{allowed: 0, err: errors.New("write failed")}
+
+	err := srv.Run(context.Background(), stdin, w)
+	if err == nil || !strings.Contains(err.Error(), "encode error response") {
+		t.Fatalf("expected sync handle error, got %v", err)
+	}
+}
+
+func TestServer_SessionLoadInvalidParams(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/load","params":"bad"}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("expected invalid params error, got %v", resp.Error)
+	}
+}
+
+func TestServer_SessionLoadEmptySessionID(t *testing.T) {
+	app := &fakeAppRunner{}
+	srv := NewServer(app, slog.Default())
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":""}}` + "\n")
+	var stdout bytes.Buffer
+
+	if err := srv.Run(context.Background(), stdin, &stdout); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	resp := parseLine(t, strings.TrimSpace(stdout.String()))
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("expected empty session id error, got %v", resp.Error)
+	}
+}

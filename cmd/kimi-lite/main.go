@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -73,6 +74,35 @@ var writeDefaultConfig = config.WriteDefaultConfig
 // stdout is the writer used by non-interactive prompt mode. Swapped in tests.
 var stdout io.Writer = os.Stdout
 
+// osExit is called by main on fatal errors. Swapped in tests.
+var osExit = os.Exit
+
+// newStore creates a real SQLite store. Swapped in tests.
+var newStore = func(dbPath string) (api.Store, error) {
+	return store.NewSQLite(dbPath)
+}
+
+// newLLMClient creates a real LLM client. Swapped in tests.
+var newLLMClient = llm.NewClientFromConfig
+
+// resolveModelFromConfig resolves the effective model name. Swapped in tests.
+var resolveModelFromConfig = llm.ResolveModelFromConfig
+
+// newMCPClient creates a real legacy MCP client. Swapped in tests.
+var newMCPClient = func(cfg api.MCPConfig) api.MCPClient {
+	return mcp.NewClientFromConfig(cfg)
+}
+
+// newMCPClientFromServerConfig creates a real MCP client from server config. Swapped in tests.
+var newMCPClientFromServerConfig = func(cfg api.MCPServerConfig, httpClient *http.Client) (api.MCPClient, error) {
+	return mcp.NewClientFromServerConfig(cfg, httpClient)
+}
+
+// newMCPMultiClient aggregates multiple MCP clients. Swapped in tests.
+var newMCPMultiClient = func(clients map[string]api.MCPClient, configs map[string]api.MCPServerConfig) api.MCPClient {
+	return mcp.NewMultiClient(clients, configs)
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
@@ -80,7 +110,7 @@ func main() {
 	rootCmd := newRootCmd()
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		osExit(1)
 	}
 }
 
@@ -257,7 +287,7 @@ func run(ctx context.Context, f flags) error {
 	}
 
 	// Print startup banner
-	resolvedModel, err := llm.ResolveModelFromConfig(cfg)
+	resolvedModel, err := resolveModelFromConfig(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not resolve model (%v), using configured model\n", err)
 		resolvedModel = cfg.LLM.Model
@@ -529,7 +559,7 @@ func runDoctor(ctx context.Context, configPath string) error {
 		fmt.Printf("[FAIL] DB directory: %v\n", err)
 		issues = append(issues, "db-dir")
 	} else {
-		st, err := store.NewSQLite(cfg.Session.DBPath)
+		st, err := newStore(cfg.Session.DBPath)
 		if err != nil {
 			fmt.Printf("[FAIL] DB open: %v\n", err)
 			issues = append(issues, "db-open")
@@ -550,7 +580,7 @@ func runDoctor(ctx context.Context, configPath string) error {
 	} else {
 		fmt.Println("[OK]   LLM API key present")
 		// Lightweight connectivity check
-		client, err := llm.NewClientFromConfig(cfg, nil)
+		client, err := newLLMClient(cfg, nil)
 		if err != nil {
 			fmt.Printf("[FAIL] LLM client: %v\n", err)
 			issues = append(issues, "llm-client")
@@ -590,16 +620,16 @@ func runDoctor(ctx context.Context, configPath string) error {
 			if !serverCfg.Enabled {
 				continue
 			}
-			cli, err := mcp.NewClientFromServerConfig(serverCfg, nil)
+			cli, err := newMCPClientFromServerConfig(serverCfg, nil)
 			if err != nil {
 				fmt.Printf("[WARN] MCP server %s: invalid config: %v\n", name, err)
 				continue
 			}
 			clients[name] = cli
 		}
-		mcpClient = mcp.NewMultiClient(clients, cfg.MCPServers)
+		mcpClient = newMCPMultiClient(clients, cfg.MCPServers)
 	} else {
-		mcpClient = mcp.NewClientFromConfig(cfg.MCP)
+		mcpClient = newMCPClient(cfg.MCP)
 	}
 	defer func() { _ = mcpClient.Close() }()
 

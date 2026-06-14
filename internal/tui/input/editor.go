@@ -17,6 +17,22 @@ type editorFinishedMsg struct {
 	err  error
 }
 
+// writeTempFileHooks allows tests to inject failures for individual file-system
+// operations performed by writeTempFile without using mutable global state.
+type writeTempFileHooks struct {
+	create func(string, string) (*os.File, error)
+	write  func(*os.File, string) (int, error)
+	close  func(*os.File) error
+}
+
+func defaultWriteTempFileHooks() writeTempFileHooks {
+	return writeTempFileHooks{
+		create: os.CreateTemp,
+		write:  func(f *os.File, s string) (int, error) { return f.WriteString(s) },
+		close:  func(f *os.File) error { return f.Close() },
+	}
+}
+
 // resolveEditor returns the editor command to use. The configured value takes
 // precedence, then $VISUAL, then $EDITOR, with a final fallback to vi.
 func resolveEditor(configured string) string {
@@ -51,9 +67,15 @@ func parseEditor(ctx context.Context, editor, path string) (*exec.Cmd, error) {
 	return exec.CommandContext(ctx, name, args...), nil
 }
 
-// writeTempFile writes content to a temporary file and returns its path.
-func writeTempFile(content string) (string, error) {
-	f, err := os.CreateTemp("", "kimi-lite-editor-*.txt")
+// writeTempFile writes content to a temporary file and returns its path. The
+// optional hooks argument is used by tests to simulate file-system failures.
+func writeTempFile(content string, hooks ...writeTempFileHooks) (string, error) {
+	h := defaultWriteTempFileHooks()
+	if len(hooks) > 0 {
+		h = hooks[0]
+	}
+
+	f, err := h.create("", "kimi-lite-editor-*.txt")
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
@@ -62,11 +84,11 @@ func writeTempFile(content string) (string, error) {
 		_ = os.Remove(name)
 	}
 
-	if _, err := f.WriteString(content); err != nil {
+	if _, err := h.write(f, content); err != nil {
 		closeAndRemove(f.Name())
 		return "", fmt.Errorf("write temp file: %w", err)
 	}
-	if err := f.Close(); err != nil {
+	if err := h.close(f); err != nil {
 		closeAndRemove(f.Name())
 		return "", fmt.Errorf("close temp file: %w", err)
 	}

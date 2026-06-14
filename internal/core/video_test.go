@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"math"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -121,5 +123,249 @@ func TestVideoExtractor_FrameTimestampsCoverEnd(t *testing.T) {
 	last := info.Frames[len(info.Frames)-1]
 	if last.Timestamp != info.DurationSeconds {
 		t.Errorf("last frame timestamp = %f, want %f", last.Timestamp, info.DurationSeconds)
+	}
+}
+
+func TestVideoExtractor_Extract_DefaultMaxFrames(t *testing.T) {
+	skipNoFFmpeg(t)
+
+	tmpDir := t.TempDir()
+	videoPath := filepath.Join(tmpDir, "test.mp4")
+	createTestVideo(t, videoPath)
+
+	ext := NewVideoExtractor()
+	info, err := ext.Extract(context.Background(), videoPath, 0)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(info.Frames) != 1 {
+		t.Errorf("expected 1 default frame, got %d", len(info.Frames))
+	}
+}
+
+func TestVideoExtractor_Extract_ProbeError(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ffprobePath := filepath.Join(binDir, "ffprobe")
+	ffmpegPath := filepath.Join(binDir, "ffmpeg")
+	writeScript(t, ffprobePath, "#!/bin/sh\nexit 1\n")
+	writeScript(t, ffmpegPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	ext := NewVideoExtractor()
+	_, err := ext.Extract(context.Background(), filepath.Join(tmpDir, "video.mp4"), 1)
+	if err == nil {
+		t.Fatal("expected probe error")
+	}
+}
+
+func TestVideoExtractor_Extract_FFmpegError(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ffprobePath := filepath.Join(binDir, "ffprobe")
+	ffmpegPath := filepath.Join(binDir, "ffmpeg")
+	writeScript(t, ffprobePath, "#!/bin/sh\nprintf '%s' '{\"format\":{\"format_name\":\"mov,mp4,m4a,3gp,3g2,mj2\",\"duration\":\"2.0\"},\"streams\":[{\"codec_type\":\"video\",\"width\":320,\"height\":240}]}'\n")
+	writeScript(t, ffmpegPath, "#!/bin/sh\nexit 1\n")
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	ext := NewVideoExtractor()
+	_, err := ext.Extract(context.Background(), filepath.Join(tmpDir, "video.mp4"), 1)
+	if err == nil {
+		t.Fatal("expected ffmpeg error")
+	}
+}
+
+func TestVideoExtractor_probe_InvalidJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ffprobePath := filepath.Join(binDir, "ffprobe")
+	writeScript(t, ffprobePath, "#!/bin/sh\necho 'not json'\n")
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	ext := NewVideoExtractor()
+	_, err := ext.probe(context.Background(), filepath.Join(tmpDir, "video.mp4"))
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+}
+
+func TestVideoExtractor_probe_NoVideoStream(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ffprobePath := filepath.Join(binDir, "ffprobe")
+	writeScript(t, ffprobePath, "#!/bin/sh\nprintf '%s' '{\"format\":{\"format_name\":\"mp3\",\"duration\":\"2.0\"},\"streams\":[{\"codec_type\":\"audio\"}]}'\n")
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	ext := NewVideoExtractor()
+	info, err := ext.probe(context.Background(), filepath.Join(tmpDir, "audio.mp3"))
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if info.Width != 0 || info.Height != 0 {
+		t.Errorf("expected zero dimensions for audio, got %dx%d", info.Width, info.Height)
+	}
+}
+
+func TestVideoExtractor_extractFrames_NoFrames(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ffmpegPath := filepath.Join(binDir, "ffmpeg")
+	// ffmpeg exits successfully but produces no png files.
+	writeScript(t, ffmpegPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	ext := &VideoExtractor{ffmpegPath: ffmpegPath}
+	_, err := ext.extractFrames(context.Background(), filepath.Join(tmpDir, "video.mp4"), 2.0, 1)
+	if err == nil {
+		t.Fatal("expected no frames error")
+	}
+}
+
+func TestVideoExtractor_extractFrames_ReadDirError(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ffmpegPath := filepath.Join(binDir, "ffmpeg")
+	// Remove the temp directory after creating a frame, so ReadDir fails.
+	writeScript(t, ffmpegPath, "#!/bin/sh\ndir=$(dirname \"$9\")\necho fakeframe > \"$dir/frame_001.png\"\nrm -rf \"$dir\"\n")
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	ext := &VideoExtractor{ffmpegPath: ffmpegPath}
+	_, err := ext.extractFrames(context.Background(), filepath.Join(tmpDir, "video.mp4"), 2.0, 1)
+	if err == nil {
+		t.Fatal("expected read dir error")
+	}
+}
+
+func TestVideoExtractor_extractFrames_ZeroDuration(t *testing.T) {
+	skipNoFFmpeg(t)
+
+	tmpDir := t.TempDir()
+	videoPath := filepath.Join(tmpDir, "test.mp4")
+	createTestVideo(t, videoPath)
+
+	ext := NewVideoExtractor()
+	// Call extractFrames directly with duration=0 to exercise the timestamp=0 path.
+	frames, err := ext.extractFrames(context.Background(), videoPath, 0, 1)
+	if err != nil {
+		t.Fatalf("extractFrames: %v", err)
+	}
+	if len(frames) != 1 {
+		t.Errorf("expected 1 frame, got %d", len(frames))
+	}
+	if frames[0].Timestamp != 0 {
+		t.Errorf("timestamp = %f, want 0", frames[0].Timestamp)
+	}
+}
+
+func TestVideoExtractor_lookup_NotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PATH", tmpDir)
+	ext := NewVideoExtractor()
+	if ext.Available() {
+		t.Error("expected extractor to be unavailable when binaries missing")
+	}
+}
+
+func TestVideoExtractor_extractFrames_TempDirError(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ffmpegPath := filepath.Join(binDir, "ffmpeg")
+	writeScript(t, ffmpegPath, "#!/bin/sh\nexit 0\n")
+
+	ext := &VideoExtractor{ffmpegPath: ffmpegPath}
+	t.Setenv("TMPDIR", filepath.Join(tmpDir, "does", "not", "exist"))
+	_, err := ext.extractFrames(context.Background(), filepath.Join(tmpDir, "video.mp4"), 2.0, 1)
+	if err == nil {
+		t.Fatal("expected temp dir creation error")
+	}
+}
+
+func TestVideoExtractor_extractFrames_ReadFrameError(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ffmpegPath := filepath.Join(binDir, "ffmpeg")
+	writeScript(t, ffmpegPath, "#!/bin/sh\ndir=$(dirname \"$9\")\necho fakeframe > \"$dir/frame_001.png\"\nchmod 000 \"$dir/frame_001.png\"\n")
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	ext := &VideoExtractor{ffmpegPath: ffmpegPath}
+	_, err := ext.extractFrames(context.Background(), filepath.Join(tmpDir, "video.mp4"), 2.0, 1)
+	if err == nil {
+		t.Fatal("expected read frame error")
+	}
+}
+
+func TestVideoExtractor_extractFrames_SkipsDirEntries(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ffmpegPath := filepath.Join(binDir, "ffmpeg")
+	writeScript(t, ffmpegPath, "#!/bin/sh\ndir=$(dirname \"$9\")\nmkdir \"$dir/frame_001.png\"\necho fakeframe > \"$dir/frame_002.png\"\n")
+	t.Setenv("PATH", binDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
+	ext := &VideoExtractor{ffmpegPath: ffmpegPath}
+	frames, err := ext.extractFrames(context.Background(), filepath.Join(tmpDir, "video.mp4"), 2.0, 2)
+	if err != nil {
+		t.Fatalf("extractFrames: %v", err)
+	}
+	if len(frames) != 1 {
+		t.Errorf("expected 1 frame, got %d", len(frames))
+	}
+}
+
+func TestVideoResultJSON_MarshalError(t *testing.T) {
+	info := &VideoInfo{
+		Path:            "video.mp4",
+		DurationSeconds: math.NaN(),
+		Frames:          []Frame{{DataURI: "data"}},
+	}
+	out := videoResultJSON(info, 100)
+	if !strings.HasPrefix(out, `{"error"`) {
+		t.Errorf("expected JSON error object, got %q", out)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Errorf("fallback is not valid JSON: %v", err)
+	}
+}
+
+func writeScript(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		t.Fatalf("write script: %v", err)
 	}
 }

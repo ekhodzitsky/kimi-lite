@@ -397,6 +397,127 @@ func TestRunner_IntersectDedupes(t *testing.T) {
 	_ = filterDefinitions(all, dups)
 }
 
+func TestAgentConfig_Unknown(t *testing.T) {
+	t.Parallel()
+	_, err := agentConfigFor(api.SubagentType("unknown"))
+	if err == nil {
+		t.Fatal("expected error for unknown agent type")
+	}
+	if !strContains(err.Error(), "unknown subagent type") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestToolResultContent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		result api.ToolResult
+		want   string
+	}{
+		{"output only", api.ToolResult{Output: "hello"}, "hello"},
+		{"error only", api.ToolResult{Error: "fail"}, "Error: fail"},
+		{"both", api.ToolResult{Output: "hello", Error: "fail"}, "hello\nError: fail"},
+		{"empty", api.ToolResult{}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := toolResultContent(tc.result)
+			if got != tc.want {
+				t.Fatalf("toolResultContent = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunner_UnknownType(t *testing.T) {
+	t.Parallel()
+	r := NewRunner(&fakeLLM{}, &fakeToolExecutor{}, t.TempDir())
+	_, err := r.Run(context.Background(), api.SubagentRequest{Type: "unknown", Prompt: "hi"})
+	if err == nil {
+		t.Fatal("expected error for unknown type")
+	}
+	if !strContains(err.Error(), "subagent config") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunner_LLMError(t *testing.T) {
+	t.Parallel()
+	llm := &fakeLLM{
+		responses: []string{""},
+		toolCalls: [][]api.ToolCall{
+			{{ID: "1", Name: "read_file"}},
+		},
+	}
+	tools := &fakeToolExecutor{
+		defs:    []api.ToolDefinition{{Name: "read_file"}},
+		outputs: map[string]string{"read_file": "x"},
+	}
+	r := NewRunner(llm, tools, t.TempDir())
+	_, err := r.Run(context.Background(), api.SubagentRequest{Type: api.SubagentExplore, Prompt: "go"})
+	if err == nil {
+		t.Fatal("expected error for LLM failure")
+	}
+	if !strContains(err.Error(), "subagent llm chat") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunner_ContextCancelledBeforeStart(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := NewRunner(&fakeLLM{}, &fakeToolExecutor{}, t.TempDir())
+	_, err := r.Run(ctx, api.SubagentRequest{Type: api.SubagentExplore, Prompt: "hi"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRunner_ToolErrorFillsMissingFields(t *testing.T) {
+	t.Parallel()
+	llm := &fakeLLM{
+		responses: []string{"", "done"},
+		toolCalls: [][]api.ToolCall{
+			{{ID: "call-1", Name: "read_file", Arguments: `{"path":"x.go"}`}},
+		},
+	}
+	tools := &fakeToolExecutor{
+		defs:          []api.ToolDefinition{{Name: "read_file"}},
+		outputs:       map[string]string{"read_file": "partial content"},
+		errs:          map[string]error{"read_file": errors.New("permission denied")},
+		emptyErrorFor: map[string]bool{"read_file": true},
+	}
+	r := NewRunner(llm, tools, t.TempDir())
+	res, err := r.Run(context.Background(), api.SubagentRequest{Type: api.SubagentExplore, Prompt: "read x"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Output != "done" {
+		t.Fatalf("output = %q, want %q", res.Output, "done")
+	}
+
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	if len(llm.calls) < 2 {
+		t.Fatalf("expected at least 2 LLM calls, got %d", len(llm.calls))
+	}
+	msgs := llm.calls[1].messages
+	last := msgs[len(msgs)-1]
+	if last.Role != api.RoleTool {
+		t.Fatalf("expected last message to be a tool message, got %s", last.Role)
+	}
+	want := "partial content\nError: permission denied"
+	if last.Content != want {
+		t.Fatalf("tool message content = %q, want %q", last.Content, want)
+	}
+	if last.ToolCallID != "call-1" {
+		t.Fatalf("tool call ID = %q, want %q", last.ToolCallID, "call-1")
+	}
+}
+
 func contains(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {
@@ -485,9 +606,10 @@ func (f *fakeLLM) Models() []api.ModelInfo { return nil }
 
 // fakeToolExecutor is a test double for api.ToolExecutor.
 type fakeToolExecutor struct {
-	defs    []api.ToolDefinition
-	outputs map[string]string
-	errs    map[string]error
+	defs          []api.ToolDefinition
+	outputs       map[string]string
+	errs          map[string]error
+	emptyErrorFor map[string]bool
 
 	mu    sync.Mutex
 	calls []api.ToolCall
@@ -505,6 +627,11 @@ func (f *fakeToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.
 	}
 	if err := f.errs[call.Name]; err != nil {
 		result.Error = err.Error()
+		if f.emptyErrorFor[call.Name] {
+			result.CallID = ""
+			result.Name = ""
+		}
+		return result, err
 	}
 	return result, nil
 }

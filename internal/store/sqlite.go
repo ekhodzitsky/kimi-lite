@@ -263,8 +263,33 @@ func migrateToolCallIDColumn(db *sql.DB) error {
 	return nil
 }
 
+// newSQLiteOptions holds testable configuration for NewSQLite.
+type newSQLiteOptions struct {
+	chmodFn func(string, os.FileMode) error
+}
+
+// newSQLiteOption configures the internal NewSQLite constructor.
+type newSQLiteOption func(*newSQLiteOptions)
+
+// withChmod overrides os.Chmod for the database and WAL companion files.
+func withChmod(fn func(string, os.FileMode) error) newSQLiteOption {
+	return func(o *newSQLiteOptions) { o.chmodFn = fn }
+}
+
 // NewSQLite opens (or creates) a SQLite database at dbPath and runs migrations.
 func NewSQLite(dbPath string) (*SQLite, error) {
+	return newSQLiteWithOptions(dbPath)
+}
+
+func newSQLiteWithOptions(dbPath string, opts ...newSQLiteOption) (*SQLite, error) {
+	var cfg newSQLiteOptions
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.chmodFn == nil {
+		cfg.chmodFn = os.Chmod
+	}
+
 	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -274,7 +299,7 @@ func NewSQLite(dbPath string) (*SQLite, error) {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 	if dbPath != ":memory:" {
-		if err := os.Chmod(dbPath, 0600); err != nil {
+		if err := cfg.chmodFn(dbPath, 0600); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("set db permissions: %w", err)
 		}
@@ -313,7 +338,7 @@ func NewSQLite(dbPath string) (*SQLite, error) {
 		for _, suffix := range []string{"-wal", "-shm"} {
 			walPath := dbPath + suffix
 			if _, err := os.Stat(walPath); err == nil {
-				if err := os.Chmod(walPath, 0600); err != nil {
+				if err := cfg.chmodFn(walPath, 0600); err != nil {
 					_ = db.Close()
 					return nil, fmt.Errorf("set %s permissions: %w", walPath, err)
 				}
