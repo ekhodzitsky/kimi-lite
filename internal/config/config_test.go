@@ -11,15 +11,24 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
-// TestMain snapshots and clears KIMI_* environment variables before running
-// the package tests so that CI-set configuration does not override the values
-// expected from temporary config files.
+// TestMain snapshots and clears KIMI_* and provider API-key environment
+// variables before running the package tests so that CI-set configuration
+// does not override the values expected from temporary config files.
 func TestMain(m *testing.M) {
+	extraKeys := map[string]struct{}{
+		"MOONSHOT_API_KEY":   {},
+		"OPENAI_API_KEY":     {},
+		"ANTHROPIC_API_KEY":  {},
+		"WEB_SEARCH_API_KEY": {},
+	}
+
 	var preserved [][2]string
 	for _, e := range os.Environ() {
 		if i := strings.IndexByte(e, '='); i >= 0 {
 			key := e[:i]
 			if strings.HasPrefix(key, "KIMI_") {
+				preserved = append(preserved, [2]string{key, e[i+1:]})
+			} else if _, ok := extraKeys[key]; ok {
 				preserved = append(preserved, [2]string{key, e[i+1:]})
 			}
 		}
