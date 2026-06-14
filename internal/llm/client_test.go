@@ -1469,7 +1469,7 @@ func TestParseRetryAfter_NegativeClipped(t *testing.T) {
 		{"empty", "", 0},
 		{"negative integer", "-5", 0},
 		{"past http date", time.Now().UTC().Add(-5 * time.Minute).Format(http.TimeFormat), 0},
-		{"future http date", time.Now().UTC().Add(2 * time.Second).Format(http.TimeFormat), 2 * time.Second},
+		{"future http date", time.Now().UTC().Add(30 * time.Second).Format(http.TimeFormat), 30 * time.Second},
 		{"positive integer", "3", 3 * time.Second},
 	}
 
@@ -1478,9 +1478,9 @@ func TestParseRetryAfter_NegativeClipped(t *testing.T) {
 			t.Parallel()
 			got := parseRetryAfter(tt.value)
 			if tt.name == "future http date" {
-				// Allow small timing jitter.
-				if got < time.Second || got > 3*time.Second {
-					t.Errorf("parseRetryAfter(%q) = %v, want ~2s", tt.value, got)
+				// Allow up to 10s of scheduling jitter in CI.
+				if got < 20*time.Second || got > 40*time.Second {
+					t.Errorf("parseRetryAfter(%q) = %v, want ~30s", tt.value, got)
 				}
 				return
 			}

@@ -276,8 +276,8 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 
 func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int) {
 	defer tm.wg.Done()
-	defer tm.running.Store(false)
 	defer close(eventCh)
+	defer tm.running.Store(false)
 	defer func() {
 		tm.cancelMu.Lock()
 		tm.activeCancel = nil
