@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,9 +12,10 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
-// TestMain snapshots and clears KIMI_* and provider API-key environment
-// variables before running the package tests so that CI-set configuration
-// does not override the values expected from temporary config files.
+// TestMain isolates the package from the host environment before running
+// tests: it moves HOME/XDG_CONFIG_HOME to an empty temp dir and clears
+// KIMI_* and provider API-key env vars so that CI-set configuration does not
+// override values expected from temporary config files.
 func TestMain(m *testing.M) {
 	extraKeys := map[string]struct{}{
 		"MOONSHOT_API_KEY":   {},
@@ -36,7 +38,22 @@ func TestMain(m *testing.M) {
 	for _, kv := range preserved {
 		_ = os.Unsetenv(kv[0])
 	}
+
+	tmpHome, err := os.MkdirTemp("", "kimi-config-test-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create temp home: %v\n", err)
+		os.Exit(1)
+	}
+	oldHome, _ := os.LookupEnv("HOME")
+	oldXDG, _ := os.LookupEnv("XDG_CONFIG_HOME")
+	_ = os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
+
 	code := m.Run()
+
+	_ = os.Setenv("HOME", oldHome)
+	_ = os.Setenv("XDG_CONFIG_HOME", oldXDG)
+	_ = os.RemoveAll(tmpHome)
 	for _, kv := range preserved {
 		_ = os.Setenv(kv[0], kv[1])
 	}
