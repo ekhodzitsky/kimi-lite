@@ -11,6 +11,60 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
+// TestMain snapshots and clears KIMI_* environment variables before running
+// the package tests so that CI-set configuration does not override the values
+// expected from temporary config files.
+func TestMain(m *testing.M) {
+	var preserved [][2]string
+	for _, e := range os.Environ() {
+		if i := strings.IndexByte(e, '='); i >= 0 {
+			key := e[:i]
+			if strings.HasPrefix(key, "KIMI_") {
+				preserved = append(preserved, [2]string{key, e[i+1:]})
+			}
+		}
+	}
+	for _, kv := range preserved {
+		_ = os.Unsetenv(kv[0])
+	}
+	code := m.Run()
+	for _, kv := range preserved {
+		_ = os.Setenv(kv[0], kv[1])
+	}
+	os.Exit(code)
+}
+
+// clearEnvVars unsets environment variables that can leak into config tests
+// from the CI environment and override values from temporary config files.
+func clearEnvVars(t *testing.T, keys ...string) {
+	t.Helper()
+	for _, key := range keys {
+		old, ok := os.LookupEnv(key)
+		if ok {
+			os.Unsetenv(key)
+			t.Cleanup(func() { _ = os.Setenv(key, old) })
+		}
+	}
+}
+
+// clearConfigEnv unsets all KIMI_* env vars plus provider API keys that may
+// be present in CI so that tests load values from their temp config files.
+func clearConfigEnv(t *testing.T) {
+	t.Helper()
+	var keys []string
+	for _, e := range os.Environ() {
+		if i := strings.IndexByte(e, '='); i > 0 {
+			key := e[:i]
+			if strings.HasPrefix(key, "KIMI_") {
+				keys = append(keys, key)
+			}
+		}
+	}
+	// Also clear common provider API keys that config files may reference.
+	keys = append(keys, "MOONSHOT_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+	clearEnvVars(t, keys...)
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg == nil {
@@ -61,6 +115,8 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 func TestLoaderLoad_WithTempConfigFile(t *testing.T) {
+	clearConfigEnv(t)
+
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")
 	content := `
@@ -164,6 +220,7 @@ func TestEnvVarResolution(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
 			t.Setenv("TEST_API_KEY", tt.envValue)
 
 			tmpDir := t.TempDir()
@@ -191,6 +248,7 @@ model = "kimi-k2.5"
 }
 
 func TestEnvVarResolution_MissingVar(t *testing.T) {
+	clearConfigEnv(t)
 	t.Setenv("TEST_API_KEY_MISSING", "")
 
 	tmpDir := t.TempDir()
