@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `turn_interrupt` hook event that fires when the user cancels a running turn.
+
 ## [0.2.10] - 2026-06-14
 
 ### Fixed

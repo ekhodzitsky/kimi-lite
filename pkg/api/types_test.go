@@ -277,6 +277,9 @@ func TestHookEvent_String(t *testing.T) {
 	if HookToolCall.String() != "tool_call" {
 		t.Fatalf("unexpected string: %q", HookToolCall.String())
 	}
+	if HookTurnInterrupt.String() != "turn_interrupt" {
+		t.Fatalf("unexpected string: %q", HookTurnInterrupt.String())
+	}
 }
 
 func TestSubagentResult_JSONRoundTrip(t *testing.T) {

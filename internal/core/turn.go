@@ -182,7 +182,15 @@ func (tm *TurnManager) CancelAll() {
 	cancel := tm.activeCancel
 	tm.cancelMu.Unlock()
 	if cancel != nil {
+		tm.mu.RLock()
+		sessionID := tm.currentSessionID
+		turnID := ""
+		if tm.turn != nil {
+			turnID = tm.turn.ID
+		}
+		tm.mu.RUnlock()
 		cancel()
+		tm.runHooks(context.Background(), api.HookTurnInterrupt, sessionID, turnID, "")
 	}
 }
 

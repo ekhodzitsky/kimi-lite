@@ -643,6 +643,7 @@ const (
 	HookToolResult       HookEvent = "tool_result"
 	HookApprovalRequest  HookEvent = "approval_request"
 	HookApprovalDecision HookEvent = "approval_decision"
+	HookTurnInterrupt    HookEvent = "turn_interrupt"
 )
 
 // String returns the string representation of the hook event.

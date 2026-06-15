@@ -1623,3 +1623,60 @@ func TestTurnManager_RunTurn_ErrorEventEmitted(t *testing.T) {
 		t.Errorf("error event = %v, want %v", gotError.Error, streamErr)
 	}
 }
+
+// captureHookRunner records every hook data it receives.
+type captureHookRunner struct {
+	calls []api.HookData
+}
+
+func (r *captureHookRunner) Run(_ context.Context, data api.HookData) error {
+	r.calls = append(r.calls, data)
+	return nil
+}
+
+func TestTurnManager_CancelAll_FiresInterruptHook(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, _ []api.Message, _ []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			ch := make(chan api.StreamChunk)
+			go func() {
+				defer close(ch)
+				<-ctx.Done()
+			}()
+			return ch, nil
+		},
+	}
+
+	hook := &captureHookRunner{}
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+	tm.SetHookRunner(hook)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "test")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	// Let RunTurn start and block on the LLM stream.
+	time.Sleep(50 * time.Millisecond)
+
+	tm.CancelAll()
+
+	// Drain the output channel.
+	for range outCh {
+	}
+
+	var found bool
+	for _, call := range hook.calls {
+		if call.Event == api.HookTurnInterrupt && call.SessionID == sess.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected turn_interrupt hook for session %s, got %+v", sess.ID, hook.calls)
+	}
+}
