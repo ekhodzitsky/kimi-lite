@@ -89,7 +89,9 @@ func (m *ToolExecutor) Execute(ctx context.Context, call api.ToolCall) (api.Tool
 	}
 	name := strings.TrimPrefix(call.Name, "mcp_")
 	var args map[string]any
-	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+	if call.Arguments == "" {
+		args = map[string]any{}
+	} else if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 		return api.ToolResult{
 			CallID: call.ID,
 			Name:   call.Name,

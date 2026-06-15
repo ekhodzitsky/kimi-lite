@@ -3,6 +3,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -40,6 +41,11 @@ const (
 	minInputHeight       = 3
 
 	resizeDebounce = 80 * time.Millisecond
+
+	// approvalModeAuto and approvalModeYolo mirror core approval modes in the
+	// integer representation used by the TUI's approval-mode callback.
+	approvalModeAuto = int(core.ModeAuto)
+	approvalModeYolo = int(core.ModeYolo)
 )
 
 // inputHeight returns the current rendered height of the input component.
@@ -153,7 +159,11 @@ type Model struct {
 	// Approval callbacks (wired by app layer)
 	autoApproveSetter  func(string)
 	approvalModeSetter func(int)
-	approvalMode       int // core.ModeAuto or core.ModeYolo; zero value is core.ModeManual
+	approvalMode       int // approvalModeAuto by default; toggles to approvalModeYolo
+
+	// protectedPaths are additional paths blocked by diff previews (mirrors
+	// BuiltInToolExecutor.protectedPaths).
+	protectedPaths []string
 
 	// Streaming state
 	streamCh       <-chan api.TurnEvent
@@ -211,7 +221,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 		appCtx:       appCtx,
 		rb:           newRenderBuffer(),
 		approval:     newApprovalController(),
-		approvalMode: 1,
+		approvalMode: approvalModeAuto,
 	}
 	m.updateLayout()
 	m.syncInputCandidates()
@@ -258,6 +268,13 @@ func (m *Model) SetStore(st api.Store) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store = st
+}
+
+// SetProtectedPaths sets additional paths that must be blocked by diff previews.
+func (m *Model) SetProtectedPaths(paths []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.protectedPaths = append([]string(nil), paths...)
 }
 
 // SetAutoApproveSetter wires the callback for adding a tool to auto-approve.
@@ -354,14 +371,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setState(api.TurnIdle)
 
 	case ForkResultMsg:
-		if msg.Session != nil {
-			m.session = msg.Session
+		if msg.Session == nil {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("fork session returned no session"), m.styles))
+			m.setState(api.TurnError)
+			break
 		}
+		m.session = msg.Session
 		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Forked to session %q (%s).", m.session.Name, m.session.ID), m.styles))
 		m.setState(api.TurnIdle)
 
 	case ApprovalRequestMsg:
-		m.approval.startRequest(msg.Calls, msg.RequestID)
+		m.approvalStartRequest(msg.Calls, msg.RequestID)
 		m.setState(api.TurnWaitingApproval)
 		cmds = append(cmds, m.readStreamChunk())
 
@@ -461,10 +481,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	m.mu.Lock()
 	if m.rb.isDirty() {
-		m.refreshViewport()
+		m.vp.SetContent(m.rb.String())
 		m.rb.markClean()
 	}
+	m.mu.Unlock()
 
 	return m, tea.Batch(cmds...)
 }
@@ -494,7 +516,7 @@ func (m *Model) View() tea.View {
 		)
 	}
 
-	if m.state == api.TurnWaitingApproval && m.approval.isActive() {
+	if m.state == api.TurnWaitingApproval && m.approvalIsActive() {
 		view = m.renderApprovalDialog(view)
 	}
 
@@ -529,14 +551,18 @@ func (m *Model) SetContextStats(used, max int) {
 // updateContextStats estimates token usage from the current message history
 // using a chars/4 heuristic and updates the displayed stats.
 func (m *Model) updateContextStats() {
-	if m.contextMax <= 0 {
+	m.mu.RLock()
+	contextMax := m.contextMax
+	if contextMax <= 0 {
+		m.mu.RUnlock()
 		return
 	}
 	totalChars := 0
 	for _, msg := range m.messages {
 		totalChars += len(msg.Content)
 	}
-	m.SetContextStats(totalChars/4, m.contextMax)
+	m.mu.RUnlock()
+	m.SetContextStats(totalChars/4, contextMax)
 }
 
 // SetToolCount updates the tool count.
@@ -562,7 +588,7 @@ func (m *Model) setState(s api.TurnState) {
 // syncInputCandidates refreshes the input's file completion list from the
 // sidebar's currently visible tree.
 func (m *Model) syncInputCandidates() {
-	m.input.SetFileCandidates(m.sidebar.VisiblePaths())
+	m.input.SetFileCandidates(m.sidebar.RefreshVisiblePaths())
 }
 
 func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
@@ -572,22 +598,22 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	if m.state == api.TurnWaitingApproval {
 		switch msg.String() {
 		case m.config.Keybindings.ApproveYes:
-			if resp, ok := m.approval.approveCurrent(api.ApprovalYes); ok {
+			if resp, ok := m.approvalApproveCurrent(api.ApprovalYes); ok {
 				cmds = append(cmds, func() tea.Msg { return resp })
 			}
 			return cmds
 		case m.config.Keybindings.ApproveNo:
-			if resp, ok := m.approval.approveCurrent(api.ApprovalNo); ok {
+			if resp, ok := m.approvalApproveCurrent(api.ApprovalNo); ok {
 				cmds = append(cmds, func() tea.Msg { return resp })
 			}
 			return cmds
 		case m.config.Keybindings.ApproveAlways:
-			if resp, ok := m.approval.approveCurrent(api.ApprovalAlways); ok {
+			if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
 				cmds = append(cmds, func() tea.Msg { return resp })
 			}
 			return cmds
 		case m.config.Keybindings.ApproveDiff:
-			if resp, ok := m.approval.approveCurrent(api.ApprovalDiff); ok {
+			if resp, ok := m.approvalApproveCurrent(api.ApprovalDiff); ok {
 				cmds = append(cmds, func() tea.Msg { return resp })
 			}
 			return cmds
@@ -634,10 +660,10 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	case m.config.Keybindings.Yolo:
 		if m.approvalModeSetter != nil {
 			m.mu.Lock()
-			if m.approvalMode == int(core.ModeAuto) {
-				m.approvalMode = int(core.ModeYolo)
+			if m.approvalMode == approvalModeAuto {
+				m.approvalMode = approvalModeYolo
 			} else {
-				m.approvalMode = int(core.ModeAuto)
+				m.approvalMode = approvalModeAuto
 			}
 			mode := m.approvalMode
 			m.mu.Unlock()
@@ -851,11 +877,14 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 		m.addMessage(msgcomp.NewErrorMessage(chunk.Error, m.styles))
 		m.setState(api.TurnError)
 		m.mu.Lock()
+		if m.streamCancel != nil {
+			m.streamCancel()
+		}
 		m.streamCancel = nil
 		m.streamCh = nil
 		m.streamCanceled = true
-		m.mu.Unlock()
 		m.rb.setLastBlockStart(0)
+		m.mu.Unlock()
 		return cmds
 	}
 
@@ -878,6 +907,9 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 			return cmds
 		}
 		m.mu.Lock()
+		if m.streamCancel != nil {
+			m.streamCancel()
+		}
 		m.streamCancel = nil
 		m.streamCh = nil
 		m.streamCanceled = false
@@ -894,29 +926,30 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 	if lastMsg == nil {
 		lastMsg = msgcomp.NewAssistantMessage("", m.styles)
 		lastMsg.SetStreaming(true)
+		m.mu.Lock()
 		m.messages = append(m.messages, lastMsg)
 		m.rb.setLastBlockStart(m.rb.len())
 		m.rb.updateLastBlock(lastMsg.View().Content)
-	} else if m.messages[len(m.messages)-1] != lastMsg {
-		// Last assistant is not the most recent message; fall back to full rebuild
-		lastMsg.AppendContent(chunk.Content)
-		lastMsg.SetWidth(m.vpWidth())
-		m.rebuildRenderedContent()
-		cmds = append(cmds, m.readStreamChunk())
-		return cmds
-	} else if m.rb.lastBlockStart() == 0 {
-		// After a full rebuild (e.g., resize), recompute the assistant's start position
-		m.rb.setLastBlockStart(m.rb.len() - len(lastMsg.View().Content))
-		if m.rb.lastBlockStart() < 0 {
-			m.rb.setLastBlockStart(0)
+		m.mu.Unlock()
+	} else {
+		m.mu.Lock()
+		if m.rb.lastBlockStart() == 0 {
+			// After a full rebuild (e.g., resize), recompute the assistant's start position
+			m.rb.setLastBlockStart(m.rb.len() - len(lastMsg.View().Content))
+			if m.rb.lastBlockStart() < 0 {
+				m.rb.setLastBlockStart(0)
+			}
 		}
+		m.mu.Unlock()
 	}
 
 	lastMsg.AppendContent(chunk.Content)
 	lastMsg.SetWidth(m.vpWidth())
 
 	// Incremental update: truncate back to lastBlockStart and re-render just the last message
+	m.mu.Lock()
 	m.rb.updateLastBlock(lastMsg.View().Content)
+	m.mu.Unlock()
 
 	// Continue polling for the next chunk
 	cmds = append(cmds, m.readStreamChunk())
@@ -937,12 +970,14 @@ func (m *Model) handleToolCalls(calls []api.ToolCall) []tea.Cmd {
 
 func (m *Model) handleToolResult(result api.ToolResult) []tea.Cmd {
 	cmds := make([]tea.Cmd, 0, 1)
+	m.mu.Lock()
 	for _, msg := range m.messages {
 		if msg.Type == msgcomp.TypeToolCall && msg.ToolCall.ID == result.CallID {
 			msg.SetToolResult(result)
 			break
 		}
 	}
+	m.mu.Unlock()
 	// Re-render the tool call message so the result is visible in the viewport.
 	m.rebuildRenderedContent()
 	cmds = append(cmds, m.readStreamChunk())
@@ -952,12 +987,12 @@ func (m *Model) handleToolResult(result api.ToolResult) []tea.Cmd {
 func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 
-	done, approvals, alwaysAll := m.approval.handleResponse(resp)
+	done, approvals, alwaysAll := m.approvalHandleResponse(resp)
 
 	if resp.Decision == api.ApprovalDiff {
 		// Forward the diff request to the turn manager so it can emit a
 		// TurnEventApprovalDiff while keeping the pending call active.
-		reqID := m.approval.requestID()
+		reqID := m.approvalRequestID()
 		m.mu.RLock()
 		tm := m.turnManager
 		var sessionID string
@@ -988,7 +1023,7 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 
 	if alwaysAll && m.autoApproveSetter != nil {
 		seen := make(map[string]struct{})
-		for _, call := range m.approval.pending() {
+		for _, call := range m.approvalPending() {
 			if _, ok := seen[call.Name]; ok {
 				continue
 			}
@@ -997,8 +1032,8 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 		}
 	}
 
-	reqID := m.approval.requestID()
-	m.approval.clear()
+	reqID := m.approvalRequestID()
+	m.approvalClear()
 	m.setState(api.TurnThinking)
 
 	m.mu.RLock()
@@ -1026,18 +1061,24 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 }
 
 func (m *Model) addMessage(msg *msgcomp.Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	msg.SetWidth(m.vpWidth())
 	m.messages = append(m.messages, msg)
 	m.rb.appendBlock(msg.View().Content)
 }
 
 func (m *Model) clearMessages() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.messages = make([]*msgcomp.Message, 0)
 	m.rb.reset()
 	m.vp.SetContent("")
 }
 
 func (m *Model) rebuildRenderedContent() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	blocks := make([]string, len(m.messages))
 	for i, msg := range m.messages {
 		blocks[i] = msg.View().Content
@@ -1047,6 +1088,8 @@ func (m *Model) rebuildRenderedContent() {
 }
 
 func (m *Model) lastAssistantMessage() *msgcomp.Message {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for i := len(m.messages) - 1; i >= 0; i-- {
 		if m.messages[i].Type == msgcomp.TypeAssistant {
 			return m.messages[i]
@@ -1056,24 +1099,35 @@ func (m *Model) lastAssistantMessage() *msgcomp.Message {
 }
 
 func (m *Model) refreshViewport() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.vp.SetContent(m.rb.String())
 }
 
 func (m *Model) renderApprovalDialog(background string) string {
+	m.mu.RLock()
 	call, ok := m.approval.currentCall()
-	if !ok {
-		return background
-	}
-	if m.session == nil {
+	session := m.session
+	protectedPaths := append([]string(nil), m.protectedPaths...)
+	m.mu.RUnlock()
+	if !ok || session == nil {
 		return background
 	}
 	var b strings.Builder
 	b.WriteString("Tool call requires approval\n\n")
 	fmt.Fprintf(&b, "Tool: %s\n", call.Name)
-	if diff := toolCallDiff(call, m.session.Path); diff != "" {
+	diff, err := toolCallDiff(call, session.Path, protectedPaths)
+	switch {
+	case err == nil && diff != "":
 		fmt.Fprintf(&b, "\n%s\n", diff)
-	} else {
+	case err == nil:
 		fmt.Fprintf(&b, "Arguments: %s\n", call.Arguments)
+	case errors.Is(err, core.ErrDiffFileTooLarge):
+		fmt.Fprintf(&b, "Arguments: %s\n(diff preview disabled: file too large)\n", call.Arguments)
+	case errors.Is(err, core.ErrDiffPathBlocked):
+		fmt.Fprintf(&b, "Arguments: %s\n(diff preview blocked)\n", call.Arguments)
+	default:
+		fmt.Fprintf(&b, "Arguments: %s\n(diff preview unavailable)\n", call.Arguments)
 	}
 	fmt.Fprintf(&b, "\n[%s] yes  [%s] no  [%s] always  [%s] diff", m.config.Keybindings.ApproveYes, m.config.Keybindings.ApproveNo, m.config.Keybindings.ApproveAlways, m.config.Keybindings.ApproveDiff)
 
@@ -1163,6 +1217,55 @@ func normalizeRect(s string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+// approvalStartRequest starts a new approval request under m.mu.
+func (m *Model) approvalStartRequest(calls []api.ToolCall, requestID int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.approval.startRequest(calls, requestID)
+}
+
+// approvalHandleResponse records one approval decision under m.mu.
+func (m *Model) approvalHandleResponse(resp ApprovalResponseMsg) (done bool, approvals map[string]api.ApprovalDecision, alwaysAll bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.approval.handleResponse(resp)
+}
+
+// approvalRequestID returns the active approval request ID under m.mu.
+func (m *Model) approvalRequestID() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.approval.requestID()
+}
+
+// approvalPending returns the current pending calls under m.mu.
+func (m *Model) approvalPending() []api.ToolCall {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.approval.pending()
+}
+
+// approvalClear resets the approval controller under m.mu.
+func (m *Model) approvalClear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.approval.clear()
+}
+
+// approvalIsActive reports whether there is an active approval request under m.mu.
+func (m *Model) approvalIsActive() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.approval.isActive()
+}
+
+// approvalApproveCurrent produces a response for the current call under m.mu.
+func (m *Model) approvalApproveCurrent(decision api.ApprovalDecision) (ApprovalResponseMsg, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.approval.approveCurrent(decision)
+}
+
 func (m *Model) statusBar() string {
 	m.mu.RLock()
 	state := m.state
@@ -1179,7 +1282,7 @@ func (m *Model) statusBar() string {
 	parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf(" %s ", modelName)))
 	parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf("[%s]", stateStr)))
 
-	if approvalMode == int(core.ModeYolo) {
+	if approvalMode == approvalModeYolo {
 		parts = append(parts, m.styles.StatusBar.Render(" YOLO "))
 	}
 
@@ -1205,9 +1308,11 @@ func (m *Model) updateLayout() {
 		return
 	}
 
+	m.mu.Lock()
 	for _, msg := range m.messages {
 		msg.SetWidth(l.vpWidth)
 	}
+	m.mu.Unlock()
 	m.rebuildRenderedContent()
 	m.lastLayout = l
 }

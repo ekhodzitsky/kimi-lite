@@ -105,7 +105,7 @@ func TestSystemPrompt_ContainsToolNames(t *testing.T) {
 
 	prompt := systemPrompt("/tmp/test-dir", "")
 
-	requiredTools := []string{"read_file", "glob", "grep", "list_directory", "write_file", "str_replace_file", "shell", "fetch_url"}
+	requiredTools := []string{"read_file", "glob", "grep", "list_directory", "write_file", "str_replace_file", "edit", "shell", "fetch_url", "web_search", "read_video", "TodoList", "dispatch_subagent"}
 	for _, tool := range requiredTools {
 		if !strings.Contains(prompt, tool) {
 			t.Errorf("system prompt missing tool name %q", tool)
@@ -365,7 +365,10 @@ func TestApp_Close_CancelsBlockedTurn(t *testing.T) {
 			return api.ApprovalNo, false
 		},
 	}
-	tm := core.NewTurnManager(llm, tools, approval, a.store, &configProvider{cfg: cfg})
+	tm, err := core.NewTurnManager(llm, tools, approval, a.store, &configProvider{cfg: cfg})
+	if err != nil {
+		t.Fatalf("create turn manager: %v", err)
+	}
 	a.turnManager = tm
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1603,7 +1606,10 @@ func TestApp_RunTurn(t *testing.T) {
 		},
 	}
 
-	a.turnManager = core.NewTurnManager(llm, tools, approval, a.store, &configProvider{cfg: cfg})
+	a.turnManager, err = core.NewTurnManager(llm, tools, approval, a.store, &configProvider{cfg: cfg})
+	if err != nil {
+		t.Fatalf("create turn manager: %v", err)
+	}
 
 	events, err := a.RunTurn(ctx, sess.ID, "hello")
 	if err != nil {
@@ -2030,10 +2036,15 @@ func TestApp_New_GetwdError(t *testing.T) {
 
 	cfg := testAppConfig(filepath.Join(tmpDir, "sessions.db"))
 	a, err := New(cfg, false)
-	if err != nil {
-		t.Fatalf("New() error: %v", err)
+	if err == nil {
+		if a != nil {
+			_ = a.Close()
+		}
+		t.Fatal("expected New() to return an error when getwd fails")
 	}
-	defer a.Close()
+	if !strings.Contains(err.Error(), "get working directory") {
+		t.Fatalf("expected working directory error, got: %v", err)
+	}
 }
 
 func TestApp_StartSession_GetwdError(t *testing.T) {

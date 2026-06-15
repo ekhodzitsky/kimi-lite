@@ -2,8 +2,6 @@ package git
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 )
 
@@ -14,26 +12,17 @@ const (
 )
 
 // Commit creates a git commit with the given message.
-// It stages all changes, commits with a default identity and --no-verify, and
-// treats a clean working tree ("nothing to commit") as success.
+// It commits already-staged changes with a default identity and --no-verify,
+// and treats a clean working tree ("nothing to commit") as success.
+// Callers must stage changes themselves; this function does not auto-stage
+// files, avoiding the risk of committing unexpected untracked content.
 func (p *Provider) Commit(ctx context.Context, message string) error {
 	if message == "" {
 		message = "kimi-lite checkpoint"
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-
-	_, stderr, err := p.runner.Output(ctx, p.dir, "git", "add", "-A")
-	if err != nil {
-		if errCtx := ctx.Err(); errCtx != nil {
-			if errors.Is(errCtx, context.Canceled) {
-				return fmt.Errorf("git add canceled: %w", errCtx)
-			}
-			return fmt.Errorf("git add timed out: %w", errCtx)
-		}
-		return classifyErr("git add", stderr, err)
-	}
 
 	stdout, stderr, err := p.runner.Output(ctx, p.dir, "git",
 		"-c", "user.name="+defaultCommitName,
@@ -42,12 +31,6 @@ func (p *Provider) Commit(ctx context.Context, message string) error {
 		"--no-verify",
 	)
 	if err != nil {
-		if errCtx := ctx.Err(); errCtx != nil {
-			if errors.Is(errCtx, context.Canceled) {
-				return fmt.Errorf("git commit canceled: %w", errCtx)
-			}
-			return fmt.Errorf("git commit timed out: %w", errCtx)
-		}
 		combined := string(stdout) + string(stderr)
 		if isNothingToCommit(combined) {
 			return nil

@@ -59,6 +59,11 @@ func (v *VideoExtractor) Available() bool {
 
 // Extract returns metadata and up to maxFrames key frames from path.
 // maxFrames <= 0 defaults to 1.
+//
+// Security note: the caller is responsible for validating the path and, when
+// running inside a sandbox, copying the target to a temporary file before
+// invoking ffmpeg. This function passes the provided path directly to ffmpeg
+// and ffprobe, so it must already be a safe path.
 func (v *VideoExtractor) Extract(ctx context.Context, path string, maxFrames int) (*VideoInfo, error) {
 	if !v.Available() {
 		return nil, fmt.Errorf("ffmpeg/ffprobe not found in PATH")
@@ -82,7 +87,8 @@ func (v *VideoExtractor) Extract(ctx context.Context, path string, maxFrames int
 
 // probe runs ffprobe and parses the JSON output.
 func (v *VideoExtractor) probe(ctx context.Context, path string) (*VideoInfo, error) {
-	// path is validated by the caller before reaching the video extractor.
+	// path is expected to be a safe, validated path before reaching the video
+	// extractor (see Extract's security note).
 	//nolint:gosec
 	cmd := exec.CommandContext(ctx, v.ffprobePath,
 		"-v", "error",
@@ -145,7 +151,7 @@ func (v *VideoExtractor) extractFrames(ctx context.Context, path string, duratio
 		selectExpr = fmt.Sprintf("fps=%f,scale='min(1280,iw)':-1", fps)
 	}
 
-	// path is validated by the caller before reaching the video extractor.
+	// path is expected to be a safe, validated path (see Extract's security note).
 	//nolint:gosec
 	cmd := exec.CommandContext(ctx, v.ffmpegPath,
 		"-i", path,

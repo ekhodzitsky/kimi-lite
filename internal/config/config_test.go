@@ -126,6 +126,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Behavior.MaxTurns != 50 {
 		t.Errorf("expected max turns 50, got %d", cfg.Behavior.MaxTurns)
 	}
+	if !cfg.Behavior.AllowShell {
+		t.Error("expected behavior.allow_shell true by default")
+	}
 	if cfg.Session.DBPath != "~/.local/share/kimi-lite/sessions.db" {
 		t.Errorf("unexpected db_path: %s", cfg.Session.DBPath)
 	}
@@ -137,6 +140,12 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if !cfg.UI.ShowTokenCount {
 		t.Error("expected show_token_count true")
+	}
+	if cfg.Permission.RiskThreshold != api.RiskLevelMedium {
+		t.Errorf("expected permission.risk_threshold medium, got %q", cfg.Permission.RiskThreshold)
+	}
+	if cfg.Permission.RiskRules == nil {
+		t.Error("expected permission.risk_rules non-nil")
 	}
 }
 
@@ -437,6 +446,7 @@ func TestDefault(t *testing.T) {
 
 func TestResolveEnvVar_Strict(t *testing.T) {
 	t.Setenv("MYVAR", "resolved")
+	_ = os.Unsetenv("UNSET_VAR")
 	tests := []struct {
 		input string
 		want  string
@@ -448,6 +458,8 @@ func TestResolveEnvVar_Strict(t *testing.T) {
 		{"$abc123==", "$abc123=="},
 		{"plain", "plain"},
 		{"", ""},
+		{"$UNSET_VAR", ""},
+		{"${UNSET_VAR}", ""},
 	}
 
 	for _, tt := range tests {
@@ -497,7 +509,7 @@ func TestValidateLLM(t *testing.T) {
 					BaseURL: "https://api.moonshot.cn/v1",
 					Timeout: 60 * time.Second,
 				},
-				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50},
+				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50, MaxToolRounds: 10},
 				Session:  api.SessionConfig{DBPath: "/tmp/test.db"},
 				UI:       api.UIConfig{Theme: "dark"},
 			},
@@ -510,7 +522,7 @@ func TestValidateLLM(t *testing.T) {
 					BaseURL: "http://localhost:8080",
 					Timeout: 60 * time.Second,
 				},
-				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50},
+				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50, MaxToolRounds: 10},
 				Session:  api.SessionConfig{DBPath: "/tmp/test.db"},
 				UI:       api.UIConfig{Theme: "dark"},
 			},
@@ -523,7 +535,7 @@ func TestValidateLLM(t *testing.T) {
 					BaseURL: "http://127.0.0.1:8080",
 					Timeout: 60 * time.Second,
 				},
-				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50},
+				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50, MaxToolRounds: 10},
 				Session:  api.SessionConfig{DBPath: "/tmp/test.db"},
 				UI:       api.UIConfig{Theme: "dark"},
 			},
@@ -536,7 +548,7 @@ func TestValidateLLM(t *testing.T) {
 					BaseURL: "http://api.example.com",
 					Timeout: 60 * time.Second,
 				},
-				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50},
+				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50, MaxToolRounds: 10},
 				Session:  api.SessionConfig{DBPath: "/tmp/test.db"},
 				UI:       api.UIConfig{Theme: "dark"},
 			},
@@ -550,7 +562,7 @@ func TestValidateLLM(t *testing.T) {
 					BaseURL: "ftp://x",
 					Timeout: 60 * time.Second,
 				},
-				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50},
+				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50, MaxToolRounds: 10},
 				Session:  api.SessionConfig{DBPath: "/tmp/test.db"},
 				UI:       api.UIConfig{Theme: "dark"},
 			},
@@ -564,7 +576,7 @@ func TestValidateLLM(t *testing.T) {
 					BaseURL: "http://",
 					Timeout: 60 * time.Second,
 				},
-				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50},
+				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50, MaxToolRounds: 10},
 				Session:  api.SessionConfig{DBPath: "/tmp/test.db"},
 				UI:       api.UIConfig{Theme: "dark"},
 			},
@@ -583,7 +595,7 @@ func TestValidateLLM(t *testing.T) {
 						Timeout: 60 * time.Second,
 					},
 				},
-				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50},
+				Behavior: api.BehaviorConfig{ShellTimeout: 30 * time.Second, MaxTurns: 50, MaxToolRounds: 10},
 				Session:  api.SessionConfig{DBPath: "/tmp/test.db"},
 				UI:       api.UIConfig{Theme: "dark"},
 			},
@@ -616,10 +628,12 @@ func TestValidate_MCPServers(t *testing.T) {
 	validStdio := DefaultConfig()
 	validStdio.MCPServers = map[string]api.MCPServerConfig{
 		"fs": {
-			Enabled:   true,
-			Transport: api.MCPTransportStdio,
-			Command:   "npx",
-			Args:      []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+			Enabled:          true,
+			Transport:        api.MCPTransportStdio,
+			Command:          "npx",
+			Args:             []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+			StartupTimeoutMs: 5000,
+			ToolTimeoutMs:    30000,
 		},
 	}
 	if err := Validate(validStdio); err != nil {
@@ -629,9 +643,11 @@ func TestValidate_MCPServers(t *testing.T) {
 	validHTTP := DefaultConfig()
 	validHTTP.MCPServers = map[string]api.MCPServerConfig{
 		"remote": {
-			Enabled:   true,
-			Transport: api.MCPTransportHTTP,
-			URL:       "https://example.com/mcp",
+			Enabled:          true,
+			Transport:        api.MCPTransportHTTP,
+			URL:              "https://example.com/mcp",
+			StartupTimeoutMs: 5000,
+			ToolTimeoutMs:    30000,
 		},
 	}
 	if err := Validate(validHTTP); err != nil {
@@ -640,7 +656,7 @@ func TestValidate_MCPServers(t *testing.T) {
 
 	noCommand := DefaultConfig()
 	noCommand.MCPServers = map[string]api.MCPServerConfig{
-		"fs": {Enabled: true, Transport: api.MCPTransportStdio, Command: ""},
+		"fs": {Enabled: true, Transport: api.MCPTransportStdio, Command: "", StartupTimeoutMs: 5000, ToolTimeoutMs: 30000},
 	}
 	if err := Validate(noCommand); err == nil || !strings.Contains(err.Error(), "command") {
 		t.Fatalf("expected command validation error, got: %v", err)
@@ -648,7 +664,7 @@ func TestValidate_MCPServers(t *testing.T) {
 
 	badTransport := DefaultConfig()
 	badTransport.MCPServers = map[string]api.MCPServerConfig{
-		"x": {Enabled: true, Transport: "ws", Command: "cmd"},
+		"x": {Enabled: true, Transport: "ws", Command: "cmd", StartupTimeoutMs: 5000, ToolTimeoutMs: 30000},
 	}
 	if err := Validate(badTransport); err == nil || !strings.Contains(err.Error(), "transport") {
 		t.Fatalf("expected transport validation error, got: %v", err)
@@ -656,7 +672,7 @@ func TestValidate_MCPServers(t *testing.T) {
 
 	emptyURL := DefaultConfig()
 	emptyURL.MCPServers = map[string]api.MCPServerConfig{
-		"x": {Enabled: true, Transport: api.MCPTransportHTTP, URL: ""},
+		"x": {Enabled: true, Transport: api.MCPTransportHTTP, URL: "", StartupTimeoutMs: 5000, ToolTimeoutMs: 30000},
 	}
 	if err := Validate(emptyURL); err == nil || !strings.Contains(err.Error(), "url") {
 		t.Fatalf("expected url validation error, got: %v", err)
@@ -664,7 +680,7 @@ func TestValidate_MCPServers(t *testing.T) {
 
 	nonLocalHTTP := DefaultConfig()
 	nonLocalHTTP.MCPServers = map[string]api.MCPServerConfig{
-		"x": {Enabled: true, Transport: api.MCPTransportHTTP, URL: "http://example.com/mcp"},
+		"x": {Enabled: true, Transport: api.MCPTransportHTTP, URL: "http://example.com/mcp", StartupTimeoutMs: 5000, ToolTimeoutMs: 30000},
 	}
 	if err := Validate(nonLocalHTTP); err == nil || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("expected https validation error, got: %v", err)
@@ -689,6 +705,8 @@ disabled_tools = ["write_file"]
 transport = "http"
 url = "https://example.com/mcp"
 enabled = true
+startup_timeout_ms = 5000
+tool_timeout_ms = 30000
 headers = { X-Custom = "value" }
 bearer_token_env_var = "MCP_TOKEN"
 `
@@ -758,7 +776,9 @@ func TestValidate_AccumulatesErrors(t *testing.T) {
 			Timeout: -1 * time.Second,
 		},
 		Behavior: api.BehaviorConfig{
-			ShellTimeout: 30 * time.Second,
+			ShellTimeout:  30 * time.Second,
+			MaxTurns:      50,
+			MaxToolRounds: 10,
 		},
 		Session: api.SessionConfig{
 			DBPath: "",
@@ -850,6 +870,14 @@ func TestValidate_Hooks(t *testing.T) {
 		t.Fatalf("expected valid config, got: %v", err)
 	}
 
+	zeroTimeout := DefaultConfig()
+	zeroTimeout.Hooks = []api.HookConfig{
+		{Event: api.HookToolCall, Command: "echo", Timeout: 0},
+	}
+	if err := Validate(zeroTimeout); err != nil {
+		t.Fatalf("expected zero timeout to mean no timeout, got: %v", err)
+	}
+
 	invalid := DefaultConfig()
 	invalid.Hooks = []api.HookConfig{
 		{Event: "unknown_event", Command: "echo"},
@@ -890,6 +918,8 @@ model = "kimi-k2.5"
 transport = "stdio"
 command = "npx"
 enabled = true
+startup_timeout_ms = 5000
+tool_timeout_ms = 30000
 cwd = "~/mcp"
 [mcp_servers.fs.env]
 SECRET = "$MCP_SECRET"
@@ -909,7 +939,7 @@ SECRET = "$MCP_SECRET"
 	if !ok {
 		t.Fatal("expected mcp_servers.fs")
 	}
-	if got := srv.Env["secret"]; got != "super-secret" {
+	if got := srv.Env["SECRET"]; got != "super-secret" {
 		t.Errorf("expected env SECRET resolved to %q, got %q", "super-secret", got)
 	}
 	wantCWD := filepath.Join(tmpDir, "mcp")

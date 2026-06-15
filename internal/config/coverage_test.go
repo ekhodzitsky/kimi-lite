@@ -248,14 +248,16 @@ func TestValidateMCPServer(t *testing.T) {
 		wantErr string
 	}{
 		{name: "disabled returns nil", srv: api.MCPServerConfig{Enabled: false, Transport: "bad"}},
-		{name: "stdio valid", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio, Command: "npx"}},
-		{name: "stdio missing command", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio}, wantErr: "command"},
-		{name: "http valid", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportHTTP, URL: "https://example.com/mcp"}},
-		{name: "http empty url", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportHTTP}, wantErr: "url"},
-		{name: "http non-localhost", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportHTTP, URL: "http://example.com/mcp"}, wantErr: "https"},
-		{name: "negative startup timeout", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio, Command: "npx", StartupTimeoutMs: -1}, wantErr: "startup_timeout_ms"},
-		{name: "negative tool timeout", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio, Command: "npx", ToolTimeoutMs: -1}, wantErr: "tool_timeout_ms"},
-		{name: "bad transport", srv: api.MCPServerConfig{Enabled: true, Transport: "ws", Command: "npx"}, wantErr: "transport"},
+		{name: "stdio valid", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio, Command: "npx", StartupTimeoutMs: 5000, ToolTimeoutMs: 30000}},
+		{name: "stdio missing command", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio, StartupTimeoutMs: 5000, ToolTimeoutMs: 30000}, wantErr: "command"},
+		{name: "http valid", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportHTTP, URL: "https://example.com/mcp", StartupTimeoutMs: 5000, ToolTimeoutMs: 30000}},
+		{name: "http empty url", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportHTTP, StartupTimeoutMs: 5000, ToolTimeoutMs: 30000}, wantErr: "url"},
+		{name: "http non-localhost", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportHTTP, URL: "http://example.com/mcp", StartupTimeoutMs: 5000, ToolTimeoutMs: 30000}, wantErr: "https"},
+		{name: "zero startup timeout", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio, Command: "npx", StartupTimeoutMs: 0, ToolTimeoutMs: 30000}, wantErr: "startup_timeout_ms"},
+		{name: "zero tool timeout", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio, Command: "npx", StartupTimeoutMs: 5000, ToolTimeoutMs: 0}, wantErr: "tool_timeout_ms"},
+		{name: "negative startup timeout", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio, Command: "npx", StartupTimeoutMs: -1, ToolTimeoutMs: 30000}, wantErr: "startup_timeout_ms"},
+		{name: "negative tool timeout", srv: api.MCPServerConfig{Enabled: true, Transport: api.MCPTransportStdio, Command: "npx", StartupTimeoutMs: 5000, ToolTimeoutMs: -1}, wantErr: "tool_timeout_ms"},
+		{name: "bad transport", srv: api.MCPServerConfig{Enabled: true, Transport: "ws", Command: "npx", StartupTimeoutMs: 5000, ToolTimeoutMs: 30000}, wantErr: "transport"},
 	}
 
 	for _, tt := range tests {
@@ -289,6 +291,27 @@ func TestValidate_MoreBranches(t *testing.T) {
 				cfg.Behavior.ShellTimeout = 0
 			},
 			wantErr: "behavior.shell_timeout must be positive",
+		},
+		{
+			name: "max turns not positive",
+			mutate: func(cfg *api.Config) {
+				cfg.Behavior.MaxTurns = 0
+			},
+			wantErr: "behavior.max_turns must be positive",
+		},
+		{
+			name: "max tool rounds not positive",
+			mutate: func(cfg *api.Config) {
+				cfg.Behavior.MaxToolRounds = 0
+			},
+			wantErr: "behavior.max_tool_rounds must be positive",
+		},
+		{
+			name: "session max history negative",
+			mutate: func(cfg *api.Config) {
+				cfg.Session.MaxHistory = -1
+			},
+			wantErr: "session.max_history must not be negative",
 		},
 		{
 			name: "ui theme empty",
@@ -467,11 +490,11 @@ X-Key = "$HEADER_VAL"
 	if p.APIKey != "resolved-key" {
 		t.Errorf("expected api_key resolved, got %q", p.APIKey)
 	}
-	if p.Env["foo"] != "resolved-env" {
-		t.Errorf("expected env FOO resolved, got %q", p.Env["foo"])
+	if p.Env["FOO"] != "resolved-env" {
+		t.Errorf("expected env FOO resolved, got %q", p.Env["FOO"])
 	}
-	if p.CustomHeaders["x-key"] != "resolved-header" {
-		t.Errorf("expected header X-Key resolved, got %q", p.CustomHeaders["x-key"])
+	if p.CustomHeaders["X-Key"] != "resolved-header" {
+		t.Errorf("expected header X-Key resolved, got %q", p.CustomHeaders["X-Key"])
 	}
 }
 

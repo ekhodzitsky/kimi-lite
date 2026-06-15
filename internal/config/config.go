@@ -116,6 +116,9 @@ func validateProviders(cfg *api.Config) error {
 	return errors.Join(errs...)
 }
 
+// validateHooks validates lifecycle hook configuration.
+// A Timeout of 0 means no timeout (the hook runs until completion); only
+// negative values are rejected.
 func validateHooks(cfg *api.Config) error {
 	var errs []error
 	for i, h := range cfg.Hooks {
@@ -158,11 +161,11 @@ func validateMCPServer(name string, c api.MCPServerConfig) error {
 			return err
 		}
 	}
-	if c.StartupTimeoutMs < 0 {
-		return fmt.Errorf("mcp_servers.%s.startup_timeout_ms must not be negative", name)
+	if c.StartupTimeoutMs <= 0 {
+		return fmt.Errorf("mcp_servers.%s.startup_timeout_ms must be positive", name)
 	}
-	if c.ToolTimeoutMs < 0 {
-		return fmt.Errorf("mcp_servers.%s.tool_timeout_ms must not be negative", name)
+	if c.ToolTimeoutMs <= 0 {
+		return fmt.Errorf("mcp_servers.%s.tool_timeout_ms must be positive", name)
 	}
 	return nil
 }
@@ -198,6 +201,7 @@ func DefaultConfig() *api.Config {
 		Permission: api.PermissionConfig{
 			Rules:         []api.PermissionRule{},
 			RiskThreshold: api.RiskLevelMedium,
+			RiskRules:     []api.RiskRule{},
 		},
 		Session: api.SessionConfig{
 			DBPath:     "~/.local/share/kimi-lite/sessions.db",
@@ -231,7 +235,8 @@ func DefaultConfig() *api.Config {
 			ApproveDiff:    "d",
 			ExternalEditor: "ctrl+g",
 		},
-		Hooks: []api.HookConfig{},
+		Hooks:      []api.HookConfig{},
+		GitTimeout: 30 * time.Second,
 	}
 }
 
@@ -255,6 +260,15 @@ func Validate(cfg *api.Config) error {
 	}
 	if cfg.Behavior.ShellTimeout <= 0 {
 		errs = append(errs, fmt.Errorf("behavior.shell_timeout must be positive"))
+	}
+	if cfg.Behavior.MaxTurns <= 0 {
+		errs = append(errs, fmt.Errorf("behavior.max_turns must be positive"))
+	}
+	if cfg.Behavior.MaxToolRounds <= 0 {
+		errs = append(errs, fmt.Errorf("behavior.max_tool_rounds must be positive"))
+	}
+	if cfg.Session.MaxHistory < 0 {
+		errs = append(errs, fmt.Errorf("session.max_history must not be negative"))
 	}
 	if cfg.Session.DBPath == "" {
 		errs = append(errs, fmt.Errorf("session.db_path must not be empty"))

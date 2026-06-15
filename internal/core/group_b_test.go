@@ -16,7 +16,7 @@ import (
 
 func TestTurnManager_Setters(t *testing.T) {
 	t.Parallel()
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 
 	// Nil metrics should be replaced with noop.
 	tm.SetMetricsCollector(nil)
@@ -35,6 +35,27 @@ func TestTurnManager_Setters(t *testing.T) {
 	}
 }
 
+func TestNewTurnManager_RequiresDependencies(t *testing.T) {
+	t.Parallel()
+	store := newMockStore()
+	llm := &mockLLMClient{}
+	tools := &mockToolExecutor{}
+	approval := &mockApprovalGate{}
+
+	if _, err := NewTurnManager(nil, tools, approval, store, nil); err == nil {
+		t.Error("expected error for nil llm")
+	}
+	if _, err := NewTurnManager(llm, nil, approval, store, nil); err == nil {
+		t.Error("expected error for nil tools")
+	}
+	if _, err := NewTurnManager(llm, tools, nil, store, nil); err == nil {
+		t.Error("expected error for nil approval")
+	}
+	if _, err := NewTurnManager(llm, tools, approval, nil, nil); err == nil {
+		t.Error("expected error for nil store")
+	}
+}
+
 func TestTurnManager_Wait(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -47,7 +68,7 @@ func TestTurnManager_Wait(t *testing.T) {
 			api.StreamChunk{Done: true},
 		),
 	}
-	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -89,7 +110,7 @@ func TestTurnManager_CancelAll(t *testing.T) {
 			return ch, nil
 		},
 	}
-	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -110,7 +131,7 @@ func TestTurnManager_CancelAll(t *testing.T) {
 
 func TestTurnManager_CancelAll_NoActiveTurn(t *testing.T) {
 	t.Parallel()
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 	// Should not panic when there is no active turn.
 	tm.CancelAll()
 }
@@ -123,7 +144,7 @@ func TestTurnManager_ResumeWithApproval_Errors(t *testing.T) {
 	store := newMockStore()
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(nil, nil, nil, store, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
 	if err := tm.ResumeWithApproval(ctx, sess.ID, 1, nil); err == nil {
 		t.Error("expected error when no active turn")
@@ -165,7 +186,7 @@ func TestTurnManager_ResumeWithApproval_ContextCancelled(t *testing.T) {
 	store := newMockStore()
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(nil, nil, nil, store, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 	tm.turn = &api.Turn{ID: "t1"}
 	tm.currentSessionID = sess.ID
 	tm.pendingMu.Lock()
@@ -187,7 +208,7 @@ func TestTurnManager_RunHooks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	hook := &recordingHookRunner{}
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 	tm.SetHookRunner(hook)
 
 	// Nil runner should not panic.
@@ -209,7 +230,7 @@ func TestTurnManager_RunApprovalHook(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	hook := &recordingHookRunner{}
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 	tm.SetHookRunner(hook)
 
 	// Empty calls should be a no-op.
@@ -241,7 +262,7 @@ func (e *errorHookRunner) Run(_ context.Context, _ api.HookData) error {
 func TestTurnManager_ConsumeStream_MaxSizeExceeded(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 
 	large := strings.Repeat("a", maxStreamResponseSize+1)
 	streamCh := make(chan api.StreamChunk, 2)
@@ -266,7 +287,7 @@ func TestTurnManager_ConsumeStream_MaxSizeExceeded(t *testing.T) {
 func TestTurnManager_ConsumeStream_ContextCancelledAfterClose(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 
 	streamCh := make(chan api.StreamChunk, 1)
 	streamCh <- api.StreamChunk{Content: "hello", Done: true}
@@ -290,7 +311,7 @@ func TestTurnManager_PersistPartialResponse_Empty(t *testing.T) {
 	store := newMockStore()
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(nil, nil, nil, store, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 	turn := &api.Turn{ID: "t1"}
 	tm.persistPartialResponse(ctx, sess.ID, turn, "")
 
@@ -308,7 +329,7 @@ func TestTurnManager_SetError_NilEventCh(t *testing.T) {
 	store := newMockStore()
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(nil, nil, nil, store, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 	turn := &api.Turn{ID: "t1", State: api.TurnStreaming}
 	tm.setError(ctx, sess.ID, turn, fmt.Errorf("boom"), nil)
 
@@ -323,7 +344,7 @@ func TestTurnManager_SetError_SaveTurnFailure(t *testing.T) {
 	store := &failingSaveStore{mockStore: newMockStore()}
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(nil, nil, nil, store, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 	turn := &api.Turn{ID: "t1", State: api.TurnStreaming}
 	eventCh := make(chan api.TurnEvent, 2)
 	tm.setError(ctx, sess.ID, turn, fmt.Errorf("boom"), eventCh)
@@ -350,9 +371,9 @@ func TestTurnManager_StartTurn_CountTurnsError(t *testing.T) {
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
-	tm := NewTurnManager(nil, nil, nil, store, cfg)
+	tm := newTestTurnManager(t, nil, nil, nil, store, cfg)
 
-	_, err := tm.startTurn(ctx, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
 	if err == nil {
 		t.Fatal("expected error for CountTurns failure")
 	}
@@ -375,9 +396,9 @@ func TestTurnManager_StartTurn_SaveTurnError(t *testing.T) {
 	store := &failingSaveStore{mockStore: newMockStore()}
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(nil, nil, nil, store, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
 	if err == nil {
 		t.Fatal("expected error for SaveTurn failure")
 	}
@@ -392,9 +413,9 @@ func TestTurnManager_StartTurn_AppendMessageError(t *testing.T) {
 	store := &failingAppendStore{mockStore: newMockStore(), failAfter: 0}
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(nil, nil, nil, store, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
 	if err == nil {
 		t.Fatal("expected error for AppendMessage failure")
 	}
@@ -409,9 +430,9 @@ func TestTurnManager_StartTurn_GetMessagesError(t *testing.T) {
 	store := &getMessagesErrorStore{mockStore: newMockStore()}
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(nil, nil, nil, store, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
 	if err == nil {
 		t.Fatal("expected error for GetMessages failure")
 	}
@@ -439,9 +460,9 @@ func TestTurnManager_StartTurn_ChatStreamError(t *testing.T) {
 			return nil, fmt.Errorf("chat stream failed")
 		},
 	}
-	tm := NewTurnManager(llm, &mockToolExecutor{}, nil, store, nil)
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
 	if err == nil {
 		t.Fatal("expected error for ChatStream failure")
 	}
@@ -490,7 +511,7 @@ func TestTurnManager_Run_AppendToolMessageFailure(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -536,7 +557,7 @@ func TestTurnManager_Run_GetMessagesAfterToolFailure(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -594,7 +615,7 @@ func TestTurnManager_Run_ChatStreamAfterToolFailure(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -627,7 +648,7 @@ func TestTurnManager_ExecuteToolCalls_ApprovalNo(t *testing.T) {
 		},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalNo, true }}
-	tm := NewTurnManager(nil, tools, approval, store, nil)
+	tm := newTestTurnManager(t, nil, tools, approval, store, nil)
 
 	results, pending, _ := tm.executeToolCalls(ctx, sess.ID, &api.Turn{ID: "t1"}, []api.ToolCall{{ID: "tc1", Name: "write_file"}})
 	if len(pending) != 0 {
@@ -653,7 +674,7 @@ func TestTurnManager_ExecuteToolCalls_ExecuteError(t *testing.T) {
 		},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(nil, tools, approval, store, nil)
+	tm := newTestTurnManager(t, nil, tools, approval, store, nil)
 
 	results, _, _ := tm.executeToolCalls(ctx, sess.ID, &api.Turn{ID: "t1"}, []api.ToolCall{{ID: "tc1", Name: "write_file"}})
 	if len(results) != 1 {
@@ -671,7 +692,7 @@ func TestTurnManager_ExecuteToolCalls_PendingSaveTurnError(t *testing.T) {
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalNo, false }}
-	tm := NewTurnManager(nil, nil, approval, store, nil)
+	tm := newTestTurnManager(t, nil, nil, approval, store, nil)
 
 	turn := &api.Turn{ID: "t1", State: api.TurnToolCalls}
 	results, pending, _ := tm.executeToolCalls(ctx, sess.ID, turn, []api.ToolCall{{ID: "tc1", Name: "write_file"}})
@@ -718,7 +739,7 @@ func TestTurnManager_Run_ApprovalProcessing_ContextCancelled(t *testing.T) {
 	approval := &mockApprovalGate{
 		shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalNo, false },
 	}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -994,11 +1015,19 @@ func TestSessionManager_Fork_ErrorBranches(t *testing.T) {
 		t.Fatal("expected error for UpdateSession failure")
 	}
 
-	badAppendStore := &failingAppendStore{mockStore: store, failAfter: 0}
-	sm4 := NewSessionManager(badAppendStore)
+	badReplaceStore := &failingReplaceStore{mockStore: store}
+	sm4 := NewSessionManager(badReplaceStore)
 	if _, err := sm4.Fork(ctx, sess.ID, ""); err == nil {
-		t.Fatal("expected error for AppendMessage failure")
+		t.Fatal("expected error for ReplaceMessages failure")
 	}
+}
+
+type failingReplaceStore struct {
+	*mockStore
+}
+
+func (m *failingReplaceStore) ReplaceMessages(_ context.Context, _ string, _ []api.Message) error {
+	return fmt.Errorf("replace messages failed")
 }
 
 func TestSessionManager_RunHooks(t *testing.T) {
@@ -1046,7 +1075,7 @@ func TestSessionManager_Fork_DefaultName_FromID(t *testing.T) {
 
 func TestContextCompressor_SetTokenEstimator_Nil(t *testing.T) {
 	t.Parallel()
-	c := NewContextCompressor(nil, 0, 0)
+	c := mustNewContextCompressor(t, nil, 0, 0)
 	c.SetTokenEstimator(nil)
 	if c.estimator != nil {
 		t.Error("nil estimator should be ignored")
@@ -1084,7 +1113,7 @@ func TestContextCompressor_Compact_GetMessagesError(t *testing.T) {
 	ctx := context.Background()
 	store := &getMessagesErrorStore{mockStore: newMockStore()}
 
-	c := NewContextCompressor(&mockLLMClient{}, 1000, 0)
+	c := mustNewContextCompressor(t, &mockLLMClient{}, 1000, 0)
 	_, err := c.Compact(ctx, store, "sess", 2)
 	if err == nil {
 		t.Fatal("expected error for GetMessages failure")
@@ -1114,7 +1143,7 @@ func TestContextCompressor_Compact_ReplaceMessagesError(t *testing.T) {
 			return &api.Message{Content: "summary"}, nil
 		},
 	}
-	c := NewContextCompressor(llm, 500, 0)
+	c := mustNewContextCompressor(t, llm, 500, 0)
 	_, err := c.Compact(ctx, store, sess.ID, 2)
 	if err == nil {
 		t.Fatal("expected error for ReplaceMessages failure")
@@ -1156,7 +1185,7 @@ func TestContextCompressor_Compact_SummaryNotSmaller(t *testing.T) {
 			return &api.Message{Content: "summary"}, nil
 		},
 	}
-	c := NewContextCompressor(llm, 10, 0)
+	c := mustNewContextCompressor(t, llm, 10, 0)
 	summarized, err := c.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -1173,7 +1202,11 @@ func TestContextCompressor_Compact_SummaryNotSmaller(t *testing.T) {
 
 func TestComputeFileDiff_EmptyPath(t *testing.T) {
 	t.Parallel()
-	if got := ComputeFileDiff("", []byte("x"), "", nil); got != "" {
+	got, err := ComputeFileDiff("", []byte("x"), "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
 		t.Errorf("expected empty diff for empty path, got %q", got)
 	}
 }
@@ -1186,7 +1219,11 @@ func TestComputeFileDiff_InvalidPath(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	if got := ComputeFileDiff(filepath.Join(blocked, "secret.txt"), []byte("x"), tmp, []string{blocked}); got != "" {
+	got, err := ComputeFileDiff(filepath.Join(blocked, "secret.txt"), []byte("x"), tmp, []string{blocked})
+	if err == nil {
+		t.Error("expected error for invalid path")
+	}
+	if got != "" {
 		t.Errorf("expected empty diff for invalid path, got %q", got)
 	}
 }
@@ -1202,7 +1239,10 @@ func TestComputeFileDiff_NoSandboxRoot(t *testing.T) {
 	// With no sandbox root and a relative path, ComputeFileDiff validates the
 	// path as-is. Since the file does not exist in the current working
 	// directory, the diff treats the old content as empty.
-	diff := ComputeFileDiff("file.txt", []byte("new"), "", nil)
+	diff, err := ComputeFileDiff("file.txt", []byte("new"), "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if diff == "" {
 		t.Fatal("expected diff")
 	}
@@ -1217,21 +1257,12 @@ func TestComputeFileDiff_NoSandboxRoot(t *testing.T) {
 func TestToolCallDiff_UnknownTool(t *testing.T) {
 	t.Parallel()
 	call := api.ToolCall{ID: "tc1", Name: "read_file", Arguments: `{}`}
-	if got := ToolCallDiff(call, "", nil); got != "" {
+	got, err := ToolCallDiff(call, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
 		t.Errorf("expected empty diff for unknown tool, got %q", got)
-	}
-}
-
-func TestToolCallDiff_InvalidJSON(t *testing.T) {
-	t.Parallel()
-	cases := []api.ToolCall{
-		{ID: "tc1", Name: "write_file", Arguments: `not json`},
-		{ID: "tc2", Name: "str_replace_file", Arguments: `not json`},
-	}
-	for _, call := range cases {
-		if got := ToolCallDiff(call, "", nil); got != "" {
-			t.Errorf("expected empty diff for invalid JSON, got %q", got)
-		}
 	}
 }
 
@@ -1248,7 +1279,10 @@ func TestToolCallDiff_StrReplaceFile_RelativePath(t *testing.T) {
 		Name:      "str_replace_file",
 		Arguments: `{"path":"file.txt","old_string":"alpha","new_string":"gamma"}`,
 	}
-	diff := ToolCallDiff(call, tmp, nil)
+	diff, err := ToolCallDiff(call, tmp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if diff == "" {
 		t.Fatal("expected diff")
 	}
@@ -1270,7 +1304,10 @@ func TestToolCallDiff_StrReplaceFile_MissingOldString(t *testing.T) {
 		Name:      "str_replace_file",
 		Arguments: fmt.Sprintf(`{"path":"%s","old_string":"gamma","new_string":"delta"}`, target),
 	}
-	diff := ToolCallDiff(call, tmp, nil)
+	diff, err := ToolCallDiff(call, tmp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if diff != "" {
 		// When the old string is not found, the content is unchanged and the
 		// diff is empty.
@@ -1290,7 +1327,10 @@ func TestRiskRank_Invalid(t *testing.T) {
 func TestRiskEvaluator_ParseArgs_Empty(t *testing.T) {
 	t.Parallel()
 	e := NewRiskEvaluator(nil, "")
-	args := e.parseArgs("")
+	args, err := e.parseArgs("")
+	if err != nil {
+		t.Fatalf("parseArgs error: %v", err)
+	}
 	if args != nil {
 		t.Errorf("parseArgs(\"\") = %v, want nil", args)
 	}
@@ -1356,18 +1396,12 @@ func TestRiskEvaluator_Evaluate_RuleBranches(t *testing.T) {
 func TestRiskEvaluator_PathEscapes_EmptyRoot(t *testing.T) {
 	t.Parallel()
 	e := NewRiskEvaluator(nil, "")
-	if e.pathEscapes("/etc/passwd") {
-		t.Error("expected no escape when sandbox root is empty")
+	if e.pathEscapes("/tmp/safe.txt") {
+		t.Error("expected no escape for non-sensitive path when sandbox root is empty")
 	}
-}
-
-func TestRiskEvaluator_ResolveForEscape_RootDir(t *testing.T) {
-	t.Parallel()
-	// When filepath.Dir returns the same path (root), resolveForEscape should
-	// clean and return it without recursing.
-	got := resolveForEscape("/")
-	if got != "/" {
-		t.Errorf("resolveForEscape(\"/\") = %q, want /", got)
+	// Sensitive paths are still treated as escapes even without a sandbox root.
+	if !e.pathEscapes("/etc/passwd") {
+		t.Error("expected escape for sensitive path")
 	}
 }
 
@@ -1406,7 +1440,7 @@ func TestTurnManager_StartTurn_DrainsStaleApproval(t *testing.T) {
 	store := newMockStore()
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(
+	tm := newTestTurnManager(t,
 		&mockLLMClient{chatStreamFunc: streamChunks(api.StreamChunk{Done: true})},
 		&mockToolExecutor{},
 		&mockApprovalGate{},
@@ -1446,7 +1480,7 @@ func TestTurnManager_StartTurn_MaxHistoryConfig(t *testing.T) {
 	}
 
 	cfg := &mockConfigProvider{cfg: &api.Config{Session: api.SessionConfig{MaxHistory: 3}}}
-	tm := NewTurnManager(
+	tm := newTestTurnManager(t,
 		&mockLLMClient{chatStreamFunc: streamChunks(api.StreamChunk{Done: true})},
 		&mockToolExecutor{},
 		&mockApprovalGate{},
@@ -1505,7 +1539,7 @@ func TestTurnManager_Run_SaveTurnAfterToolCallsError(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -1547,7 +1581,7 @@ func TestTurnManager_Run_StaleApprovalPayload(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "write_file", Description: "write"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalNo, false }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -1617,7 +1651,7 @@ func TestTurnManager_Run_MissingApprovalDecision(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "write_file", Description: "write"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalNo, false }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -1700,7 +1734,7 @@ func TestTurnManager_Run_AssistantAppendError(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -1738,7 +1772,7 @@ func TestTurnManager_Run_ToolResultErrorOnly(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -1791,7 +1825,7 @@ func TestTurnManager_Run_SecondStreamError(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -1832,7 +1866,7 @@ func TestTurnManager_Run_FinalSaveTurnError(t *testing.T) {
 			api.StreamChunk{Done: true},
 		),
 	}
-	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -1850,7 +1884,7 @@ func TestTurnManager_Run_FinalSaveTurnError(t *testing.T) {
 func TestTurnManager_ConsumeStream_ErrorChunk(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 
 	streamCh := make(chan api.StreamChunk, 1)
 	streamCh <- api.StreamChunk{Error: fmt.Errorf("chunk error")}
@@ -1866,7 +1900,7 @@ func TestTurnManager_ConsumeStream_ErrorChunk(t *testing.T) {
 func TestTurnManager_ConsumeStream_MaxSizeCtxCanceled(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 
 	streamCh := make(chan api.StreamChunk, 1)
 	streamCh <- api.StreamChunk{Content: strings.Repeat("a", maxStreamResponseSize+1)}
@@ -1893,7 +1927,7 @@ func TestTurnManager_ConsumeStream_MaxSizeCtxCanceled(t *testing.T) {
 func TestTurnManager_ConsumeStream_ContentCtxCanceled(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 
 	streamCh := make(chan api.StreamChunk, 1)
 	streamCh <- api.StreamChunk{Content: "hello"}
@@ -1923,7 +1957,7 @@ func TestTurnManager_PersistPartialResponse_AppendError(t *testing.T) {
 	store := &roleFailingAppendStore{mockStore: newMockStore(), role: api.RoleAssistant}
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	tm := NewTurnManager(nil, nil, nil, store, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 	turn := &api.Turn{ID: "t1"}
 	tm.persistPartialResponse(ctx, sess.ID, turn, "partial content")
 
@@ -1955,7 +1989,10 @@ func TestComputeFileDiff_RelativePathWithSandboxRoot(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	diff := ComputeFileDiff("file.txt", []byte("new"), tmp, nil)
+	diff, err := ComputeFileDiff("file.txt", []byte("new"), tmp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if diff == "" {
 		t.Fatal("expected diff")
 	}
@@ -1979,7 +2016,7 @@ func TestContextCompressor_Compact_NegativeKeepRecent(t *testing.T) {
 		})
 	}
 
-	c := NewContextCompressor(&mockLLMClient{chatFunc: func(context.Context, []api.Message, []api.ToolDefinition) (*api.Message, error) {
+	c := mustNewContextCompressor(t, &mockLLMClient{chatFunc: func(context.Context, []api.Message, []api.ToolDefinition) (*api.Message, error) {
 		t.Fatal("LLM should not be called")
 		return nil, nil
 	}}, 10000, 0)
@@ -2005,7 +2042,7 @@ func TestContextCompressor_Compact_EmptyMiddle(t *testing.T) {
 	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m2", Role: api.RoleAssistant, Content: "plan", ToolCalls: []api.ToolCall{{ID: "tc1"}}, CreatedAt: base.Add(2 * time.Minute)})
 	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m3", Role: api.RoleTool, Content: "result", ToolCallID: "tc1", CreatedAt: base.Add(3 * time.Minute)})
 
-	c := NewContextCompressor(&mockLLMClient{chatFunc: func(context.Context, []api.Message, []api.ToolDefinition) (*api.Message, error) {
+	c := mustNewContextCompressor(t, &mockLLMClient{chatFunc: func(context.Context, []api.Message, []api.ToolDefinition) (*api.Message, error) {
 		t.Fatal("LLM should not be called")
 		return nil, nil
 	}}, 100, 0)
@@ -2030,25 +2067,41 @@ func TestContextCompressor_Compact_InputTruncation(t *testing.T) {
 	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m1", Role: api.RoleUser, Content: strings.Repeat("b", 5000), CreatedAt: base.Add(time.Minute)})
 	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m2", Role: api.RoleAssistant, Content: strings.Repeat("c", 5000), CreatedAt: base.Add(2 * time.Minute)})
 
+	var prompt string
 	called := false
 	llm := &mockLLMClient{chatFunc: func(_ context.Context, msgs []api.Message, _ []api.ToolDefinition) (*api.Message, error) {
 		called = true
 		if len(msgs) != 1 {
 			t.Errorf("expected 1 summarization message, got %d", len(msgs))
 		}
+		prompt = msgs[0].Content
 		return &api.Message{Content: "summary"}, nil
 	}}
 
-	c := NewContextCompressor(llm, 2000, time.Second)
+	c := mustNewContextCompressor(t, llm, 2000, time.Second)
 	summarized, err := c.Compact(ctx, store, sess.ID, 0)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
 	}
-	if summarized != 2 {
-		t.Errorf("summarized = %d, want 2", summarized)
+	// Only the newest middle message fits in the summarization budget, so the
+	// returned count must reflect what was actually sent to the LLM, not the
+	// original size of middle.
+	if summarized != 1 {
+		t.Errorf("summarized = %d, want 1", summarized)
 	}
 	if !called {
 		t.Error("expected LLM to be called")
+	}
+	if strings.Contains(prompt, strings.Repeat("b", 5000)) {
+		t.Error("prompt contains dropped message m1")
+	}
+	if !strings.Contains(prompt, strings.Repeat("c", 5000)) {
+		t.Error("prompt missing included message m2")
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	if len(msgs) != 2 { // leading system + summary
+		t.Errorf("expected 2 messages after compact, got %d", len(msgs))
 	}
 }
 
@@ -2088,7 +2141,7 @@ func TestTurnManager_Run_ToolResultOutputAndError(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -2125,7 +2178,7 @@ func TestTurnManager_Run_FinalAssistantAppendError(t *testing.T) {
 			api.StreamChunk{Done: true},
 		),
 	}
-	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -2170,7 +2223,7 @@ func TestTurnManager_Run_SecondConsumeStreamError(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {
@@ -2215,7 +2268,7 @@ func TestTurnManager_Run_DiffUnknownCallID(t *testing.T) {
 		defs: []api.ToolDefinition{{Name: "write_file", Description: "write"}},
 	}
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalNo, false }}
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "hi")
 	if err != nil {

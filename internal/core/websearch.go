@@ -40,6 +40,12 @@ func NewHTTPWebSearcher(endpoint, apiKey string, client *http.Client, timeout ti
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("invalid web search endpoint scheme: %q", u.Scheme)
 	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("invalid web search endpoint: missing host")
+	}
+	if isBlockedHost(u.Hostname()) {
+		return nil, fmt.Errorf("invalid web search endpoint: host %q is blocked", u.Hostname())
+	}
 	if client == nil {
 		client = netutil.SecureHTTPClient()
 	} else {

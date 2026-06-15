@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,10 +27,18 @@ func TestComputeFileDiff_RespectsProtectedPaths(t *testing.T) {
 
 	protected := []string{blocked}
 
-	if diff := ComputeFileDiff(allowedFile, []byte("new"), tmp, protected); diff == "" {
+	diff, err := ComputeFileDiff(allowedFile, []byte("new"), tmp, protected)
+	if err != nil {
+		t.Fatalf("unexpected error for allowed file: %v", err)
+	}
+	if diff == "" {
 		t.Error("expected non-empty diff for allowed file")
 	}
-	if diff := ComputeFileDiff(blockedFile, []byte("new"), tmp, protected); diff != "" {
+	diff, err = ComputeFileDiff(blockedFile, []byte("new"), tmp, protected)
+	if !errors.Is(err, ErrDiffPathBlocked) {
+		t.Errorf("expected ErrDiffPathBlocked for protected path, got %v", err)
+	}
+	if diff != "" {
 		t.Errorf("expected empty diff for protected path, got %q", diff)
 	}
 }
@@ -47,7 +56,10 @@ func TestToolCallDiff_StrReplaceFile_SingleReplacementByDefault(t *testing.T) {
 		Name:      "str_replace_file",
 		Arguments: `{"path":"` + target + `","old_string":"alpha","new_string":"gamma"}`,
 	}
-	diff := ToolCallDiff(call, tmp, nil)
+	diff, err := ToolCallDiff(call, tmp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if diff == "" {
 		t.Fatal("expected diff")
 	}
@@ -72,7 +84,10 @@ func TestToolCallDiff_StrReplaceFile_ReplaceAll(t *testing.T) {
 		Name:      "str_replace_file",
 		Arguments: `{"path":"` + target + `","old_string":"alpha","new_string":"gamma","replace_all":true}`,
 	}
-	diff := ToolCallDiff(call, tmp, nil)
+	diff, err := ToolCallDiff(call, tmp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if diff == "" {
 		t.Fatal("expected diff")
 	}
@@ -101,7 +116,11 @@ func TestToolCallDiff_WriteFile_RespectsProtectedPaths(t *testing.T) {
 		Name:      "write_file",
 		Arguments: `{"path":"` + blockedFile + `","content":"new"}`,
 	}
-	if diff := ToolCallDiff(call, tmp, []string{blocked}); diff != "" {
+	diff, err := ToolCallDiff(call, tmp, []string{blocked})
+	if !errors.Is(err, ErrDiffPathBlocked) {
+		t.Errorf("expected ErrDiffPathBlocked, got %v", err)
+	}
+	if diff != "" {
 		t.Errorf("expected empty diff for protected path, got %q", diff)
 	}
 }
@@ -125,7 +144,42 @@ func TestToolCallDiff_StrReplaceFile_SymlinkEscape(t *testing.T) {
 		Name:      "str_replace_file",
 		Arguments: `{"path":"` + linkPath + `","old_string":"old","new_string":"new"}`,
 	}
-	if diff := ToolCallDiff(call, tmp, nil); diff != "" {
+	diff, err := ToolCallDiff(call, tmp, nil)
+	if !errors.Is(err, ErrDiffPathBlocked) {
+		t.Errorf("expected ErrDiffPathBlocked for symlink escape, got %v", err)
+	}
+	if diff != "" {
 		t.Errorf("expected empty diff for symlink escape, got %q", diff)
+	}
+}
+
+func TestComputeFileDiff_FileTooLarge(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	largeFile := filepath.Join(tmp, "large.txt")
+	if err := os.WriteFile(largeFile, make([]byte, maxFileReadSize+1), 0644); err != nil {
+		t.Fatalf("write large file: %v", err)
+	}
+
+	diff, err := ComputeFileDiff(largeFile, []byte("new"), tmp, nil)
+	if !errors.Is(err, ErrDiffFileTooLarge) {
+		t.Errorf("expected ErrDiffFileTooLarge, got %v", err)
+	}
+	if diff != "" {
+		t.Errorf("expected empty diff for large file, got %q", diff)
+	}
+}
+
+func TestToolCallDiff_InvalidJSON(t *testing.T) {
+	t.Parallel()
+	cases := []api.ToolCall{
+		{ID: "tc1", Name: "write_file", Arguments: `not json`},
+		{ID: "tc2", Name: "str_replace_file", Arguments: `not json`},
+	}
+	for _, call := range cases {
+		_, err := ToolCallDiff(call, "", nil)
+		if !errors.Is(err, ErrDiffInvalidArguments) {
+			t.Errorf("expected ErrDiffInvalidArguments for %s, got %v", call.Name, err)
+		}
 	}
 }

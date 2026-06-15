@@ -476,7 +476,7 @@ func TestRunPrompt_TurnEventError_JSON(t *testing.T) {
 	}
 }
 
-func TestRunPrompt_NilErrorContinues(t *testing.T) {
+func TestRunPrompt_NilErrorFatal(t *testing.T) {
 	origNewApp := newApp
 	origWriteDefaultConfig := writeDefaultConfig
 	origStdout := stdout
@@ -504,8 +504,8 @@ func TestRunPrompt_NilErrorContinues(t *testing.T) {
 	stdout = &buf
 	cmd.SetErr(&buf)
 	cmd.SetArgs([]string{"--prompt", "go", "--config", configPath})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error for TurnEventError with nil Error")
 	}
 }
 
@@ -1265,7 +1265,9 @@ func TestRunDoctor_MCPServersSuccess(t *testing.T) {
 		"[mcp_servers.test]",
 		"enabled = true",
 		`transport = "http"`,
-		`url = "https://example.com"`)
+		`url = "https://example.com"`,
+		"startup_timeout_ms = 1000",
+		"tool_timeout_ms = 1000")
 	writeDefaultConfig = func() error { return nil }
 	newStore = func(dbPath string) (api.Store, error) { return &closingStore{}, nil }
 	newLLMClient = func(cfg *api.Config, httpClient *http.Client) (api.LLMClient, error) {
@@ -1311,6 +1313,8 @@ enabled = false
 enabled = true
 transport = "http"
 url = "https://example.com"
+startup_timeout_ms = 1000
+tool_timeout_ms = 1000
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {

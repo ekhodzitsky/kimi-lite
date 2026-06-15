@@ -26,18 +26,17 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req jsonRPCRequest, en
 		return s.writeError(ctx, enc, req.ID, -32603, "no active session", err)
 	}
 
-	if !s.startPrompt() {
-		return s.writeError(ctx, enc, req.ID, -32603, "prompt already in flight", errors.New("a prompt is already running"))
-	}
-	defer s.endPrompt()
-
-	// v1 auto-approves all tool calls for ACP.
-	s.app.SetYolo(true)
-
+	// Capture the cancel function before marking the prompt in-flight so a
+	// concurrent session/cancel cannot observe promptInFlight without a cancel.
 	promptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.setCancel(cancel)
 	defer s.setCancel(nil)
+
+	if !s.startPrompt() {
+		return s.writeError(ctx, enc, req.ID, -32603, "prompt already in flight", errors.New("a prompt is already running"))
+	}
+	defer s.endPrompt()
 
 	eventCh, err := s.app.RunTurn(promptCtx, sess.ID, params.Prompt)
 	if err != nil {
@@ -73,10 +72,9 @@ func (s *Server) handleTurnEvent(ctx context.Context, enc *json.Encoder, event a
 		})
 
 	case api.TurnEventApprovalRequest:
-		return s.writeNotification(ctx, enc, "session/update", sessionUpdateParams{
-			SessionUpdate: string(sessionUpdateApprovalRequest),
-			Approval:      event.ToolCalls,
-		})
+		// ACP does not implement an approval-response method, so do not advertise
+		// approval requests as notifications. Surface them as a turn error instead.
+		return errors.New("approval requests are not supported over ACP; enable yolo or configure auto-approve")
 
 	case api.TurnEventApprovalDiff:
 		return s.writeNotification(ctx, enc, "session/update", sessionUpdateParams{

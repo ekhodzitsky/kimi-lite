@@ -227,7 +227,9 @@ func run(ctx context.Context, f flags) error {
 		cfg.PprofAddr = f.pprofAddr
 	}
 
-	// Resolve the effective provider and validate its API key.
+	// Resolve the effective provider and validate its API key. A leading '$'
+	// means the value was intended to be resolved from an environment variable
+	// but was not found, so treat it as missing.
 	_, providerCfg, err := llm.ResolveProviderFromConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("resolve provider: %w", err)
@@ -286,15 +288,16 @@ func run(ctx context.Context, f flags) error {
 		return runPrompt(ctx, application, session, f)
 	}
 
-	// Print startup banner
+	// Print startup banner to stderr so stdout is left clean for tools that
+	// might pipe the TUI output.
 	resolvedModel, err := resolveModelFromConfig(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not resolve model (%v), using configured model\n", err)
 		resolvedModel = cfg.LLM.Model
 	}
-	fmt.Printf("[%s] v%s | model: %s\n", binaryName, version, resolvedModel)
+	fmt.Fprintf(os.Stderr, "[%s] v%s | model: %s\n", binaryName, version, resolvedModel)
 	if f.continueLast || f.sessionID != "" {
-		fmt.Printf("[Resuming session %s (%s)]\n", session.ID, session.Path)
+		fmt.Fprintf(os.Stderr, "[Resuming session %s (%s)]\n", session.ID, session.Path)
 	}
 
 	// Run the TUI
@@ -340,7 +343,9 @@ func runACP(ctx context.Context, f flags) error {
 		cfg.PprofAddr = f.pprofAddr
 	}
 
-	// Resolve the effective provider and validate its API key.
+	// Resolve the effective provider and validate its API key. A leading '$'
+	// means the value was intended to be resolved from an environment variable
+	// but was not found, so treat it as missing.
 	_, providerCfg, err := llm.ResolveProviderFromConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("resolve provider: %w", err)
@@ -349,25 +354,25 @@ func runACP(ctx context.Context, f flags) error {
 		return fmt.Errorf("LLM API key is not configured. Set it in ~/.config/kimi-lite/config.toml or via KIMI_LLM_API_KEY environment variable")
 	}
 
-	// Create application
+	// Create application. The ACP server owns the app lifecycle and will close
+	// it when Run returns, so do not register a second deferred Close here.
 	application, err := newApp(cfg, f.debug)
 	if err != nil {
 		return fmt.Errorf("initialize app: %w", err)
 	}
-	defer func() {
-		if err := application.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "shutdown: %v\n", err)
-		}
-	}()
 
 	srv := acp.NewServer(application, nil)
+	if cwd, err := os.Getwd(); err == nil {
+		srv.SetAllowedRoot(cwd)
+	}
 	return srv.Run(ctx, os.Stdin, os.Stdout)
 }
 
 // runPrompt executes a single turn without the TUI and prints the result.
 func runPrompt(ctx context.Context, application appRunner, session *api.Session, f flags) error {
-	// Non-interactive mode must not block on approval requests.
-	application.SetYolo(true)
+	// Non-interactive mode cannot display approval dialogs; rely on the --yolo
+	// flag or configured auto-approve list. Without them, approval requests are
+	// surfaced as a fatal error below.
 
 	if f.outputFormat != outputFormatText && f.outputFormat != outputFormatJSON {
 		return fmt.Errorf("unsupported output format %q, expected %q or %q", f.outputFormat, outputFormatText, outputFormatJSON)
@@ -413,9 +418,6 @@ func runPrompt(ctx context.Context, application appRunner, session *api.Session,
 			return fmt.Errorf("tool call %q requires approval; run with --yolo or use interactive mode", toolName)
 
 		case api.TurnEventError:
-			if event.Error == nil {
-				continue
-			}
 			if f.outputFormat == outputFormatJSON {
 				if err := enc.Encode(promptEventJSON{
 					Type:  "error",
@@ -579,12 +581,16 @@ func runDoctor(ctx context.Context, configPath string) error {
 		issues = append(issues, "llm-api-key")
 	} else {
 		fmt.Println("[OK]   LLM API key present")
-		// Lightweight connectivity check
+		// Lightweight connectivity check. The client is short-lived; close it
+		// promptly if the implementation supports it.
 		client, err := newLLMClient(cfg, nil)
 		if err != nil {
 			fmt.Printf("[FAIL] LLM client: %v\n", err)
 			issues = append(issues, "llm-client")
 		} else {
+			if closer, ok := client.(io.Closer); ok {
+				defer closer.Close()
+			}
 			cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 			_, err := client.Chat(cctx, []api.Message{{Role: api.RoleUser, Content: "ping"}}, nil)

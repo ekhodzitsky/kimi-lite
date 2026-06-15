@@ -26,7 +26,7 @@ import (
 
 const (
 	defaultTimeout  = 60 * time.Second
-	defaultRetries  = 3
+	defaultAttempts = 3 // total request attempts (initial + retries)
 	maxBackoffDelay = 30 * time.Second
 )
 
@@ -41,7 +41,7 @@ type Client struct {
 	apiKey       string
 	model        string
 	timeout      time.Duration
-	maxRetries   int
+	maxAttempts  int
 	extraHeaders http.Header
 	metrics      api.MetricsCollector
 	mu           sync.RWMutex
@@ -64,14 +64,14 @@ func NewClient(cfg api.LLMConfig, httpClient *http.Client) *Client {
 		endpoint = cfg.BaseURL + "/chat/completions"
 	}
 	return &Client{
-		httpClient: httpClient,
-		baseURL:    cfg.BaseURL,
-		endpoint:   endpoint,
-		apiKey:     cfg.APIKey,
-		model:      cfg.Model,
-		timeout:    timeout,
-		maxRetries: defaultRetries,
-		metrics:    api.NoopMetricsCollector{},
+		httpClient:  httpClient,
+		baseURL:     cfg.BaseURL,
+		endpoint:    endpoint,
+		apiKey:      cfg.APIKey,
+		model:       cfg.Model,
+		timeout:     timeout,
+		maxAttempts: defaultAttempts,
+		metrics:     api.NoopMetricsCollector{},
 	}
 }
 
@@ -198,17 +198,28 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 	body, err := c.doRequestStream(ctx, reqBody, extraHeaders)
 	if err != nil {
 		metrics.RecordError("llm.stream")
-		metrics.RecordLatency("llm.stream.latency", time.Since(start))
+		metrics.RecordLatency("llm.stream.first_byte_latency", time.Since(start))
 		cancel()
 		return nil, fmt.Errorf("chat stream request failed: %w", err)
 	}
 
 	ch := make(chan api.StreamChunk, 64)
-	metrics.RecordLatency("llm.stream.latency", time.Since(start))
+	metrics.RecordLatency("llm.stream.first_byte_latency", time.Since(start))
 	go func() {
 		defer close(ch)
 		defer cancel()
-		defer body.Close()
+
+		// Ensure the response body is closed exactly once, either when the
+		// stream goroutine exits or when the caller cancels the context.
+		// Closing on cancellation is required to unblock the scanner goroutine
+		// when the consumer stops reading from ch and prevents connection leaks.
+		var closeBodyOnce sync.Once
+		closeBody := func() { _ = body.Close() }
+		defer closeBodyOnce.Do(closeBody)
+		go func() {
+			<-ctx.Done()
+			closeBodyOnce.Do(closeBody)
+		}()
 
 		reader := NewStreamReader(body)
 		accumulator := make(map[int]*rawToolCall)
@@ -224,7 +235,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []api.Message, tools [
 		go func() {
 			defer close(readCh)
 			for {
-				raw, err := reader.readRawChunk(ctx)
+				raw, err := reader.readRawChunk()
 				select {
 				case readCh <- result{raw, err}:
 				case <-ctx.Done():
@@ -340,11 +351,12 @@ func (c *Client) withTimeout(ctx context.Context) (context.Context, context.Canc
 	return context.WithTimeout(ctx, c.timeout)
 }
 
-// doRequestWithRetry performs the HTTP request with retries and returns the raw response.
+// doRequestWithRetry performs the HTTP request with up to c.maxAttempts total
+// attempts (including the initial request) and returns the raw response.
 func (c *Client) doRequestWithRetry(ctx context.Context, body []byte, stream bool, extraHeaders http.Header) (*http.Response, error) {
 	var lastErr error
 	var retryAfterDelay time.Duration
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	for attempt := 0; attempt < c.maxAttempts; attempt++ {
 		if attempt > 0 {
 			delay := c.backoff(attempt)
 			if retryAfterDelay > delay {
@@ -490,17 +502,15 @@ func (c *Client) backoff(attempt int) time.Duration {
 }
 
 // isRetryableError reports whether an error warrants a retry.
-// Transient errors (timeouts, connection resets, unexpected EOF) are retried.
-// Permanent errors (connection refused, DNS not found, context cancellation) are not.
+// Transient errors (connection resets, unexpected EOF) are retried.
+// Permanent errors (connection refused, DNS not found) and caller context
+// errors (cancellation, deadline exceeded) are not.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
 	}
 	if errors.Is(err, io.ErrUnexpectedEOF) {
 		return true

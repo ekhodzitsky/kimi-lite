@@ -106,7 +106,7 @@ func TestOpenExternalEditorWriteTempError(t *testing.T) {
 
 	m := New(styles.New("dark"), DefaultKeyMap(), 100)
 	m.SetValue("draft")
-	cmd := m.openExternalEditor(context.Background(), "cat")
+	cmd := m.openExternalEditor(context.Background(), "cat", m.Value())
 	if cmd == nil {
 		t.Fatal("expected a command even when temp file creation fails")
 	}
@@ -125,7 +125,7 @@ func TestOpenExternalEditorParseEditorError(t *testing.T) {
 
 	m := New(styles.New("dark"), DefaultKeyMap(), 100)
 	m.SetValue("draft")
-	cmd := m.openExternalEditor(context.Background(), "definitely-not-an-editor-12345")
+	cmd := m.openExternalEditor(context.Background(), "definitely-not-an-editor-12345", m.Value())
 	if cmd == nil {
 		t.Fatal("expected a command even when editor is not found")
 	}
@@ -149,7 +149,7 @@ func TestOpenExternalEditorNilContext(t *testing.T) {
 	m.SetValue("draft")
 	m.SetEditor("cat")
 
-	cmd := m.openExternalEditor(nil, "cat")
+	cmd := m.openExternalEditor(nil, "cat", m.Value())
 	if cmd == nil {
 		t.Fatal("expected a command with nil context")
 	}

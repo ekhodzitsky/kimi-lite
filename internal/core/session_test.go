@@ -370,6 +370,30 @@ func TestSessionManager_Metrics(t *testing.T) {
 	}
 }
 
+func TestSessionManager_Setters_TypedNil(t *testing.T) {
+	t.Parallel()
+	sm := NewSessionManager(newMockStore())
+
+	var nilMetrics *recordingMetrics
+	sm.SetMetricsCollector(nilMetrics)
+	if sm.metrics == nil {
+		t.Error("typed-nil metrics should fall back to noop")
+	}
+
+	var nilHook *recordingHookRunner
+	sm.SetHookRunner(nilHook)
+	if sm.hookRunner != nil {
+		t.Error("typed-nil hook runner should be stored as nil")
+	}
+}
+
+func TestResolvePortablePath_RejectsTildeFoo(t *testing.T) {
+	t.Parallel()
+	if got := resolvePortablePath("~foo"); got != "~foo" {
+		t.Errorf("resolvePortablePath(\"~foo\") = %q, want ~foo", got)
+	}
+}
+
 func TestSessionManager_Setters_Synchronized(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

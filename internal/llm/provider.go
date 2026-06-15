@@ -17,13 +17,16 @@ func NewClientFromConfig(cfg *api.Config, httpClient *http.Client) (api.LLMClien
 	}
 
 	switch provider.Type {
-	case api.ProviderTypeAnthropic, api.ProviderTypeGoogleGenAI, api.ProviderTypeVertexAI:
+	case api.ProviderTypeAnthropic, api.ProviderTypeGoogleGenAI, api.ProviderTypeVertexAI, api.ProviderTypeOpenAIResponses:
 		return nil, fmt.Errorf("provider %q is not yet supported", provider.Type)
 	}
 
-	model := resolveDefaultModel(cfg, provider)
+	model, resolvedProvider := resolveDefaultModel(cfg, provider)
+	if resolvedProvider == "" {
+		resolvedProvider = providerName
+	}
 	llmCfg := api.LLMConfig{
-		Provider: providerName,
+		Provider: resolvedProvider,
 		APIKey:   provider.APIKey,
 		Model:    model,
 		BaseURL:  provider.BaseURL,
@@ -58,7 +61,8 @@ func ResolveModelFromConfig(cfg *api.Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return resolveDefaultModel(cfg, provider), nil
+	model, _ := resolveDefaultModel(cfg, provider)
+	return model, nil
 }
 
 func resolveDefaultProvider(cfg *api.Config) (string, api.ProviderConfig, error) {
@@ -87,12 +91,19 @@ func resolveDefaultProvider(cfg *api.Config) (string, api.ProviderConfig, error)
 	return cfg.DefaultProvider, provider, nil
 }
 
-func resolveDefaultModel(cfg *api.Config, provider api.ProviderConfig) string {
+func resolveDefaultModel(cfg *api.Config, provider api.ProviderConfig) (model, providerName string) {
+	providerName = string(provider.Type)
+	if providerName == "" {
+		providerName = cfg.DefaultProvider
+	}
 	if cfg.DefaultModel != "" {
 		if alias, ok := cfg.Models[cfg.DefaultModel]; ok {
-			return alias.Model
+			if alias.Provider != "" {
+				providerName = alias.Provider
+			}
+			return alias.Model, providerName
 		}
-		return cfg.DefaultModel
+		return cfg.DefaultModel, providerName
 	}
-	return provider.DefaultModel
+	return provider.DefaultModel, providerName
 }

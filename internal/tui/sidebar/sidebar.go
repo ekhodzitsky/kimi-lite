@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 )
@@ -68,9 +69,11 @@ func (m *Model) SelectedPath() string {
 	return m.selected
 }
 
-// VisiblePaths returns the paths of all nodes currently visible in the flat
-// tree, including collapsed directories.
-func (m *Model) VisiblePaths() []string {
+// RefreshVisiblePaths returns the paths of all nodes currently visible in the
+// flat tree, including collapsed directories, and rebuilds the flat list if it
+// is stale. Callers that need a fresh snapshot should use this method because
+// it may mutate internal state.
+func (m *Model) RefreshVisiblePaths() []string {
 	if m.flatDirty {
 		m.rebuildFlat()
 	}
@@ -139,7 +142,11 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		if !m.visible {
 			return nil
 		}
-		m.handleClick(msg.Y)
+		// Apply the click locally (selection / expansion) but do not propagate a
+		// command upward from mouse interactions; keyboard enter already emits
+		// SelectFileMsg, and emitting both causes duplicate feedback.
+		_ = m.handleClick(msg.Y)
+		return nil
 	}
 	return nil
 }
@@ -276,10 +283,13 @@ func (m *Model) renderNode(node *TreeNode, isCursor bool) string {
 		}
 	}
 	name := node.Name
-	maxLen := m.width - len(prefix) - sidebarNameEllipsis
-	runes := []rune(name)
-	if maxLen > 0 && len(runes) > maxLen {
-		name = string(runes[:maxLen]) + "..."
+	maxLen := m.width - ansi.StringWidth(prefix) - sidebarNameEllipsis
+	if maxLen > 0 && ansi.StringWidth(name) > maxLen {
+		if maxLen > 3 {
+			name = ansi.Cut(name, 0, maxLen-3) + "..."
+		} else {
+			name = "..."
+		}
 	}
 	line := prefix + icon + " " + name
 	if isCursor {
@@ -363,15 +373,15 @@ func (m *Model) selectCurrent() tea.Cmd {
 	}
 }
 
-func (m *Model) handleClick(y int) {
+func (m *Model) handleClick(y int) tea.Cmd {
 	m.rebuildFlat()
 	idx := y - 1 // subtract title line
 	if idx < 0 {
-		return
+		return nil
 	}
 	idx += m.offset
 	if idx >= len(m.flat) {
-		return
+		return nil
 	}
 	m.cursor = idx
 	node := m.flat[idx]
@@ -384,8 +394,14 @@ func (m *Model) handleClick(y int) {
 			n.Selected = false
 		}
 		node.Selected = true
+		path := node.Path
+		m.ensureCursorVisible()
+		return func() tea.Msg {
+			return SelectFileMsg{Path: path}
+		}
 	}
 	m.ensureCursorVisible()
+	return nil
 }
 
 func buildTree(path string, maxDepth int, isRoot bool) (*TreeNode, error) {

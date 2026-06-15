@@ -83,6 +83,24 @@ func TestAPIError_Classifiers(t *testing.T) {
 	}
 }
 
+func TestAPIError_NilReceiver(t *testing.T) {
+	t.Parallel()
+
+	var e *APIError
+	if got := e.Error(); got != "" {
+		t.Errorf("nil.Error() = %q, want empty", got)
+	}
+	if e.IsClientError() {
+		t.Error("nil.IsClientError() = true, want false")
+	}
+	if e.IsServerError() {
+		t.Error("nil.IsServerError() = true, want false")
+	}
+	if e.IsRateLimit() {
+		t.Error("nil.IsRateLimit() = true, want false")
+	}
+}
+
 func TestAPIError_ErrorsAs(t *testing.T) {
 	t.Parallel()
 

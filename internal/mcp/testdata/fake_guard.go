@@ -81,14 +81,17 @@ func main() {
 				},
 			}
 		default:
-			enc.Encode(response{
+			if err := enc.Encode(response{
 				JSONRPC: "2.0",
 				ID:      *req.ID,
 				Error: &jsonRPCError{
 					Code:    -32601,
 					Message: "method not found: " + req.Method,
 				},
-			})
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "encode: %v\n", err)
+				return
+			}
 			continue
 		}
 

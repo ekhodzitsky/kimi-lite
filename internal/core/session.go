@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -15,24 +16,24 @@ import (
 
 var (
 	cachedHome string
+	homeErr    error
 	homeOnce   sync.Once
 )
 
 // userHomeDir returns the user's home directory, caching the result after the
-// first call. The empty string is returned if the home directory cannot be
-// determined.
-func userHomeDir() string {
+// first call. An error is returned if the home directory cannot be determined.
+func userHomeDir() (string, error) {
 	homeOnce.Do(func() {
-		cachedHome, _ = os.UserHomeDir()
+		cachedHome, homeErr = os.UserHomeDir()
 	})
-	return cachedHome
+	return cachedHome, homeErr
 }
 
 // makePortablePath converts an absolute path to a portable relative path.
 // It replaces the user's home directory with "~" for portability across machines.
 func makePortablePath(absPath string) string {
-	home := userHomeDir()
-	if home == "" {
+	home, err := userHomeDir()
+	if err != nil || home == "" {
 		return absPath
 	}
 	rel, err := filepath.Rel(home, absPath)
@@ -49,18 +50,34 @@ func makePortablePath(absPath string) string {
 }
 
 // resolvePortablePath converts a portable path back to an absolute path.
+// It rejects "~foo" style paths and only accepts "~" or "~/" prefixes.
 func resolvePortablePath(portable string) string {
-	if !strings.HasPrefix(portable, "~") {
-		return portable
+	if portable == "~" || strings.HasPrefix(portable, "~/") {
+		home, err := userHomeDir()
+		if err != nil || home == "" {
+			return portable
+		}
+		if portable == "~" {
+			return home
+		}
+		return filepath.Join(home, strings.TrimPrefix(portable, "~/"))
 	}
-	home := userHomeDir()
-	if home == "" {
-		return portable
+	return portable
+}
+
+// isNilInterface reports whether v is nil or a typed-nil pointer/channel/map/
+// slice/function/interface value. It is used to guard setters against values
+// that compare non-nil as interfaces but hold a nil concrete pointer.
+func isNilInterface(v any) bool {
+	if v == nil {
+		return true
 	}
-	if portable == "~" {
-		return home
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return rv.IsNil()
 	}
-	return filepath.Join(home, strings.TrimPrefix(portable, "~/"))
+	return false
 }
 
 // SessionManager manages conversation sessions using an api.Store.
@@ -81,18 +98,25 @@ func NewSessionManager(store api.Store) *SessionManager {
 }
 
 // SetHookRunner sets the lifecycle hook runner.
+// Typed-nil interface values are treated as unset.
 func (sm *SessionManager) SetHookRunner(r api.HookRunner) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if isNilInterface(r) {
+		sm.hookRunner = nil
+		return
+	}
 	sm.hookRunner = r
 }
 
 // SetMetricsCollector sets the metrics collector.
+// A nil or typed-nil value falls back to a no-op collector.
 func (sm *SessionManager) SetMetricsCollector(m api.MetricsCollector) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if m == nil {
-		m = api.NoopMetricsCollector{}
+	if isNilInterface(m) {
+		sm.metrics = api.NoopMetricsCollector{}
+		return
 	}
 	sm.metrics = m
 }
@@ -240,9 +264,9 @@ func (sm *SessionManager) Fork(ctx context.Context, sourceID string, name string
 	for i, msg := range msgs {
 		msg.ID = idgen.GenerateID()
 		forkedMsgs[i] = msg
-		if err := sm.store.AppendMessage(ctx, forked.ID, msg); err != nil {
-			return nil, fmt.Errorf("append message: %w", err)
-		}
+	}
+	if err := sm.store.ReplaceMessages(ctx, forked.ID, forkedMsgs); err != nil {
+		return nil, fmt.Errorf("replace messages: %w", err)
 	}
 
 	sm.setCurrent(forked.ID)
@@ -275,6 +299,6 @@ func (sm *SessionManager) runHooks(ctx context.Context, event api.HookEvent, ses
 		Event:     event,
 		SessionID: sessionID,
 	}); err != nil {
-		slog.Debug("session hook failed", "event", event, "error", err)
+		slog.Warn("session hook failed", "event", event, "error", err)
 	}
 }

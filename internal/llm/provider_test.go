@@ -140,6 +140,68 @@ func TestNewClientFromConfig_UnsupportedProvider(t *testing.T) {
 	}
 }
 
+func TestNewClientFromConfig_UnsupportedProvider_OpenAIResponses(t *testing.T) {
+	t.Parallel()
+
+	cfg := &api.Config{
+		LLM: api.LLMConfig{Timeout: 60 * time.Second},
+		Providers: map[string]api.ProviderConfig{
+			"openai-responses": {
+				Type:         api.ProviderTypeOpenAIResponses,
+				APIKey:       "key",
+				BaseURL:      "https://api.openai.com/v1",
+				DefaultModel: "gpt-4o",
+			},
+		},
+		DefaultProvider: "openai-responses",
+	}
+
+	_, err := NewClientFromConfig(cfg, nil)
+	if err == nil {
+		t.Fatal("expected error for unsupported provider")
+	}
+	if !contains(err.Error(), "not yet supported") {
+		t.Errorf("error = %q, want not yet supported", err.Error())
+	}
+}
+
+func TestNewClientFromConfig_ModelAliasProviderOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg := &api.Config{
+		LLM: api.LLMConfig{Timeout: 60 * time.Second},
+		Providers: map[string]api.ProviderConfig{
+			"kimi": {
+				Type:         api.ProviderTypeKimi,
+				APIKey:       "kimi-key",
+				BaseURL:      "https://api.moonshot.cn/v1",
+				DefaultModel: "kimi-k2.5",
+			},
+		},
+		Models: map[string]api.ModelAlias{
+			"smart": {
+				Provider: "openai",
+				Model:    "gpt-4o",
+			},
+		},
+		DefaultProvider: "kimi",
+		DefaultModel:    "smart",
+	}
+
+	client, err := NewClientFromConfig(cfg, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := client.(*Client)
+	if c.model != "gpt-4o" {
+		t.Errorf("model = %q, want %q", c.model, "gpt-4o")
+	}
+	if c.baseURL != "https://api.moonshot.cn/v1" {
+		t.Errorf("baseURL = %q, want %q", c.baseURL, "https://api.moonshot.cn/v1")
+	}
+}
+
 func TestNewClientFromConfig_CustomHeaders(t *testing.T) {
 	t.Parallel()
 

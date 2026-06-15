@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -45,9 +47,12 @@ func TestIsPreviewPathAllowed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			diff := computeFileDiff(tt.path, []byte("new content"), tt.sandboxRoot)
+			diff, err := computeFileDiff(tt.path, []byte("new content"), tt.sandboxRoot, nil)
 			if gotEmpty := diff == ""; gotEmpty != tt.wantEmpty {
 				t.Errorf("computeFileDiff(%q, ..., %q) empty=%v, want %v", tt.path, tt.sandboxRoot, gotEmpty, tt.wantEmpty)
+			}
+			if !tt.wantEmpty && err != nil {
+				t.Errorf("computeFileDiff(%q, ..., %q) unexpected error: %v", tt.path, tt.sandboxRoot, err)
 			}
 		})
 	}
@@ -69,8 +74,38 @@ func TestToolCallDiff_StrReplaceFile_RespectsSandbox(t *testing.T) {
 	}
 
 	call := apiCallStrReplace(symlinkPath, "old", "new")
-	if diff := toolCallDiff(call, tmp); diff != "" {
+	diff, err := toolCallDiff(call, tmp, nil)
+	if err == nil {
+		t.Error("expected error for symlink escape")
+	}
+	if diff != "" {
 		t.Errorf("expected empty diff for symlink escape, got: %s", diff)
+	}
+}
+
+func TestToolCallDiff_ThreadsProtectedPaths(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	blocked := filepath.Join(tmp, "blocked")
+	if err := os.Mkdir(blocked, 0755); err != nil {
+		t.Fatalf("mkdir blocked: %v", err)
+	}
+	blockedFile := filepath.Join(blocked, "secret.txt")
+	if err := os.WriteFile(blockedFile, []byte("old"), 0644); err != nil {
+		t.Fatalf("write blocked file: %v", err)
+	}
+
+	call := api.ToolCall{
+		ID:        "call_1",
+		Name:      "write_file",
+		Arguments: `{"path":"` + blockedFile + `","content":"new"}`,
+	}
+	diff, err := toolCallDiff(call, tmp, []string{blocked})
+	if !errors.Is(err, core.ErrDiffPathBlocked) {
+		t.Errorf("expected ErrDiffPathBlocked, got %v", err)
+	}
+	if diff != "" {
+		t.Errorf("expected empty diff for protected path, got: %s", diff)
 	}
 }
 

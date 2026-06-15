@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,5 +302,17 @@ func TestHTTPWebSearcher_NilClientAppliesTimeout(t *testing.T) {
 	}
 	if searcher.client.Timeout != 5*time.Second {
 		t.Errorf("timeout = %v, want 5s", searcher.client.Timeout)
+	}
+}
+
+func TestNewHTTPWebSearcher_BlocksHostWithCustomClient(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Timeout: 1 * time.Second}
+	_, err := NewHTTPWebSearcher("http://127.0.0.1:8080", "", client, 0)
+	if err == nil {
+		t.Fatal("expected error for blocked host with custom client")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked host error, got: %v", err)
 	}
 }

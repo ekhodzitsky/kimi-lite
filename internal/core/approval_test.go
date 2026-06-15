@@ -1,6 +1,7 @@
 package core
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -169,10 +170,18 @@ func TestApprovalGate_ConcurrentSetMode(t *testing.T) {
 	t.Parallel()
 	gate := NewApprovalGate(ModeAuto, []string{"read_file"}, testIsReadOnly, nil)
 
-	// Race detector will catch issues here.
-	go gate.SetMode(ModeYolo)
-	go gate.SetMode(ModeManual)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		gate.SetMode(ModeYolo)
+	}()
+	go func() {
+		defer wg.Done()
+		gate.SetMode(ModeManual)
+	}()
 
+	wg.Wait()
 	gate.ShouldAutoApprove(api.ToolCall{Name: "read_file"})
 }
 
@@ -282,12 +291,12 @@ func TestApprovalGate_GlobRule(t *testing.T) {
 func TestApprovalGate_RiskEvaluator_HighRisk(t *testing.T) {
 	t.Parallel()
 
-	gate := NewApprovalGate(ModeAuto, []string{"shell"}, func(string) bool { return true }, nil)
+	gate := NewApprovalGate(ModeAuto, []string{"write_file"}, func(string) bool { return true }, nil)
 	gate.SetRiskEvaluator(NewRiskEvaluator(nil, "/tmp"), api.RiskLevelMedium)
 
-	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "shell", Arguments: `{"command":"rm -rf /"}`})
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "write_file", Arguments: `{"path":"/etc/passwd","content":"x"}`})
 	if auto {
-		t.Fatal("expected shell to require approval")
+		t.Fatal("expected write_file to require approval")
 	}
 	if decision != api.ApprovalNo {
 		t.Fatalf("expected ApprovalNo, got %v", decision)
@@ -396,5 +405,40 @@ func TestApprovalGate_SetRiskEvaluator_InvalidThresholdDefaults(t *testing.T) {
 	gate.SetRiskEvaluator(NewRiskEvaluator(nil, "/tmp"), api.RiskLevel("invalid"))
 	if gate.riskThreshold != api.RiskLevelMedium {
 		t.Errorf("riskThreshold = %v, want medium", gate.riskThreshold)
+	}
+}
+
+func TestApprovalGate_NewApprovalGate_CopiesRules(t *testing.T) {
+	t.Parallel()
+	rules := []api.PermissionRule{
+		{Tool: "read_file", Decision: api.PermissionAllow, Scope: api.PermissionScopeUser},
+	}
+	gate := NewApprovalGate(ModeAuto, nil, testIsReadOnly, rules)
+	rules[0].Decision = api.PermissionDeny
+
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "read_file"})
+	if !auto || decision != api.ApprovalYes {
+		t.Fatalf("expected copied allow rule to remain, got decision=%v auto=%v", decision, auto)
+	}
+}
+
+func TestApprovalGate_AddAutoApprove_ReplacesSessionDeny(t *testing.T) {
+	t.Parallel()
+	rules := []api.PermissionRule{
+		{Tool: "read_file", Decision: api.PermissionDeny, Scope: api.PermissionScopeSession},
+	}
+	gate := NewApprovalGate(ModeAuto, nil, testIsReadOnly, rules)
+	gate.AddAutoApprove("read_file")
+
+	decision, auto := gate.ShouldAutoApprove(api.ToolCall{Name: "read_file"})
+	if !auto || decision != api.ApprovalYes {
+		t.Fatalf("expected session allow to replace session deny, got decision=%v auto=%v", decision, auto)
+	}
+}
+
+func TestApprovalGate_matchRule_InvalidGlob(t *testing.T) {
+	t.Parallel()
+	if matchRule("[", "read_file") {
+		t.Error("expected invalid glob pattern to not match")
 	}
 }

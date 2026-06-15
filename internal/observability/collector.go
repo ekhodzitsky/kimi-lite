@@ -49,17 +49,21 @@ func (c *Collector) IncCounter(name string, tags ...string) {
 
 // RecordLatency records a latency observation for the named metric and tags.
 // Observations are kept in a sliding window capped at maxLatencyObservations
-// per metric key.
+// per metric key. The backing array is reallocated when the window slides so
+// discarded observations can be garbage collected.
 func (c *Collector) RecordLatency(name string, d time.Duration, tags ...string) {
 	if !validMetricName(name) {
 		return
 	}
 	key := metricKey(name, tags...)
 	c.mu.Lock()
-	c.latencies[key] = append(c.latencies[key], d)
-	if len(c.latencies[key]) > maxLatencyObservations {
-		c.latencies[key] = c.latencies[key][len(c.latencies[key])-maxLatencyObservations:]
+	obs := append(c.latencies[key], d)
+	if len(obs) > maxLatencyObservations {
+		trimmed := make([]time.Duration, maxLatencyObservations)
+		copy(trimmed, obs[len(obs)-maxLatencyObservations:])
+		obs = trimmed
 	}
+	c.latencies[key] = obs
 	c.mu.Unlock()
 }
 
@@ -95,7 +99,8 @@ func validMetricName(name string) bool {
 
 // metricKey builds a stable key from a metric name and tag pairs. Tags are
 // sorted lexicographically so that equivalent tag sets produce the same key
-// regardless of the order supplied by callers.
+// regardless of the order supplied by callers. Tag keys and values are sanitized
+// to prevent delimiter collisions that could merge or split keys.
 func metricKey(name string, tags ...string) string {
 	if len(tags) == 0 {
 		return name
@@ -103,10 +108,10 @@ func metricKey(name string, tags ...string) string {
 
 	pairs := make([]string, 0, (len(tags)+1)/2)
 	for i := 0; i < len(tags); i += 2 {
-		key := tags[i]
+		key := sanitizeTag(tags[i])
 		value := ""
 		if i+1 < len(tags) {
-			value = tags[i+1]
+			value = sanitizeTag(tags[i+1])
 		}
 		pairs = append(pairs, key+"="+value)
 	}
@@ -124,4 +129,15 @@ func metricKey(name string, tags ...string) string {
 	}
 	b.WriteByte('}')
 	return b.String()
+}
+
+// sanitizeTag escapes characters used by the metric key encoding so that
+// "a=b" and "a"="b" cannot collide.
+func sanitizeTag(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, ",", "\\,")
+	s = strings.ReplaceAll(s, "=", "\\=")
+	s = strings.ReplaceAll(s, "{", "\\{")
+	s = strings.ReplaceAll(s, "}", "\\}")
+	return s
 }

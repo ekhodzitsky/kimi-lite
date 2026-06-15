@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
@@ -214,6 +215,9 @@ type mockLLMClient struct {
 }
 
 func (m *mockLLMClient) Chat(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (*api.Message, error) {
+	if m.chatFunc == nil {
+		return nil, fmt.Errorf("chat not implemented")
+	}
 	return m.chatFunc(ctx, messages, tools)
 }
 
@@ -260,4 +264,27 @@ type mockConfigProvider struct {
 
 func (m *mockConfigProvider) Get() *api.Config {
 	return m.cfg
+}
+
+// newTestTurnManager creates a TurnManager for tests, substituting empty mocks
+// for any nil required dependency so that the constructor's validation succeeds.
+func newTestTurnManager(t *testing.T, llm api.LLMClient, tools api.ToolExecutor, approval api.ApprovalGate, store api.Store, cfg api.ConfigProvider) *TurnManager {
+	t.Helper()
+	if isNilInterface(llm) {
+		llm = &mockLLMClient{}
+	}
+	if isNilInterface(tools) {
+		tools = &mockToolExecutor{}
+	}
+	if isNilInterface(approval) {
+		approval = &mockApprovalGate{}
+	}
+	if isNilInterface(store) {
+		store = newMockStore()
+	}
+	tm, err := NewTurnManager(llm, tools, approval, store, cfg)
+	if err != nil {
+		t.Fatalf("NewTurnManager: %v", err)
+	}
+	return tm
 }

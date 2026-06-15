@@ -107,6 +107,38 @@ func TestRunner_PropagatesArgsTemplateError(t *testing.T) {
 	}
 }
 
+func TestRunner_TemplateErrorRespectsContinueOnError(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	r := NewRunner([]api.HookConfig{
+		{
+			Event:           api.HookToolCall,
+			Command:         "sh",
+			Args:            []string{"{{.Bad"},
+			ContinueOnError: true,
+		},
+		{
+			Event:   api.HookToolCall,
+			Command: "sh",
+			Args:    []string{"-c", "exit 0"},
+		},
+	})
+	r.execCommand = func(ctx context.Context, cfg api.HookConfig, data api.HookData) error {
+		calls++
+		return nil
+	}
+	err := r.Run(context.Background(), api.HookData{Event: api.HookToolCall})
+	if err == nil {
+		t.Fatal("expected aggregated error")
+	}
+	if calls != 1 {
+		t.Fatalf("expected second hook to run, calls = %d", calls)
+	}
+	if !strings.Contains(err.Error(), "prepare hook") {
+		t.Errorf("expected template error in aggregate, got: %v", err)
+	}
+}
+
 func TestRunner_PropagatesExecError(t *testing.T) {
 	t.Parallel()
 	r := NewRunner([]api.HookConfig{{
@@ -299,6 +331,21 @@ func TestExecHook_Cancellation(t *testing.T) {
 	}
 	if runErr == nil {
 		t.Fatal("expected cancellation error")
+	}
+}
+
+func TestBuildEnv_UsesCuratedEnv(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-secret")
+	t.Setenv("PATH", "/usr/bin:/bin")
+
+	data := api.HookData{Event: api.HookToolCall}
+	env := buildEnv(nil, data)
+	m := envMap(env)
+	if m["OPENAI_API_KEY"] != "" {
+		t.Errorf("sensitive variable leaked into hook env: %q", m["OPENAI_API_KEY"])
+	}
+	if m["PATH"] != "/usr/bin:/bin" {
+		t.Errorf("PATH not preserved in curated env: %q", m["PATH"])
 	}
 }
 

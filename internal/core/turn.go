@@ -50,8 +50,21 @@ type TurnManager struct {
 	activeCancel context.CancelFunc
 }
 
-// NewTurnManager creates a new TurnManager.
-func NewTurnManager(llm api.LLMClient, tools api.ToolExecutor, approval api.ApprovalGate, store api.Store, cfg api.ConfigProvider) *TurnManager {
+// NewTurnManager creates a new TurnManager. It returns an error if any required
+// dependency (llm, tools, approval, store) is nil.
+func NewTurnManager(llm api.LLMClient, tools api.ToolExecutor, approval api.ApprovalGate, store api.Store, cfg api.ConfigProvider) (*TurnManager, error) {
+	if isNilInterface(llm) {
+		return nil, fmt.Errorf("llm client is required")
+	}
+	if isNilInterface(tools) {
+		return nil, fmt.Errorf("tool executor is required")
+	}
+	if isNilInterface(approval) {
+		return nil, fmt.Errorf("approval gate is required")
+	}
+	if isNilInterface(store) {
+		return nil, fmt.Errorf("store is required")
+	}
 	return &TurnManager{
 		llm:        llm,
 		tools:      tools,
@@ -60,7 +73,7 @@ func NewTurnManager(llm api.LLMClient, tools api.ToolExecutor, approval api.Appr
 		cfg:        cfg,
 		metrics:    api.NoopMetricsCollector{},
 		approvalCh: make(chan approvalPayload, 1),
-	}
+	}, nil
 }
 
 // SetHookRunner sets the lifecycle hook runner.
@@ -184,7 +197,7 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 	tm.cancelMu.Lock()
 	tm.activeCancel = runCancel
 	tm.cancelMu.Unlock()
-	outCh, err := tm.startTurn(runCtx, sessionID, input)
+	outCh, err := tm.startTurn(runCtx, runCancel, sessionID, input)
 	if err != nil {
 		tm.running.Store(false)
 		runCancel()
@@ -196,10 +209,7 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 	return outCh, nil
 }
 
-func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
-	tm.metrics.IncCounter("turn.started")
-	tm.runHooks(ctx, api.HookTurnStart, sessionID, "", "")
-
+func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFunc, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	if tm.cfg != nil && tm.cfg.Get() != nil {
 		maxTurns := tm.cfg.Get().Behavior.MaxTurns
 		if maxTurns > 0 {
@@ -212,6 +222,9 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 			}
 		}
 	}
+
+	tm.metrics.IncCounter("turn.started")
+	tm.runHooks(ctx, api.HookTurnStart, sessionID, "", "")
 
 	// Drain any stale approval from previous turn to prevent cross-turn contamination.
 	select {
@@ -269,15 +282,16 @@ func (tm *TurnManager) startTurn(ctx context.Context, sessionID string, input st
 	}
 
 	tm.wg.Add(1)
-	go tm.run(ctx, sessionID, turn, tools, streamCh, eventCh, msgLimit)
+	go tm.run(ctx, runCancel, sessionID, turn, tools, streamCh, eventCh, msgLimit)
 
 	return eventCh, nil
 }
 
-func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int) {
+func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, sessionID string, turn *api.Turn, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int) {
 	defer tm.wg.Done()
 	defer close(eventCh)
 	defer tm.running.Store(false)
+	defer runCancel()
 	defer func() {
 		tm.cancelMu.Lock()
 		tm.activeCancel = nil
@@ -371,11 +385,15 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 							if call.ID != callID {
 								continue
 							}
+							diffContent, diffErr := ToolCallDiff(call, tm.sandboxRoot, tm.getProtectedPaths())
+							if diffErr != nil {
+								slog.Debug("diff preview failed", "tool", call.Name, "error", diffErr)
+							}
 							select {
 							case eventCh <- api.TurnEvent{
 								Type:        api.TurnEventApprovalDiff,
 								DiffCallID:  call.ID,
-								DiffContent: ToolCallDiff(call, tm.sandboxRoot, tm.getProtectedPaths()),
+								DiffContent: diffContent,
 							}:
 							case <-ctx.Done():
 								tm.setError(ctx, sessionID, turn, ctx.Err(), eventCh)
@@ -408,7 +426,7 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 							Error:  "tool call denied",
 						}
 					} else {
-						result, err = tm.tools.Execute(ctx, call)
+						result, err = tm.executeToolCall(ctx, call)
 						if err != nil {
 							result.Error = err.Error()
 						}
@@ -445,10 +463,13 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 			}
 		}
 
+		tm.mu.RLock()
+		assistantContent := turn.Response
+		tm.mu.RUnlock()
 		assistantMsg := api.Message{
 			ID:        idgen.GenerateID(),
 			Role:      api.RoleAssistant,
-			Content:   turn.Response,
+			Content:   assistantContent,
 			ToolCalls: toolCalls,
 			CreatedAt: time.Now().UTC(),
 		}
@@ -513,11 +534,14 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 	}
 
 	// Skip persisting an empty trailing assistant message.
-	if strings.TrimSpace(turn.Response) != "" {
+	tm.mu.RLock()
+	finalResponse := turn.Response
+	tm.mu.RUnlock()
+	if strings.TrimSpace(finalResponse) != "" {
 		assistantMsg := api.Message{
 			ID:        idgen.GenerateID(),
 			Role:      api.RoleAssistant,
-			Content:   turn.Response,
+			Content:   finalResponse,
 			CreatedAt: time.Now().UTC(),
 		}
 		if err := tm.store.AppendMessage(ctx, sessionID, assistantMsg); err != nil {
@@ -542,64 +566,84 @@ func (tm *TurnManager) run(ctx context.Context, sessionID string, turn *api.Turn
 
 // consumeStream reads chunks from a stream channel, forwards content as TurnEvents,
 // and returns the accumulated text plus any tool calls from the final chunk.
-// It checks for context cancellation both during streaming and after the channel closes.
+// It is interruptible via ctx.Done() and drains any remaining streamCh items
+// before returning an error so the producer goroutine can exit cleanly.
 func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn, streamCh <-chan api.StreamChunk, eventCh chan api.TurnEvent) (string, []api.ToolCall, error) {
 	var content strings.Builder
 	var toolCalls []api.ToolCall
 
-	for chunk := range streamCh {
-		if ctx.Err() != nil {
+	drain := func() {
+		for range streamCh {
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			drain()
 			select {
 			case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
 			case <-ctx.Done():
 			}
 			return content.String(), nil, ctx.Err()
-		}
-
-		if chunk.Error != nil {
-			select {
-			case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: chunk.Error}:
-			case <-ctx.Done():
+		case chunk, ok := <-streamCh:
+			if !ok {
+				if err := ctx.Err(); err != nil {
+					select {
+					case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: err}:
+					case <-ctx.Done():
+					}
+					return content.String(), nil, err
+				}
+				return content.String(), toolCalls, nil
 			}
-			return content.String(), nil, chunk.Error
-		}
 
-		if chunk.Content != "" {
-			if content.Len()+len(chunk.Content) > maxStreamResponseSize {
-				msg := fmt.Sprintf("response exceeded max size of %d bytes", maxStreamResponseSize)
+			if chunk.Error != nil {
 				select {
-				case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: errors.New(msg)}:
+				case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: chunk.Error}:
 				case <-ctx.Done():
 				}
-				return content.String(), nil, errors.New(msg)
+				drain()
+				return content.String(), nil, chunk.Error
 			}
-			content.WriteString(chunk.Content)
-			select {
-			case eventCh <- api.TurnEvent{Type: api.TurnEventContent, Content: chunk.Content}:
-			case <-ctx.Done():
-				select {
-				case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
-				case <-ctx.Done():
+
+			if chunk.Content != "" {
+				if content.Len()+len(chunk.Content) > maxStreamResponseSize {
+					msg := fmt.Sprintf("response exceeded max size of %d bytes", maxStreamResponseSize)
+					select {
+					case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: errors.New(msg)}:
+					case <-ctx.Done():
+					}
+					drain()
+					return content.String(), nil, errors.New(msg)
 				}
-				return content.String(), nil, ctx.Err()
+				content.WriteString(chunk.Content)
+				select {
+				case eventCh <- api.TurnEvent{Type: api.TurnEventContent, Content: chunk.Content}:
+				case <-ctx.Done():
+					select {
+					case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
+					case <-ctx.Done():
+					}
+					drain()
+					return content.String(), nil, ctx.Err()
+				}
+			}
+
+			if chunk.Done {
+				toolCalls = chunk.ToolCalls
+				if err := ctx.Err(); err != nil {
+					drain()
+					select {
+					case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: err}:
+					case <-ctx.Done():
+					}
+					return content.String(), nil, err
+				}
+				return content.String(), toolCalls, nil
 			}
 		}
-
-		if chunk.Done {
-			toolCalls = chunk.ToolCalls
-			break
-		}
 	}
-
-	if ctx.Err() != nil {
-		select {
-		case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
-		case <-ctx.Done():
-		}
-		return content.String(), nil, ctx.Err()
-	}
-
-	return content.String(), toolCalls, nil
 }
 
 // executeToolCalls runs each tool call after checking the approval gate.
@@ -638,7 +682,7 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 			continue
 		}
 
-		result, err := tm.tools.Execute(ctx, call)
+		result, err := tm.executeToolCall(ctx, call)
 		if err != nil {
 			result.Error = err.Error()
 		}
@@ -665,6 +709,23 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 	}
 
 	return results, pending, pendingIdx
+}
+
+// executeToolCall runs a single tool call and recovers from panics, converting
+// them into a ToolResult with an error message so one bad tool cannot crash the
+// whole turn.
+func (tm *TurnManager) executeToolCall(ctx context.Context, call api.ToolCall) (result api.ToolResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = api.ToolResult{
+				CallID: call.ID,
+				Name:   call.Name,
+				Error:  fmt.Sprintf("tool execution panicked: %v", r),
+			}
+			err = nil
+		}
+	}()
+	return tm.tools.Execute(ctx, call)
 }
 
 func (tm *TurnManager) setError(ctx context.Context, sessionID string, turn *api.Turn, err error, eventCh chan api.TurnEvent) {
@@ -723,7 +784,7 @@ func (tm *TurnManager) runHooks(ctx context.Context, event api.HookEvent, sessio
 		TurnID:    turnID,
 		ToolArgs:  input,
 	}); err != nil {
-		slog.Debug("turn hook failed", "event", event, "error", err)
+		slog.Warn("turn hook failed", "event", event, "error", err)
 	}
 }
 
@@ -742,7 +803,7 @@ func (tm *TurnManager) runApprovalHook(ctx context.Context, event api.HookEvent,
 			ToolName:  call.Name,
 			ToolArgs:  call.Arguments,
 		}); err != nil {
-			slog.Debug("approval hook failed", "event", event, "tool", call.Name, "error", err)
+			slog.Warn("approval hook failed", "event", event, "tool", call.Name, "error", err)
 		}
 	}
 }

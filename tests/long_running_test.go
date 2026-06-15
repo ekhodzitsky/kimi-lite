@@ -91,13 +91,6 @@ func TestLongRunningTurns_NoLeaks(t *testing.T) {
 
 	cfg := &api.Config{}
 	llm := &cyclicFakeLLM{}
-	approval := core.NewApprovalGate(
-		core.ModeAuto,
-		[]string{"read_file"},
-		func(name string) bool { return name == "read_file" },
-		nil,
-	)
-
 	tools, err := core.NewBuiltInToolExecutor(core.ToolExecutorConfig{
 		SandboxRoot:  tmpDir,
 		ShellTimeout: 30 * time.Second,
@@ -107,8 +100,18 @@ func TestLongRunningTurns_NoLeaks(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tools.Close() })
 
+	approval := core.NewApprovalGate(
+		core.ModeAuto,
+		[]string{"read_file"},
+		tools.IsReadOnly,
+		nil,
+	)
+
 	metrics := observability.NewCollector()
-	tm := core.NewTurnManager(llm, tools, approval, st, &staticConfig{cfg: cfg})
+	tm, err := core.NewTurnManager(llm, tools, approval, st, &staticConfig{cfg: cfg})
+	if err != nil {
+		t.Fatalf("create turn manager: %v", err)
+	}
 	tm.SetMetricsCollector(metrics)
 	t.Cleanup(func() {
 		tm.CancelAll()

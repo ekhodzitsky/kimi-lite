@@ -9,17 +9,11 @@ import (
 
 // Status returns the current git status as a string.
 func (p *Provider) Status(ctx context.Context) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	stdout, stderr, err := p.runner.Output(ctx, p.dir, "git", "-c", "color.status=never", "status", "--porcelain")
 	if err != nil {
-		if errCtx := ctx.Err(); errCtx != nil {
-			if errors.Is(errCtx, context.Canceled) {
-				return "", fmt.Errorf("git status canceled: %w", errCtx)
-			}
-			return "", fmt.Errorf("git status timed out: %w", errCtx)
-		}
 		return "", classifyErr("git status", stderr, err)
 	}
 	return string(stdout), nil
@@ -29,19 +23,19 @@ func (p *Provider) Status(ctx context.Context) (string, error) {
 // It returns (false, nil) for a genuine non-repository, and (false, err)
 // for execution errors such as git-not-found or cancellation.
 func (p *Provider) IsRepo(ctx context.Context) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	stdout, stderr, err := p.runner.Output(ctx, p.dir, "git", "rev-parse", "--is-inside-work-tree")
 	if err != nil {
-		if errCtx := ctx.Err(); errCtx != nil {
-			if errors.Is(errCtx, context.Canceled) {
-				return false, fmt.Errorf("git is-repo canceled: %w", errCtx)
-			}
-			return false, fmt.Errorf("git is-repo timed out: %w", errCtx)
-		}
 		if isGitNotFound(err) {
 			return false, fmt.Errorf("git is not installed: %w", err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false, fmt.Errorf("git is-repo timed out: %w", err)
+		}
+		if errors.Is(err, context.Canceled) {
+			return false, fmt.Errorf("git is-repo canceled: %w", err)
 		}
 		if isNotRepo(string(stderr)) {
 			return false, nil

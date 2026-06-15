@@ -10,10 +10,26 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
+
+// notificationKey marks a request context as a JSON-RPC notification (no id).
+type notificationKey struct{}
+
+// withNotification returns a context that signals the request is a notification.
+func withNotification(ctx context.Context) context.Context {
+	return context.WithValue(ctx, notificationKey{}, true)
+}
+
+// isNotification reports whether ctx was marked as a JSON-RPC notification.
+func isNotification(ctx context.Context) bool {
+	v, _ := ctx.Value(notificationKey{}).(bool)
+	return v
+}
 
 // maxFrameSize limits the size of a single JSON-RPC frame read from stdin.
 // It protects the server from unbounded memory growth and replaces the
@@ -33,10 +49,11 @@ type appRunner interface {
 
 // Server speaks JSON-RPC 2.0 over stdio and exposes ACP methods.
 type Server struct {
-	app    appRunner
-	logger *slog.Logger
+	app         appRunner
+	logger      *slog.Logger
+	allowedRoot string
 
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	session        *api.Session
 	promptInFlight bool
 	cancelFn       context.CancelFunc
@@ -53,6 +70,12 @@ func NewServer(application appRunner, logger *slog.Logger) *Server {
 		app:    application,
 		logger: logger,
 	}
+}
+
+// SetAllowedRoot sets the root directory that session working directories must
+// remain within. An empty root disables the check.
+func (s *Server) SetAllowedRoot(root string) {
+	s.allowedRoot = root
 }
 
 // Run reads JSON-RPC requests from stdin and writes responses to stdout until
@@ -75,7 +98,7 @@ func (s *Server) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 		}
 		readCh := make(chan readResult, 1)
 		go func() {
-			l, e := reader.ReadBytes('\n')
+			l, e := readLine(reader, maxFrameSize)
 			readCh <- readResult{line: l, err: e}
 		}()
 
@@ -134,6 +157,12 @@ func (s *Server) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 		}
 
 		if err := s.handle(ctx, req, enc); err != nil {
+			// Notifications have no response channel; log the error and keep reading
+			// rather than tearing down the server.
+			if req.ID == nil {
+				s.logger.Error("notification handler failed", "method", req.Method, "error", err)
+				continue
+			}
 			wg.Wait()
 			return err
 		}
@@ -144,6 +173,11 @@ func (s *Server) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 func (s *Server) handle(ctx context.Context, req jsonRPCRequest, enc *json.Encoder) error {
 	if req.JSONRPC != "2.0" {
 		return s.writeError(ctx, enc, req.ID, -32600, "invalid request", errors.New("invalid jsonrpc version"))
+	}
+
+	// Notifications omit the id field; suppress responses for them.
+	if req.ID == nil {
+		ctx = withNotification(ctx)
 	}
 
 	switch req.Method {
@@ -162,8 +196,13 @@ func (s *Server) handle(ctx context.Context, req jsonRPCRequest, enc *json.Encod
 	}
 }
 
-// writeError writes a JSON-RPC error response.
+// writeError writes a JSON-RPC error response. If the request was a
+// notification (id omitted), no response is written.
 func (s *Server) writeError(ctx context.Context, enc *json.Encoder, id any, code int, message string, cause error) error {
+	if id == nil && isNotification(ctx) {
+		return nil
+	}
+
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("context cancelled: %w", ctx.Err())
@@ -175,7 +214,10 @@ func (s *Server) writeError(ctx context.Context, enc *json.Encoder, id any, code
 		Message: message,
 	}
 	if cause != nil {
-		errObj.Data = cause.Error()
+		// Sanitize: log the internal cause server-side but do not forward raw
+		// error strings to the JSON-RPC client.
+		s.logger.Error("jsonrpc handler error", "code", code, "message", message, "cause", cause)
+		errObj.Data = "internal error"
 	}
 
 	resp := jsonRPCResponse{
@@ -192,8 +234,13 @@ func (s *Server) writeError(ctx context.Context, enc *json.Encoder, id any, code
 	return nil
 }
 
-// writeResult writes a JSON-RPC success response.
+// writeResult writes a JSON-RPC success response. If the request was a
+// notification (id omitted), no response is written.
 func (s *Server) writeResult(ctx context.Context, enc *json.Encoder, id any, result any) error {
+	if id == nil && isNotification(ctx) {
+		return nil
+	}
+
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("context cancelled: %w", ctx.Err())
@@ -238,8 +285,8 @@ func (s *Server) writeNotification(ctx context.Context, enc *json.Encoder, metho
 
 // currentSession returns the active session or an error.
 func (s *Server) currentSession() (*api.Session, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.session == nil {
 		return nil, errors.New("no active session")
 	}
@@ -293,11 +340,38 @@ func (s *Server) cancelCurrent() bool {
 	return true
 }
 
-// changeWorkingDir validates dir and switches to it when non-empty and
-// different from the current working directory.
-func changeWorkingDir(dir string) error {
+// readLine reads a single line terminated by '\n' from r, capping the returned
+// slice at max+1 bytes. This bounds per-frame memory even when an input line
+// far exceeds maxFrameSize; the remainder of an oversized line is discarded as
+// it is read.
+func readLine(r *bufio.Reader, max int) ([]byte, error) {
+	var line []byte
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			return line, err
+		}
+		if len(line) <= max {
+			line = append(line, b)
+		}
+		if b == '\n' {
+			break
+		}
+	}
+	return line, nil
+}
+
+// changeWorkingDir validates dir against allowedRoot and switches to it when
+// non-empty and different from the current working directory.
+func changeWorkingDir(dir, allowedRoot string) error {
 	if dir == "" {
 		return nil
+	}
+	if allowedRoot != "" {
+		rel, err := filepath.Rel(allowedRoot, dir)
+		if err != nil || strings.Contains(rel, "..") || rel == ".." {
+			return fmt.Errorf("working directory %q is outside allowed root %q", dir, allowedRoot)
+		}
 	}
 	info, err := os.Stat(dir)
 	if err != nil {

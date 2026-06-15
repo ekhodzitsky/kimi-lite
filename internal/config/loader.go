@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -47,6 +48,7 @@ func NewLoader() *Loader {
 	v.SetDefault("behavior.max_tool_rounds", defaults.Behavior.MaxToolRounds)
 	v.SetDefault("behavior.compact_keep_recent", defaults.Behavior.CompactKeepRecent)
 	v.SetDefault("behavior.pass_env", defaults.Behavior.PassEnv)
+	v.SetDefault("behavior.allow_shell", defaults.Behavior.AllowShell)
 	v.SetDefault("session.db_path", defaults.Session.DBPath)
 	v.SetDefault("session.max_history", defaults.Session.MaxHistory)
 	v.SetDefault("mcp.guard_command", defaults.MCP.GuardCommand)
@@ -61,6 +63,7 @@ func NewLoader() *Loader {
 	v.SetDefault("web_search.timeout", defaults.WebSearch.Timeout)
 	v.SetDefault("ui.theme", defaults.UI.Theme)
 	v.SetDefault("ui.show_token_count", defaults.UI.ShowTokenCount)
+	v.SetDefault("ui.editor", defaults.UI.Editor)
 	v.SetDefault("keybindings.send", defaults.Keybindings.Send)
 	v.SetDefault("keybindings.newline", defaults.Keybindings.Newline)
 	v.SetDefault("keybindings.cancel", defaults.Keybindings.Cancel)
@@ -74,9 +77,11 @@ func NewLoader() *Loader {
 	v.SetDefault("keybindings.approve_always", defaults.Keybindings.ApproveAlways)
 	v.SetDefault("keybindings.approve_diff", defaults.Keybindings.ApproveDiff)
 	v.SetDefault("keybindings.external_editor", defaults.Keybindings.ExternalEditor)
-	v.SetDefault("ui.editor", defaults.UI.Editor)
 	v.SetDefault("permission.rules", []api.PermissionRule{})
+	v.SetDefault("permission.risk_threshold", defaults.Permission.RiskThreshold)
+	v.SetDefault("permission.risk_rules", []api.RiskRule{})
 	v.SetDefault("hooks", []api.HookConfig{})
+	v.SetDefault("git_timeout", defaults.GitTimeout)
 
 	return &Loader{v: v}
 }
@@ -99,6 +104,12 @@ func (l *Loader) Load() (*api.Config, error) {
 	var cfg api.Config
 	if err := l.v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
+
+	// Viper lower-cases map keys when unmarshaling. Restore the original
+	// casing for provider and MCP server maps directly from the source file.
+	if err := restoreMapKeyCasing(l.v.ConfigFileUsed(), &cfg); err != nil {
+		return nil, fmt.Errorf("restore map key casing: %w", err)
 	}
 
 	// Resolve environment variables in API keys
@@ -150,6 +161,8 @@ func (l *Loader) SetConfigFile(path string) {
 
 // resolveEnvVar expands $VAR or ${VAR} patterns using strict matching.
 // Strings that do not match exactly are returned unchanged.
+// If the referenced environment variable is completely unset, an empty string
+// is returned (not the literal "$NAME").
 func resolveEnvVar(s string) string {
 	matches := envVarRegex.FindStringSubmatch(s)
 	if matches == nil {
@@ -162,7 +175,7 @@ func resolveEnvVar(s string) string {
 	if val, ok := os.LookupEnv(name); ok {
 		return val
 	}
-	return s
+	return ""
 }
 
 // expandPath expands ~ to home directory.
@@ -181,6 +194,91 @@ func expandPath(path string) string {
 		}
 	}
 	return path
+}
+
+// rawMapCasing captures the original key casing for maps that viper otherwise
+// lower-cases during unmarshaling.
+type rawMapCasing struct {
+	Providers  map[string]providerRawMaps `toml:"providers"`
+	MCPServers map[string]mcpRawMaps      `toml:"mcp_servers"`
+}
+
+type providerRawMaps struct {
+	Env           map[string]string `toml:"env"`
+	CustomHeaders map[string]string `toml:"custom_headers"`
+}
+
+type mcpRawMaps struct {
+	Env map[string]string `toml:"env"`
+}
+
+// restoreMapKeyCasing re-applies original map key casing from the TOML source
+// file to ProviderConfig.Env, ProviderConfig.CustomHeaders, and
+// MCPServerConfig.Env.
+func restoreMapKeyCasing(path string, cfg *api.Config) error {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config file: %w", err)
+	}
+	var raw rawMapCasing
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parse config file: %w", err)
+	}
+	for name, p := range cfg.Providers {
+		rawP, ok := raw.Providers[name]
+		if !ok {
+			continue
+		}
+		p.Env = restoreMapKeys(p.Env, rawP.Env)
+		p.CustomHeaders = restoreMapKeys(p.CustomHeaders, rawP.CustomHeaders)
+		cfg.Providers[name] = p
+	}
+	for name, s := range cfg.MCPServers {
+		rawS, ok := raw.MCPServers[name]
+		if !ok {
+			continue
+		}
+		s.Env = restoreMapKeys(s.Env, rawS.Env)
+		cfg.MCPServers[name] = s
+	}
+	return nil
+}
+
+// restoreMapKeys returns a map with the key casing from want (the raw config)
+// and values from have (the viper-decoded config). Keys present in have but
+// not in want are appended unchanged so that environment/flag overrides are
+// not dropped.
+func restoreMapKeys(have, want map[string]string) map[string]string {
+	if len(have) == 0 {
+		return have
+	}
+	lower := make(map[string]string, len(have))
+	for k, v := range have {
+		lower[strings.ToLower(k)] = v
+	}
+	out := make(map[string]string, len(want)+len(have))
+	for k := range want {
+		if v, ok := lower[strings.ToLower(k)]; ok {
+			out[k] = v
+		}
+	}
+	for k, v := range have {
+		lk := strings.ToLower(k)
+		found := false
+		for rk := range want {
+			if strings.ToLower(rk) == lk {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // Default returns the default configuration with environment variables
@@ -312,6 +410,8 @@ guard_config = "~/.config/mcp-guard/mcp-guard.toml"
 # default_provider = "openai"
 # default_model = "gpt4o"
 
+git_timeout = "30s"
+
 [web_search]
 # endpoint = "https://api.example.com/search"
 # api_key = "$WEB_SEARCH_API_KEY"
@@ -337,20 +437,34 @@ approve_always = "a"
 approve_diff = "d"
 external_editor = "ctrl+g"
 `
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	tmp, err := os.CreateTemp(dir, "config.toml.tmp-*")
 	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("fsync temp config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close temp config: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
 		if os.IsExist(err) {
 			return nil // Another writer won the race; treat as idempotent.
 		}
-		return fmt.Errorf("open default config: %w", err)
-	}
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return fmt.Errorf("write default config: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close default config: %w", err)
+		return fmt.Errorf("rename temp config: %w", err)
 	}
 	return nil
 }

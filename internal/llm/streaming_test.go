@@ -28,7 +28,7 @@ func TestStreamReader_MultiLineData_Reassembled(t *testing.T) {
 	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
 	defer reader.Close()
 
-	chunk, err := reader.readRawChunk(context.Background())
+	chunk, err := reader.readRawChunk()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestStreamReader_NoSpaceDataPrefix(t *testing.T) {
 	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
 	defer reader.Close()
 
-	chunk, err := reader.readRawChunk(context.Background())
+	chunk, err := reader.readRawChunk()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestStreamReader_CommentLineIgnored(t *testing.T) {
 	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
 	defer reader.Close()
 
-	chunk, err := reader.readRawChunk(context.Background())
+	chunk, err := reader.readRawChunk()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestStreamReader_MultiLineData_MultipleEvents(t *testing.T) {
 	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
 	defer reader.Close()
 
-	chunk1, err := reader.readRawChunk(context.Background())
+	chunk1, err := reader.readRawChunk()
 	if err != nil {
 		t.Fatalf("unexpected error on first chunk: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestStreamReader_MultiLineData_MultipleEvents(t *testing.T) {
 		t.Errorf("first chunk Content = %q, want %q", chunk1.Content, "hello world")
 	}
 
-	chunk2, err := reader.readRawChunk(context.Background())
+	chunk2, err := reader.readRawChunk()
 	if err != nil {
 		t.Fatalf("unexpected error on second chunk: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestStreamReader_MultiLineData_MultipleEvents(t *testing.T) {
 		t.Errorf("second chunk Content = %q, want %q", chunk2.Content, "!")
 	}
 
-	chunk3, err := reader.readRawChunk(context.Background())
+	chunk3, err := reader.readRawChunk()
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("expected io.EOF on third chunk, got %v", err)
 	}
@@ -122,7 +122,7 @@ func TestStreamReader_ScannerError(t *testing.T) {
 	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
 	defer reader.Close()
 
-	_, err := reader.readRawChunk(context.Background())
+	_, err := reader.readRawChunk()
 	if err == nil {
 		t.Fatal("expected scanner error")
 	}
@@ -174,7 +174,7 @@ func TestStreamReader_EmptyChoices(t *testing.T) {
 	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
 	defer reader.Close()
 
-	chunk, err := reader.readRawChunk(context.Background())
+	chunk, err := reader.readRawChunk()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

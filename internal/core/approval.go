@@ -37,6 +37,10 @@ type ApprovalGate struct {
 // autoApprove is a list of tool names that are auto-approved in ModeAuto.
 // isReadOnly is called to verify a tool is read-only before auto-approving.
 // rules is an ordered list of permission rules evaluated in ModeAuto.
+//
+// The gate does not enforce protectedPaths directly; path-level protections
+// are handled by the tool executor and diff preview components. This keeps
+// approval policy (who can auto-approve what) separate from path sandboxing.
 func NewApprovalGate(mode ApprovalMode, autoApprove []string, isReadOnly func(string) bool, rules []api.PermissionRule) *ApprovalGate {
 	if isReadOnly == nil {
 		isReadOnly = func(string) bool { return false }
@@ -45,7 +49,7 @@ func NewApprovalGate(mode ApprovalMode, autoApprove []string, isReadOnly func(st
 		mode:          mode,
 		autoApprove:   make(map[string]struct{}, len(autoApprove)),
 		isReadOnly:    isReadOnly,
-		rules:         rules,
+		rules:         append([]api.PermissionRule(nil), rules...),
 		riskThreshold: api.RiskLevelMedium,
 	}
 	for _, name := range autoApprove {
@@ -81,14 +85,18 @@ func (g *ApprovalGate) SetRiskEvaluator(eval *RiskEvaluator, threshold api.RiskL
 }
 
 // AddAutoApprove adds a session-scope allow rule for the named tool.
-// Duplicate session-scope allow rules for the same tool are ignored.
+// Existing session-scope rules for the same tool (allow or deny) are replaced
+// so that conflicting deny rules do not silently coexist with the new allow.
 func (g *ApprovalGate) AddAutoApprove(name string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for _, r := range g.rules {
-		if r.Tool == name && r.Decision == api.PermissionAllow && r.Scope == api.PermissionScopeSession {
-			return
+	for i := 0; i < len(g.rules); {
+		r := g.rules[i]
+		if r.Tool == name && r.Scope == api.PermissionScopeSession {
+			g.rules = append(g.rules[:i], g.rules[i+1:]...)
+			continue
 		}
+		i++
 	}
 	g.rules = append(g.rules, api.PermissionRule{
 		Tool:     name,
@@ -111,8 +119,8 @@ func matchRule(ruleTool, name string) bool {
 	if ruleTool == name {
 		return true
 	}
-	matched, _ := path.Match(ruleTool, name)
-	return matched
+	matched, err := path.Match(ruleTool, name)
+	return err == nil && matched
 }
 
 // rulePrecedence maps scopes to precedence values (higher wins).
@@ -144,6 +152,10 @@ func (g *ApprovalGate) evaluateRules(name string) (api.PermissionDecision, bool)
 
 // ShouldAutoApprove returns the auto-approval decision for a tool call.
 // If the tool requires manual approval, it returns (ApprovalNo, false).
+//
+// Path-level protections (sandboxRoot and protectedPaths) are enforced by the
+// tool executor and diff preview; this method decides based on approval mode,
+// permission rules, and risk level only.
 func (g *ApprovalGate) ShouldAutoApprove(call api.ToolCall) (api.ApprovalDecision, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()

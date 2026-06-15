@@ -10,6 +10,15 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
+func mustNewContextCompressor(t *testing.T, llm api.LLMClient, contextWindow int, timeout time.Duration) *ContextCompressor {
+	t.Helper()
+	c, err := NewContextCompressor(llm, contextWindow, timeout)
+	if err != nil {
+		t.Fatalf("NewContextCompressor: %v", err)
+	}
+	return c
+}
+
 func TestContextCompressor_Compact(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -36,7 +45,7 @@ func TestContextCompressor_Compact(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 	summarized, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -67,7 +76,7 @@ func TestContextCompressor_Compact_TooFewMessages(t *testing.T) {
 	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m2", Role: api.RoleAssistant, Content: "hi", CreatedAt: time.Now().UTC()})
 
 	llm := &mockLLMClient{}
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 
 	summarized, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
@@ -104,7 +113,7 @@ func TestContextCompressor_Compact_LLMError(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 	_, err := compressor.Compact(ctx, store, sess.ID, 1)
 	if err == nil {
 		t.Fatal("expected error for LLM failure")
@@ -137,7 +146,7 @@ func TestContextCompressor_Compact_SummaryBeforeRecent(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 	_, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -178,7 +187,7 @@ func TestContextCompressor_Compact_TokenGate_NoCompaction(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 10000, 0)
+	compressor := mustNewContextCompressor(t, llm, 10000, 0)
 	summarized, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -218,7 +227,7 @@ func TestContextCompressor_Compact_TokenGate_DoesCompact(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 1000, 0)
+	compressor := mustNewContextCompressor(t, llm, 1000, 0)
 	summarized, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -260,7 +269,7 @@ func TestContextCompressor_Compact_BoundedInput(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 2000, 0)
+	compressor := mustNewContextCompressor(t, llm, 2000, 0)
 	_, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -291,7 +300,7 @@ func TestContextCompressor_Compact_Timeout(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 1000, 30*time.Second)
+	compressor := mustNewContextCompressor(t, llm, 1000, 30*time.Second)
 	_, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -319,7 +328,7 @@ func TestContextCompressor_Compact_EmptySummary(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 500, 0)
+	compressor := mustNewContextCompressor(t, llm, 500, 0)
 	_, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err == nil {
 		t.Fatal("expected error for empty summary")
@@ -363,7 +372,7 @@ func TestContextCompressor_Compact_PreservesLeadingSystemPrompt(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 	summarized, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -423,7 +432,7 @@ func TestContextCompressor_Compact_IncludesToolCallsAndResultsInSummary(t *testi
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 	_, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -465,7 +474,7 @@ func TestContextCompressor_Compact_PairAwareBoundary(t *testing.T) {
 	// keepRecent=2 would place the raw boundary at index 4 (the tool result),
 	// splitting the assistant/tool-call pair. The pair-aware boundary must
 	// walk backwards to keep the pair intact.
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 	summarized, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -534,7 +543,7 @@ func TestContextCompressor_Compact_PairAwareBoundary_MultipleToolCalls(t *testin
 	// keepRecent=2 would place the raw boundary at index 4 (inside the tool
 	// results). The pair-aware boundary must walk back before the assistant
 	// message that emitted the tool calls.
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 	summarized, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -618,7 +627,7 @@ func TestContextCompressor_Compact_SummaryTimestampCollisions(t *testing.T) {
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 	_, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -683,7 +692,7 @@ func TestContextCompressor_Compact_SummaryTimestampBetweenLeadingAndRecent(t *te
 		},
 	}
 
-	compressor := NewContextCompressor(llm, 0, 0)
+	compressor := mustNewContextCompressor(t, llm, 0, 0)
 	_, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
@@ -770,7 +779,7 @@ func TestContextCompressor_Compact_NilLLM(t *testing.T) {
 	store := newMockStore()
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
 
-	compressor := NewContextCompressor(nil, 1000, 0)
+	compressor := mustNewContextCompressor(t, nil, 1000, 0)
 	_, err := compressor.Compact(ctx, store, sess.ID, 2)
 	if err == nil {
 		t.Fatal("expected error for nil LLM")
@@ -800,7 +809,7 @@ func TestContextCompressor_SetTokenEstimator(t *testing.T) {
 
 	// With contextWindow=1000 and an estimator that reports 100 tokens per
 	// message, the threshold (500) is exceeded and compaction should run.
-	compressor := NewContextCompressor(llm, 1000, 0)
+	compressor := mustNewContextCompressor(t, llm, 1000, 0)
 	compressor.SetTokenEstimator(&scalingEstimator{factor: 100})
 
 	summarized, err := compressor.Compact(ctx, store, sess.ID, 2)

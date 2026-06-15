@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -187,8 +188,8 @@ func (m *Message) UpdateMsg(msg tea.Msg) tea.Cmd {
 
 // View implements tea.Model.
 func (m *Message) View() tea.View {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	switch m.Type {
 	case TypeUser:
@@ -416,12 +417,11 @@ func wordWrap(s string, width int) string {
 	lines := strings.Split(s, "\n")
 	var out []string
 	for _, line := range lines {
-		runes := []rune(line)
-		for len(runes) > width {
-			out = append(out, string(runes[:width]))
-			runes = runes[width:]
+		for ansi.StringWidth(line) > width {
+			out = append(out, ansi.Cut(line, 0, width))
+			line = ansi.Cut(line, width, ansi.StringWidth(line))
 		}
-		out = append(out, string(runes))
+		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
 }

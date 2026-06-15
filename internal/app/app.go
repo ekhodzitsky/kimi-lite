@@ -59,6 +59,7 @@ type App struct {
 	skillsContent         string
 	resolvedModel         string
 	newMCPClientForServer func(api.MCPServerConfig) (api.MCPClient, error)
+	protectedPaths        []string
 }
 
 // New creates a fully wired App from configuration.
@@ -92,10 +93,15 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	// Create metrics collector.
 	metrics := observability.NewCollector()
 
-	// Ensure DB directory exists
+	// Ensure DB directory exists with restrictive permissions.
 	dbDir := filepath.Dir(cfg.Session.DBPath)
 	if err := os.MkdirAll(dbDir, 0700); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
+	}
+	if info, err := os.Stat(dbDir); err == nil && info.Mode().Perm() != 0700 {
+		if err := os.Chmod(dbDir, 0700); err != nil {
+			return nil, fmt.Errorf("restrict db directory permissions: %w", err)
+		}
 	}
 
 	// Open SQLite store
@@ -124,7 +130,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	// Determine sandbox root (current working directory)
 	sandboxRoot, err := osGetwd()
 	if err != nil {
-		sandboxRoot = "."
+		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
 	// Create web searcher if configured.
@@ -153,6 +159,7 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	// Create built-in tool executor (nil httpClient forces secure default).
 	// Protect the app's own config and DB paths regardless of sandbox.
 	configPath := filepath.Join(configDir, "config.toml")
+	a.protectedPaths = []string{configPath, cfg.Session.DBPath}
 	builtInExec, err := core.NewBuiltInToolExecutor(core.ToolExecutorConfig{
 		ShellTimeout:   cfg.Behavior.ShellTimeout,
 		SandboxRoot:    sandboxRoot,
@@ -252,12 +259,16 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		}
 	}
 
-	// Create approval gate (start in Auto mode)
+	// Create approval gate (start in Auto mode). The gate intentionally does not
+	// receive protectedPaths: it makes auto-approval decisions based on tool
+	// identity, permission rules, and risk level, while path-level enforcement
+	// lives in the tool executor and diff preview components.
 	approval := core.NewApprovalGate(core.ModeAuto, validatedAutoApprove, isReadOnly, cfg.Permission.Rules)
 
 	// Attach risk-aware scoring so destructive or escaping operations are not
 	// silently auto-approved.
 	riskEval := core.NewRiskEvaluator(cfg.Permission.RiskRules, sandboxRoot)
+	riskEval.SetProtectedPaths(a.protectedPaths)
 	approval.SetRiskEvaluator(riskEval, cfg.Permission.RiskThreshold)
 
 	// Create session manager
@@ -266,14 +277,21 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 	sessionMgr.SetMetricsCollector(metrics)
 
 	// Create turn manager
-	turnMgr := core.NewTurnManager(llmClient, toolExec, approval, st, &configProvider{cfg: cfg})
+	turnMgr, err := core.NewTurnManager(llmClient, toolExec, approval, st, &configProvider{cfg: cfg})
+	if err != nil {
+		return nil, fmt.Errorf("create turn manager: %w", err)
+	}
 	turnMgr.SetHookRunner(hookRunner)
 	turnMgr.SetMetricsCollector(metrics)
 	turnMgr.SetSandboxRoot(sandboxRoot)
+	turnMgr.SetProtectedPaths(a.protectedPaths)
 
 	// Create context compressor
 	modelInfo := llm.LookupModel(resolvedModel)
-	compressor := core.NewContextCompressor(llmClient, modelInfo.ContextWindow, cfg.LLM.Timeout)
+	compressor, err := core.NewContextCompressor(llmClient, modelInfo.ContextWindow, cfg.LLM.Timeout)
+	if err != nil {
+		return nil, fmt.Errorf("create context compressor: %w", err)
+	}
 	compressor.SetTokenEstimator(core.NewHeuristicTokenEstimator())
 
 	a.toolExecutor = toolExec
@@ -302,6 +320,9 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 
 // SetYolo sets the approval gate to yolo mode (auto-approve everything).
 func (a *App) SetYolo(yolo bool) {
+	if a == nil || a.approvalGate == nil {
+		return
+	}
 	if yolo {
 		a.approvalGate.SetMode(core.ModeYolo)
 	}
@@ -310,6 +331,9 @@ func (a *App) SetYolo(yolo bool) {
 // SetAutoApprove adds the named tools to the approval gate's session-scope
 // auto-approve list.
 func (a *App) SetAutoApprove(tools []string) {
+	if a == nil || a.approvalGate == nil {
+		return
+	}
 	for _, name := range tools {
 		a.approvalGate.AddAutoApprove(name)
 	}
@@ -317,6 +341,9 @@ func (a *App) SetAutoApprove(tools []string) {
 
 // setApprovalMode validates and applies an approval mode from the TUI.
 func (a *App) setApprovalMode(mode int) {
+	if a == nil || a.approvalGate == nil {
+		return
+	}
 	switch core.ApprovalMode(mode) {
 	case core.ModeManual, core.ModeAuto, core.ModeYolo:
 		a.approvalGate.SetMode(core.ApprovalMode(mode))
@@ -368,6 +395,9 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	model.SetCompressor(a.compressor)
 	model.SetMCPClient(a.mcpClient)
 	model.SetStore(a.store)
+	// Diff previews in the TUI must block the same protected paths as the
+	// built-in tool executor (config file and session database).
+	model.SetProtectedPaths(a.protectedPaths)
 
 	// Wire approval callbacks
 	model.SetAutoApproveSetter(func(name string) {
@@ -388,7 +418,11 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	// dir code path is exercised in production. Tests may pre-wire a fake
 	// provider via the exported field.
 	if a.gitProvider == nil {
-		a.gitProvider = git.NewProvider(session.Path)
+		if a.cfg.GitTimeout > 0 {
+			a.gitProvider = git.NewProviderWithTimeout(session.Path, a.cfg.GitTimeout)
+		} else {
+			a.gitProvider = git.NewProvider(session.Path)
+		}
 	}
 	model.SetGitProvider(a.gitProvider)
 
@@ -548,7 +582,7 @@ func (a *App) Close() error {
 	}
 
 	// Wait for in-flight turns with timeout. If turns are still running,
-	// do not close resources they may still be using.
+	// record the timeout but continue closing resources to avoid leaking them.
 	if a.turnManager != nil {
 		done := make(chan struct{})
 		go func() {
@@ -558,7 +592,7 @@ func (a *App) Close() error {
 		select {
 		case <-done:
 		case <-time.After(turnShutdownTimeout):
-			return errors.Join(append(errs, fmt.Errorf("turn shutdown timeout"))...)
+			errs = append(errs, fmt.Errorf("turn shutdown timeout"))
 		}
 	}
 

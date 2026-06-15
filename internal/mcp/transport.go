@@ -120,8 +120,10 @@ func (e *JSONRPCError) Error() string {
 	return fmt.Sprintf("JSON-RPC error %d: %s", e.Code, e.Message)
 }
 
-// boundedBuffer is a fixed-size ring buffer for capturing stderr.
+// boundedBuffer is a fixed-size ring buffer for capturing stderr. It is safe
+// for concurrent writes and String calls.
 type boundedBuffer struct {
+	mu  sync.Mutex
 	buf []byte
 	n   int
 }
@@ -131,6 +133,8 @@ func newBoundedBuffer(cap int) *boundedBuffer {
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	for _, c := range p {
 		if len(b.buf) < cap(b.buf) {
 			b.buf = append(b.buf, c)
@@ -143,6 +147,8 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 }
 
 func (b *boundedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if len(b.buf) < cap(b.buf) {
 		return string(b.buf)
 	}
@@ -260,13 +266,16 @@ func NewStdioTransport(command string, args ...string) *StdioTransport {
 		newCmd:       exec.Command,
 		logger:       slog.Default(),
 		closeTimeout: 5 * time.Second,
-		cmdWaitCh:    make(chan struct{}),
 	}
 }
 
 // SetEnv sets extra environment variables for the subprocess.
 func (t *StdioTransport) SetEnv(env map[string]string) {
-	t.env = env
+	copied := make(map[string]string, len(env))
+	for k, v := range env {
+		copied[k] = v
+	}
+	t.env = copied
 }
 
 // SetCWD sets the working directory for the subprocess.
@@ -341,7 +350,7 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 		}()
 	})
 
-	// Non-blocking check: if the process exits immediately, capture stderr.
+	// Non-blocking check: if the process has already exited, capture stderr.
 	select {
 	case <-t.cmdWaitCh:
 		if t.cmdErr != nil {
@@ -349,7 +358,7 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 			_ = t.Close()
 			return fmt.Errorf("mcp-guard exited immediately: %w (stderr: %s)", t.cmdErr, stderrBuf.String())
 		}
-	case <-time.After(50 * time.Millisecond):
+	default:
 		// Process is still running, proceed.
 	}
 
@@ -390,7 +399,15 @@ func (t *StdioTransport) readLoop(r io.Reader) {
 			}
 			if isClosedError(err) {
 				t.mu.Lock()
-				t.readErr = fmt.Errorf("mcp transport: subprocess closed connection")
+				stderr := ""
+				if t.stderr != nil {
+					stderr = t.stderr.String()
+				}
+				if stderr != "" {
+					t.readErr = fmt.Errorf("mcp transport: subprocess closed connection (stderr: %s)", stderr)
+				} else {
+					t.readErr = fmt.Errorf("mcp transport: subprocess closed connection")
+				}
 				for id, ch := range t.pending {
 					ch <- &JSONRPCResponse{
 						ID: id,
@@ -621,16 +638,9 @@ func (t *StdioTransport) Close() error {
 	waitCh := t.cmdWaitCh
 	t.mu.Unlock()
 
-	t.writeMu.Lock()
-	if stdin != nil {
-		_ = stdin.Close() // ignore close errors on cleanup
-	}
-	t.writeMu.Unlock()
-
-	// Wait for any in-flight stdin writers to finish before reaping the
-	// process so they do not write to a closed pipe.
-	t.writeWg.Wait()
-
+	// Start the kill timer before acquiring writeMu so a blocked writer does
+	// not prevent us from terminating the subprocess.
+	var timer *time.Timer
 	if cmd != nil && cmd.Process != nil && waitCh != nil {
 		// Ensure the wait goroutine is started (it may have been started in Connect).
 		t.cmdWaited.Do(func() {
@@ -644,11 +654,26 @@ func (t *StdioTransport) Close() error {
 		if grace <= 0 {
 			grace = 5 * time.Second
 		}
-		timer := time.AfterFunc(grace, func() {
+		timer = time.AfterFunc(grace, func() {
 			_ = cmd.Process.Kill() // ignore kill errors on cleanup
 		})
+	}
+
+	t.writeMu.Lock()
+	if stdin != nil {
+		_ = stdin.Close() // ignore close errors on cleanup
+	}
+	t.writeMu.Unlock()
+
+	// Wait for any in-flight stdin writers to finish before reaping the
+	// process so they do not write to a closed pipe.
+	t.writeWg.Wait()
+
+	if waitCh != nil {
 		<-waitCh
-		timer.Stop()
+		if timer != nil {
+			timer.Stop()
+		}
 	}
 
 	t.wg.Wait()

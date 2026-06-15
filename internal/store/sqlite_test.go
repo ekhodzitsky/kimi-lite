@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -190,6 +191,17 @@ func TestSQLite_UpdateSession(t *testing.T) {
 	}
 	if !got.UpdatedAt.After(oldUpdated) {
 		t.Error("expected updated_at to change")
+	}
+}
+
+func TestSQLite_UpdateSession_EmptyID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess := &api.Session{ID: "", Name: "name", Path: "/tmp/proj"}
+	if err := s.UpdateSession(ctx, sess); err == nil {
+		t.Fatal("expected error for empty session ID")
 	}
 }
 
@@ -457,6 +469,7 @@ func TestSQLite_ClearMessages(t *testing.T) {
 	_ = s.AppendMessage(ctx, sess.ID, api.Message{ID: "m1", Role: api.RoleUser, Content: "hi", CreatedAt: time.Now().UTC()})
 	_ = s.AppendMessage(ctx, sess.ID, api.Message{ID: "m2", Role: api.RoleAssistant, Content: "hello", CreatedAt: time.Now().UTC()})
 
+	time.Sleep(10 * time.Millisecond)
 	if err := s.ClearMessages(ctx, sess.ID); err != nil {
 		t.Fatalf("clear messages: %v", err)
 	}
@@ -464,6 +477,14 @@ func TestSQLite_ClearMessages(t *testing.T) {
 	msgs, _ := s.GetMessages(ctx, sess.ID, 0)
 	if len(msgs) != 0 {
 		t.Errorf("expected 0 messages, got %d", len(msgs))
+	}
+
+	got, err := s.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if !got.UpdatedAt.After(sess.UpdatedAt) {
+		t.Errorf("updated_at did not advance: %v -> %v", sess.UpdatedAt, got.UpdatedAt)
 	}
 }
 
@@ -794,7 +815,7 @@ func TestSQLiteDSN(t *testing.T) {
 		{
 			name:   "memory",
 			dbPath: ":memory:",
-			want:   "file:kimi-mem?mode=memory&cache=shared&_pragma=busy_timeout%285000%29&_pragma=foreign_keys%281%29",
+			want:   "file:kimi-mem-",
 		},
 		{
 			name:   "absolute path",
@@ -816,14 +837,39 @@ func TestSQLiteDSN(t *testing.T) {
 			dbPath: "/tmp/path?query.db",
 			want:   "file:///tmp/path%3Fquery.db?_pragma=busy_timeout%285000%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
 		},
+		{
+			name:   "windows path separators normalized",
+			dbPath: `C:\Users\test\data.db`,
+			want:   "file:///C:/Users/test/data.db?_pragma=busy_timeout%285000%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_pragma=synchronous%28NORMAL%29",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := sqliteDSN(tt.dbPath)
-			if got != tt.want {
-				t.Errorf("sqliteDSN(%q) = %q, want %q", tt.dbPath, got, tt.want)
+			switch tt.name {
+			case "memory":
+				if !strings.HasPrefix(got, tt.want) {
+					t.Errorf("sqliteDSN(%q) = %q, want prefix %q", tt.dbPath, got, tt.want)
+				}
+				if !strings.Contains(got, "mode=memory") || !strings.Contains(got, "cache=shared") {
+					t.Errorf("sqliteDSN(%q) = %q, want mode=memory and cache=shared", tt.dbPath, got)
+				}
+			case "windows path separators normalized":
+				if runtime.GOOS != "windows" {
+					// filepath.ToSlash only converts OS separators; skip exact
+					// assertion on platforms where backslash is a regular filename
+					// character.
+					return
+				}
+				if got != tt.want {
+					t.Errorf("sqliteDSN(%q) = %q, want %q", tt.dbPath, got, tt.want)
+				}
+			default:
+				if got != tt.want {
+					t.Errorf("sqliteDSN(%q) = %q, want %q", tt.dbPath, got, tt.want)
+				}
 			}
 		})
 	}
@@ -1049,6 +1095,47 @@ func TestSQLite_ListSessions_Ordering(t *testing.T) {
 	}
 }
 
+func TestSQLite_DeterministicOrderingByID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+	now := time.Now().UTC()
+
+	// Messages with identical created_at must order by id.
+	m2 := api.Message{ID: "b", Role: api.RoleUser, Content: "b", CreatedAt: now}
+	m1 := api.Message{ID: "a", Role: api.RoleUser, Content: "a", CreatedAt: now}
+	_ = s.AppendMessage(ctx, sess.ID, m2)
+	_ = s.AppendMessage(ctx, sess.ID, m1)
+	msgs, err := s.GetMessages(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("get messages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].ID != "a" || msgs[1].ID != "b" {
+		t.Errorf("message order = %v, want [a b]", []string{msgs[0].ID, msgs[1].ID})
+	}
+
+	// Turns with identical started_at must order by id.
+	t2 := api.Turn{ID: "z", State: api.TurnIdle, StartedAt: now}
+	t1 := api.Turn{ID: "m", State: api.TurnIdle, StartedAt: now}
+	_ = s.SaveTurn(ctx, sess.ID, t2)
+	_ = s.SaveTurn(ctx, sess.ID, t1)
+	turns, err := s.GetTurns(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("get turns: %v", err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("expected 2 turns, got %d", len(turns))
+	}
+	if turns[0].ID != "m" || turns[1].ID != "z" {
+		t.Errorf("turn order = %v, want [m z]", []string{turns[0].ID, turns[1].ID})
+	}
+}
+
 func TestSQLite_TurnErrorField(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1181,7 +1268,7 @@ func TestSQLite_GetMessages_NoLimit(t *testing.T) {
 	s := newTestStore(t)
 	sess, _ := s.CreateSession(ctx, "/tmp/proj")
 
-	// Insert more than the old default cap of 1000.
+	// Insert more than the safe default cap of 1000.
 	for i := 0; i < 1005; i++ {
 		msg := api.Message{
 			ID:        fmt.Sprintf("msg-%d", i),
@@ -1198,14 +1285,23 @@ func TestSQLite_GetMessages_NoLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get messages: %v", err)
 	}
-	if len(msgs) != 1005 {
-		t.Fatalf("expected 1005 messages, got %d", len(msgs))
+	if len(msgs) != 1000 {
+		t.Fatalf("expected 1000 messages (default limit), got %d", len(msgs))
 	}
 	// Verify chronological order.
 	for i := 1; i < len(msgs); i++ {
 		if msgs[i].CreatedAt.Before(msgs[i-1].CreatedAt) {
 			t.Errorf("messages out of order at index %d", i)
 		}
+	}
+
+	// Explicit large limit should return all messages.
+	msgs, err = s.GetMessages(ctx, sess.ID, 10000)
+	if err != nil {
+		t.Fatalf("get messages with large limit: %v", err)
+	}
+	if len(msgs) != 1005 {
+		t.Fatalf("expected 1005 messages with explicit limit, got %d", len(msgs))
 	}
 }
 
@@ -1423,62 +1519,69 @@ func TestSQLite_ReplaceMessages_BumpsUpdatedAt(t *testing.T) {
 
 func TestSQLite_MigrateTurnsStateColumn(t *testing.T) {
 	t.Parallel()
-	dbPath := filepath.Join(t.TempDir(), "migrate.db")
 
-	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Fatalf("ping sqlite: %v", err)
-	}
-	defer db.Close()
+	run := func(t *testing.T, stateType string) {
+		t.Helper()
+		dbPath := filepath.Join(t.TempDir(), "migrate.db")
 
-	stmts := []string{
-		`CREATE TABLE sessions (id TEXT PRIMARY KEY);`,
-		`CREATE TABLE turns (
-			id TEXT NOT NULL,
-			session_id TEXT NOT NULL,
-			state INTEGER NOT NULL,
-			input TEXT NOT NULL DEFAULT '',
-			response TEXT NOT NULL DEFAULT '',
-			tool_calls TEXT,
-			results TEXT,
-			error TEXT,
-			started_at DATETIME NOT NULL,
-			ended_at DATETIME,
-			PRIMARY KEY (id, session_id),
-			FOREIGN KEY (session_id) REFERENCES sessions(id)
-		);`,
-		`INSERT INTO sessions (id) VALUES ('s1');`,
-		`INSERT INTO turns (id, session_id, state, input, started_at)
-		 VALUES ('t1', 's1', 1, 'hello', '2024-01-01 00:00:00');`,
-	}
-	for i, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("exec stmt %d: %v", i, err)
+		db, err := sql.Open("sqlite", sqliteDSN(dbPath))
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		if err := db.Ping(); err != nil {
+			t.Fatalf("ping sqlite: %v", err)
+		}
+		defer db.Close()
+
+		stmts := []string{
+			`CREATE TABLE sessions (id TEXT PRIMARY KEY);`,
+			fmt.Sprintf(`CREATE TABLE turns (
+				id TEXT NOT NULL,
+				session_id TEXT NOT NULL,
+				state %s NOT NULL,
+				input TEXT NOT NULL DEFAULT '',
+				response TEXT NOT NULL DEFAULT '',
+				tool_calls TEXT,
+				results TEXT,
+				error TEXT,
+				started_at DATETIME NOT NULL,
+				ended_at DATETIME,
+				PRIMARY KEY (id, session_id),
+				FOREIGN KEY (session_id) REFERENCES sessions(id)
+			);`, stateType),
+			`INSERT INTO sessions (id) VALUES ('s1');`,
+			`INSERT INTO turns (id, session_id, state, input, started_at)
+			 VALUES ('t1', 's1', 1, 'hello', '2024-01-01 00:00:00');`,
+		}
+		for i, stmt := range stmts {
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatalf("exec stmt %d: %v", i, err)
+			}
+		}
+
+		if err := migrateTurnsStateColumn(db); err != nil {
+			t.Fatalf("migrate turns state column: %v", err)
+		}
+
+		var typ string
+		if err := db.QueryRow(`SELECT type FROM pragma_table_info('turns') WHERE name = 'state'`).Scan(&typ); err != nil {
+			t.Fatalf("read state column type: %v", err)
+		}
+		if typ != "TEXT" {
+			t.Errorf("state column type = %q, want TEXT", typ)
+		}
+
+		var stateStr string
+		if err := db.QueryRow(`SELECT state FROM turns WHERE id = 't1'`).Scan(&stateStr); err != nil {
+			t.Fatalf("read migrated state: %v", err)
+		}
+		if stateStr != "1" {
+			t.Errorf("state value = %q, want %q", stateStr, "1")
 		}
 	}
 
-	if err := migrateTurnsStateColumn(db); err != nil {
-		t.Fatalf("migrate turns state column: %v", err)
-	}
-
-	var typ string
-	if err := db.QueryRow(`SELECT type FROM pragma_table_info('turns') WHERE name = 'state'`).Scan(&typ); err != nil {
-		t.Fatalf("read state column type: %v", err)
-	}
-	if typ != "TEXT" {
-		t.Errorf("state column type = %q, want TEXT", typ)
-	}
-
-	var stateStr string
-	if err := db.QueryRow(`SELECT state FROM turns WHERE id = 't1'`).Scan(&stateStr); err != nil {
-		t.Fatalf("read migrated state: %v", err)
-	}
-	if stateStr != "1" {
-		t.Errorf("state value = %q, want %q", stateStr, "1")
-	}
+	t.Run("INTEGER", func(t *testing.T) { t.Parallel(); run(t, "INTEGER") })
+	t.Run("INT", func(t *testing.T) { t.Parallel(); run(t, "INT") })
 }
 
 func TestSQLite_Close_NilSafe(t *testing.T) {
@@ -1719,6 +1822,59 @@ func TestRunMigrations_Errors(t *testing.T) {
 			if err := db.QueryRow(fmt.Sprintf(`SELECT count(*) FROM %s`, table)).Scan(&count); err != nil {
 				t.Errorf("table %s missing: %v", table, err)
 			}
+		}
+	})
+}
+
+func TestRunMigrations_VersionValidation(t *testing.T) {
+	t.Parallel()
+
+	writeMigration := func(t *testing.T, dir, name, sql string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(sql), 0644); err != nil {
+			t.Fatalf("write migration %s: %v", name, err)
+		}
+	}
+
+	t.Run("gap detected", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		tmpDir := t.TempDir()
+		migrationsDir := filepath.Join(tmpDir, "migrations")
+		if err := os.MkdirAll(migrationsDir, 0755); err != nil {
+			t.Fatalf("create migrations dir: %v", err)
+		}
+		writeMigration(t, migrationsDir, "001_first.sql", "SELECT 1;")
+		writeMigration(t, migrationsDir, "003_third.sql", "SELECT 3;")
+
+		if err := runMigrations(db, os.DirFS(migrationsDir), "."); err == nil {
+			t.Fatal("expected error for migration gap")
+		}
+	})
+
+	t.Run("duplicate detected", func(t *testing.T) {
+		t.Parallel()
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		defer db.Close()
+
+		tmpDir := t.TempDir()
+		migrationsDir := filepath.Join(tmpDir, "migrations")
+		if err := os.MkdirAll(migrationsDir, 0755); err != nil {
+			t.Fatalf("create migrations dir: %v", err)
+		}
+		writeMigration(t, migrationsDir, "001_first.sql", "SELECT 1;")
+		writeMigration(t, migrationsDir, "001_second.sql", "SELECT 2;")
+
+		if err := runMigrations(db, os.DirFS(migrationsDir), "."); err == nil {
+			t.Fatal("expected error for duplicate migration version")
 		}
 	})
 }
@@ -2127,6 +2283,46 @@ func TestSQLite_GetTurns_Limit(t *testing.T) {
 	}
 }
 
+func TestSQLite_DefaultLimits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+
+	// GetTurns with limit <= 0 defaults to 1000.
+	for i := 0; i < 1005; i++ {
+		turn := api.Turn{
+			ID:        fmt.Sprintf("turn-%d", i),
+			State:     api.TurnIdle,
+			StartedAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond),
+		}
+		if err := s.SaveTurn(ctx, sess.ID, turn); err != nil {
+			t.Fatalf("save turn %d: %v", i, err)
+		}
+	}
+	turns, err := s.GetTurns(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("get turns: %v", err)
+	}
+	if len(turns) != 1000 {
+		t.Fatalf("expected 1000 turns (default limit), got %d", len(turns))
+	}
+
+	// ListSessions with limit <= 0 defaults to 10000.
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 10005; i++ {
+		createSessionAt(t, s, "/many", base, base)
+	}
+	sessions, err := s.ListSessions(ctx, "/many", 0)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 10000 {
+		t.Fatalf("expected 10000 sessions (default limit), got %d", len(sessions))
+	}
+}
+
 func TestSQLite_GetMessages_CorruptToolCalls(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2173,6 +2369,23 @@ func TestSQLite_GetTurns_CorruptJSON(t *testing.T) {
 
 	if _, err := s.GetTurns(ctx, sess.ID, 0); err == nil {
 		t.Fatal("expected error for corrupt results JSON")
+	}
+}
+
+func TestSQLite_GetTurns_InvalidState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO turns (id, session_id, state, input, response, tool_calls, results, error, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"bad-state", sess.ID, "not-a-state", "input", "response", "null", "null", "", time.Now().UTC(), nil); err != nil {
+		t.Fatalf("insert invalid state turn: %v", err)
+	}
+
+	if _, err := s.GetTurns(ctx, sess.ID, 0); err == nil {
+		t.Fatal("expected error for invalid turn state")
 	}
 }
 
@@ -2235,6 +2448,20 @@ func TestSQLite_DeleteSession_Error(t *testing.T) {
 
 	if err := s.DeleteSession(ctx, ""); err == nil {
 		t.Error("expected error for empty session ID")
+	}
+}
+
+func TestSQLite_DeleteSession_Nonexistent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	err := s.DeleteSession(ctx, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error deleting nonexistent session")
+	}
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %T: %v", err, err)
 	}
 }
 
@@ -2366,12 +2593,13 @@ func TestSQLite_UpdateSession_Nonexistent(t *testing.T) {
 		Name: "name",
 		Path: "/tmp/proj",
 	}
-	if err := s.UpdateSession(ctx, sess); err != nil {
-		t.Fatalf("update nonexistent session: %v", err)
+	err := s.UpdateSession(ctx, sess)
+	if err == nil {
+		t.Fatal("expected error updating nonexistent session")
 	}
-
-	// Verify it was inserted (SQLite UPDATE without WHERE match is no-op but no error).
-	// The important part is that UpdateSession did not return an error.
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %T: %v", err, err)
+	}
 }
 
 func TestSQLite_ListSessions_EmptyPathError(t *testing.T) {

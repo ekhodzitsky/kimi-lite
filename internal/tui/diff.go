@@ -11,11 +11,11 @@ func unifiedDiff(filename, oldContent, newContent string) string {
 }
 
 // computeFileDiff reads the current file and computes a diff against the proposed content.
-func computeFileDiff(path string, proposed []byte, sandboxRoot string) string {
-	return core.ComputeFileDiff(path, proposed, sandboxRoot, nil)
+func computeFileDiff(path string, proposed []byte, sandboxRoot string, protectedPaths []string) (string, error) {
+	return core.ComputeFileDiff(path, proposed, sandboxRoot, protectedPaths)
 }
 
 // toolCallDiff returns a diff preview for pending write_file or str_replace_file calls.
-func toolCallDiff(call api.ToolCall, sandboxRoot string) string {
-	return core.ToolCallDiff(call, sandboxRoot, nil)
+func toolCallDiff(call api.ToolCall, sandboxRoot string, protectedPaths []string) (string, error) {
+	return core.ToolCallDiff(call, sandboxRoot, protectedPaths)
 }

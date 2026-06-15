@@ -213,8 +213,8 @@ approve_diff = "d"
 	assertNotEmpty("keybindings.approve_always", cfg.Keybindings.ApproveAlways)
 	assertNotEmpty("keybindings.approve_diff", cfg.Keybindings.ApproveDiff)
 
-	// MCPServer env/cwd. Viper lower-cases map keys.
-	if got := srv.Env["secret"]; got != "mcp-secret-value" {
+	// MCPServer env/cwd.
+	if got := srv.Env["SECRET"]; got != "mcp-secret-value" {
 		t.Errorf("expected mcp_servers.test.env.SECRET = %q, got %q", "mcp-secret-value", got)
 	}
 	wantCWD := filepath.Join(tmpDir, "mcp")

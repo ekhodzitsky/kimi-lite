@@ -386,3 +386,40 @@ func TestToolExecutor_Execute(t *testing.T) {
 		}
 	})
 }
+
+
+func TestToolExecutor_Execute_EmptyArguments(t *testing.T) {
+	t.Parallel()
+
+	var calledName string
+	var calledArgs map[string]any
+	client := &mockMCPClient{
+		callToolFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
+			calledName = name
+			calledArgs = args
+			return "done", nil
+		},
+	}
+	exec := NewToolExecutor(client)
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call-empty",
+		Name:      "mcp_hello",
+		Arguments: "",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calledName != "hello" {
+		t.Errorf("CallTool name = %q, want hello", calledName)
+	}
+	if calledArgs == nil {
+		t.Fatal("expected empty map, got nil")
+	}
+	if len(calledArgs) != 0 {
+		t.Errorf("expected empty args, got %+v", calledArgs)
+	}
+	if result.Error != "" {
+		t.Errorf("result.Error = %q, want empty", result.Error)
+	}
+}

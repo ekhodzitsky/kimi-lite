@@ -581,6 +581,22 @@ func TestClient_Connect_ProtocolVersion(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "older protocol version accepted",
+			transport: &mockTransport{
+				sendFunc: func(ctx context.Context, method string, params any) (*JSONRPCResponse, error) {
+					if method == "initialize" {
+						return &JSONRPCResponse{
+							Result: mustMarshal(t, map[string]any{
+								"protocolVersion": "2024-10-01",
+							}),
+						}, nil
+					}
+					return &JSONRPCResponse{}, nil
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

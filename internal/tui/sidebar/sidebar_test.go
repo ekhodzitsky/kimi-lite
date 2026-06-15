@@ -474,18 +474,18 @@ func TestVisiblePaths(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	paths := m.VisiblePaths()
+	paths := m.RefreshVisiblePaths()
 	if len(paths) == 0 {
-		t.Fatal("VisiblePaths() should not be empty")
+		t.Fatal("RefreshVisiblePaths() should not be empty")
 	}
 	if paths[0] != tmpDir {
-		t.Errorf("VisiblePaths()[0] = %q, want %q", paths[0], tmpDir)
+		t.Errorf("RefreshVisiblePaths()[0] = %q, want %q", paths[0], tmpDir)
 	}
 
 	m.flatDirty = true
-	_ = m.VisiblePaths()
+	_ = m.RefreshVisiblePaths()
 	if m.flatDirty {
-		t.Error("VisiblePaths() should rebuild flat list")
+		t.Error("RefreshVisiblePaths() should rebuild flat list")
 	}
 }
 
@@ -794,18 +794,22 @@ func TestHandleClick(t *testing.T) {
 
 	// Click on title line is ignored.
 	before := m.cursor
-	m.handleClick(0)
+	if cmd := m.handleClick(0); cmd != nil {
+		t.Errorf("click on title should return nil cmd, got %v", cmd)
+	}
 	if m.cursor != before {
 		t.Errorf("click on title should not change cursor, got %d", m.cursor)
 	}
 
 	// Click beyond visible rows is ignored.
-	m.handleClick(1000)
+	if cmd := m.handleClick(1000); cmd != nil {
+		t.Errorf("click beyond rows should return nil cmd, got %v", cmd)
+	}
 	if m.cursor != before {
 		t.Errorf("click beyond rows should not change cursor, got %d", m.cursor)
 	}
 
-	// Click a file selects it.
+	// Click a file selects it and emits SelectFileMsg.
 	fileIdx := -1
 	for i, n := range m.flat {
 		if n.Name == "file.txt" {
@@ -816,7 +820,7 @@ func TestHandleClick(t *testing.T) {
 	if fileIdx < 0 {
 		t.Fatal("file.txt not found in flat list")
 	}
-	m.handleClick(fileIdx + 1) // +1 for title line
+	cmd := m.handleClick(fileIdx + 1) // +1 for title line
 	if m.cursor != fileIdx {
 		t.Errorf("cursor = %d, want %d", m.cursor, fileIdx)
 	}
@@ -825,6 +829,14 @@ func TestHandleClick(t *testing.T) {
 	}
 	if !m.flat[fileIdx].Selected {
 		t.Error("file node should be selected after click")
+	}
+	if cmd == nil {
+		t.Fatal("click on file should return a command")
+	}
+	if sf, ok := cmd().(SelectFileMsg); !ok {
+		t.Errorf("expected SelectFileMsg, got %T", cmd())
+	} else if sf.Path != m.flat[fileIdx].Path {
+		t.Errorf("SelectFileMsg.Path = %q, want %q", sf.Path, m.flat[fileIdx].Path)
 	}
 }
 

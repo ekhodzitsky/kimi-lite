@@ -2,6 +2,8 @@
 package llm
 
 import (
+	"sort"
+
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -40,12 +42,16 @@ func modelInfo(name string, m modelConfig) api.ModelInfo {
 	}
 }
 
-// AllModels returns all registered model configurations.
+// AllModels returns all registered model configurations sorted by Name for
+// deterministic iteration order.
 func AllModels() []api.ModelInfo {
 	models := make([]api.ModelInfo, 0, len(registry))
 	for name, m := range registry {
 		models = append(models, modelInfo(name, m))
 	}
+	sort.Slice(models, func(i, j int) bool {
+		return models[i].Name < models[j].Name
+	})
 	return models
 }
 

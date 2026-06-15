@@ -12,8 +12,9 @@ import (
 
 // IsBlockedHost reports whether a hostname or IP should be blocked to prevent
 // SSRF attacks. It covers loopback, unspecified, private, link-local,
-// CGNAT (100.64.0.0/10), and localhost names. IPv6 zone identifiers are
-// stripped before parsing.
+// multicast, broadcast, reserved, documentation, CGNAT (100.64.0.0/10), and
+// localhost names. IPv4-compatible IPv6 addresses (::127.0.0.1, ::10.0.0.1,
+// etc.) and IPv6 zone identifiers are handled before parsing.
 func IsBlockedHost(hostname string) bool {
 	if strings.EqualFold(hostname, "localhost") {
 		return true
@@ -26,16 +27,78 @@ func IsBlockedHost(hostname string) bool {
 	if ip == nil {
 		return false
 	}
-	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
 		return true
 	}
-	// CGNAT 100.64.0.0/10 is not covered by IsPrivate.
 	if ipv4 := ip.To4(); ipv4 != nil {
+		// CGNAT 100.64.0.0/10 is not covered by IsPrivate.
 		if ipv4[0] == 100 && ipv4[1] >= 64 && ipv4[1] <= 127 {
 			return true
 		}
+		// Broadcast.
+		if ipv4.Equal(net.IPv4bcast) {
+			return true
+		}
+		// Reserved for future use (240.0.0.0/4).
+		if ipv4[0] >= 240 {
+			return true
+		}
+		// IPv4 documentation ranges (TEST-NET).
+		if isDocumentationIPv4(ipv4) {
+			return true
+		}
+		// This network (0.0.0.0/8), including 0.0.0.0 which IsUnspecified already covers.
+		if ipv4[0] == 0 {
+			return true
+		}
+		return false
+	}
+	// IPv4-compatible IPv6 addresses (::/96) embed an IPv4 address. Re-check
+	// the embedded IPv4 against the blocklist.
+	if isIPv4Compatible(ip) {
+		embedded := net.IP(ip[12:16])
+		return IsBlockedHost(embedded.String())
+	}
+	// IPv6 documentation range 2001:db8::/32.
+	if isDocumentationIPv6(ip) {
+		return true
 	}
 	return false
+}
+
+// isDocumentationIPv4 reports whether ipv4 is one of the RFC 5737 documentation
+// ranges: 192.0.2.0/24, 198.51.100.0/24, or 203.0.113.0/24.
+func isDocumentationIPv4(ipv4 net.IP) bool {
+	switch {
+	case ipv4[0] == 192 && ipv4[1] == 0 && ipv4[2] == 2:
+		return true
+	case ipv4[0] == 198 && ipv4[1] == 51 && ipv4[2] == 100:
+		return true
+	case ipv4[0] == 203 && ipv4[1] == 0 && ipv4[2] == 113:
+		return true
+	}
+	return false
+}
+
+// isDocumentationIPv6 reports whether ip is the RFC 3849 documentation range
+// 2001:db8::/32.
+func isDocumentationIPv6(ip net.IP) bool {
+	return len(ip) == 16 && ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8
+}
+
+// isIPv4Compatible reports whether ip is an IPv4-compatible IPv6 address
+// (::/96) as defined in RFC 4291, excluding IPv4-mapped addresses (::ffff/96).
+func isIPv4Compatible(ip net.IP) bool {
+	if len(ip) != 16 {
+		return false
+	}
+	for i := 0; i < 12; i++ {
+		if ip[i] != 0 {
+			return false
+		}
+	}
+	return !(ip[10] == 0xff && ip[11] == 0xff)
 }
 
 // SecureTransport returns an *http.Transport with SSRF-hardened dial logic:

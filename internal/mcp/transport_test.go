@@ -261,9 +261,17 @@ exit 1
 	tr := NewStdioTransport("/bin/sh", scriptPath)
 	ctx := context.Background()
 
-	err := tr.Connect(ctx)
+	if err := tr.Connect(ctx); err != nil {
+		t.Fatalf("unexpected Connect error: %v", err)
+	}
+	defer tr.Close()
+
+	// Give the readLoop time to observe the subprocess exit and capture stderr.
+	time.Sleep(100 * time.Millisecond)
+
+	_, err := tr.Send(ctx, "ping", nil)
 	if err == nil {
-		t.Fatal("expected error for failing child")
+		t.Fatal("expected error after subprocess exit")
 	}
 	if !strings.Contains(err.Error(), "diagnostic message") {
 		t.Fatalf("expected stderr in error, got: %v", err)
@@ -1217,6 +1225,9 @@ while :; do sleep 1; done
 	}
 	defer tr.Close()
 
+	// Give the subprocess time to close stdin before we try to write.
+	time.Sleep(100 * time.Millisecond)
+
 	_, err := tr.Send(context.Background(), "ping", nil)
 	if err == nil {
 		t.Fatal("expected write error")
@@ -1245,6 +1256,9 @@ while :; do sleep 1; done
 		t.Fatalf("Connect error: %v", err)
 	}
 	defer tr.Close()
+
+	// Give the subprocess time to close stdin before we try to write.
+	time.Sleep(100 * time.Millisecond)
 
 	err := tr.Notify(context.Background(), "ping", nil)
 	if err == nil {

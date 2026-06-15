@@ -29,13 +29,16 @@ import (
 )
 
 const (
-	maxFileWriteSize        = 10 * 1024 * 1024 // 10 MB
-	maxFileReadSize         = 10 * 1024 * 1024 // 10 MB
-	maxShellOutputSize      = 1024 * 1024      // 1 MB
-	maxShellCommandLen      = 4096             // 4 KB
-	maxShellTimeoutOverride = 10 * time.Minute // absolute ceiling for per-command timeout
-	maxFetchBodySize        = 2 * 1024 * 1024  // 2 MB
-	maxGrepPatternLen       = 1024             // 1 KB
+	maxFileWriteSize        = 10 * 1024 * 1024  // 10 MB
+	maxFileReadSize         = 10 * 1024 * 1024  // 10 MB
+	maxShellOutputSize      = 1024 * 1024       // 1 MB
+	maxShellCommandLen      = 4096              // 4 KB
+	maxShellTimeoutOverride = 10 * time.Minute  // absolute ceiling for per-command timeout
+	maxFetchBodySize        = 2 * 1024 * 1024   // 2 MB
+	maxGrepPatternLen       = 1024              // 1 KB
+	maxVideoInputSize       = 500 * 1024 * 1024 // 500 MB
+	maxRegexpOperators = 100
+	maxRegexpDepth     = 10
 )
 
 var (
@@ -261,7 +264,16 @@ func secretTreePaths() []string {
 	return []string{
 		expandTilde("~/.ssh"),
 		expandTilde("~/.aws"),
+		expandTilde("~/.azure"),
 		expandTilde("~/.gnupg"),
+		expandTilde("~/.kube"),
+		expandTilde("~/.docker"),
+		expandTilde("~/.config/gcloud"),
+		expandTilde("~/.local/share/keyrings"),
+		expandTilde("~/.pki"),
+		expandTilde("~/.password-store"),
+		expandTilde("~/.terraform.d"),
+		expandTilde("~/.config/hub"),
 	}
 }
 
@@ -1039,9 +1051,65 @@ func isRootEscapeErr(err error) bool {
 	return errors.Is(err, ErrSandboxViolation) && strings.Contains(err.Error(), "escapes")
 }
 
-// compileRegexpWithContext compiles pattern in a goroutine so that a
-// context cancellation can abort catastrophically slow (ReDoS) patterns.
+// validateRegexpPattern rejects patterns that are likely to be expensive or
+// dangerous to compile or execute. Go's regexp engine is RE2-based and runs in
+// linear time, but compile-time work and memory grow with pattern complexity.
+func validateRegexpPattern(pattern string) error {
+	if len(pattern) > maxGrepPatternLen {
+		return fmt.Errorf("pattern exceeds max length of %d bytes", maxGrepPatternLen)
+	}
+	var operators, depth int
+	inClass := false
+	escape := false
+	for _, r := range pattern {
+		if escape {
+			escape = false
+			operators++
+			continue
+		}
+		if r == '\\' {
+			escape = true
+			continue
+		}
+		if inClass {
+			if r == ']' {
+				inClass = false
+			}
+			continue
+		}
+		switch r {
+		case '[':
+			inClass = true
+			operators++
+		case '(', ')', '|', '*', '+', '?', '{', '}', '^', '$', '.', ']':
+			operators++
+			if r == '(' {
+				depth++
+				if depth > maxRegexpDepth {
+					return fmt.Errorf("pattern nesting depth exceeds %d", maxRegexpDepth)
+				}
+			}
+			if r == ')' {
+				if depth > 0 {
+					depth--
+				}
+			}
+		}
+	}
+	if operators > maxRegexpOperators {
+		return fmt.Errorf("pattern complexity exceeds %d operators", maxRegexpOperators)
+	}
+	return nil
+}
+
+// compileRegexpWithContext compiles pattern in a goroutine so that context
+// cancellation can return early. The goroutine itself cannot be forcefully
+// aborted; validateRegexpPattern keeps compile time bounded by rejecting
+// excessively complex patterns.
 func compileRegexpWithContext(ctx context.Context, pattern string) (*regexp.Regexp, error) {
+	if err := validateRegexpPattern(pattern); err != nil {
+		return nil, fmt.Errorf("invalid pattern: %w", err)
+	}
 	type result struct {
 		re  *regexp.Regexp
 		err error
@@ -1056,6 +1124,25 @@ func compileRegexpWithContext(ctx context.Context, pattern string) (*regexp.Rege
 		return nil, fmt.Errorf("compile grep pattern: %w", ctx.Err())
 	case r := <-done:
 		return r.re, r.err
+	}
+}
+
+// matchStringWithContext runs re.MatchString in a goroutine so that context
+// cancellation can return early. Like compileRegexpWithContext, the goroutine
+// cannot be aborted; pattern complexity limits keep execution time bounded.
+func matchStringWithContext(ctx context.Context, re *regexp.Regexp, s string) (bool, error) {
+	type result struct {
+		matched bool
+	}
+	done := make(chan result, 1)
+	go func() {
+		done <- result{matched: re.MatchString(s)}
+	}()
+	select {
+	case <-ctx.Done():
+		return false, fmt.Errorf("grep match cancelled: %w", ctx.Err())
+	case r := <-done:
+		return r.matched, nil
 	}
 }
 
@@ -1208,6 +1295,82 @@ func (e *BuiltInToolExecutor) atomicWriteFileRoot(relTarget string, data []byte,
 	return nil
 }
 
+// openValidatedFile opens a validated path for reading. When a sandbox root is
+// configured the file is opened via os.Root; otherwise O_NOFOLLOW is used. A
+// hardlink escape check is performed when the executor has protected paths or
+// uses a sandbox root.
+func (e *BuiltInToolExecutor) openValidatedFile(path string) (*os.File, error) {
+	if e.root != nil {
+		f, err := e.root.Open(path)
+		if err != nil {
+			if isRootEscapeErr(err) {
+				return nil, fmt.Errorf("%w: path escapes sandbox", ErrSandboxViolation)
+			}
+			return nil, err
+		}
+		if err := checkFileHardlinkEscape(f); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		return f, nil
+	}
+
+	f, err := openFileNoFollow(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(e.protectedPaths) > 0 {
+		if hErr := checkFileHardlinkEscape(f); hErr != nil {
+			_ = f.Close()
+			return nil, hErr
+		}
+	}
+	return f, nil
+}
+
+// copyFileToTemp copies the opened file to a temporary file up to maxBytes.
+// The returned file is positioned at the start of the copied data. The caller
+// is responsible for closing and removing the returned file.
+func copyFileToTemp(ctx context.Context, src *os.File, maxBytes int64) (*os.File, error) {
+	info, err := src.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat file: %w", err)
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("file exceeds max size of %d bytes", maxBytes)
+	}
+
+	tmp, err := os.CreateTemp("", "kimi-lite-video-input-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp file: %w", err)
+	}
+
+	// Copy with a limit reader as a defense-in-depth bound.
+	lw := &io.LimitedReader{R: src, N: maxBytes + 1}
+	n, err := io.Copy(tmp, lw)
+	if err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return nil, fmt.Errorf("copy file: %w", err)
+	}
+	if n > maxBytes {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return nil, fmt.Errorf("file exceeds max size of %d bytes", maxBytes)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return nil, fmt.Errorf("sync temp file: %w", err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return nil, fmt.Errorf("seek temp file: %w", err)
+	}
+	return tmp, nil
+}
+
 func (e *BuiltInToolExecutor) execReadVideo(ctx context.Context, args readVideoArgs) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("read video cancelled: %w", err)
@@ -1218,7 +1381,7 @@ func (e *BuiltInToolExecutor) execReadVideo(ctx context.Context, args readVideoA
 	if e.videoExtractor == nil {
 		return "", fmt.Errorf("video extraction is not available: ffmpeg/ffprobe not found in PATH")
 	}
-	validPath, err := ValidateFilePath(args.Path, e.sandboxRoot, e.protectedPaths)
+	validPath, err := e.validatePath(args.Path)
 	if err != nil {
 		return "", fmt.Errorf("invalid path: %w", err)
 	}
@@ -1231,7 +1394,22 @@ func (e *BuiltInToolExecutor) execReadVideo(ctx context.Context, args readVideoA
 		maxFrames = 10
 	}
 
-	info, err := e.videoExtractor.Extract(ctx, validPath, maxFrames)
+	// Open the target with O_NOFOLLOW/os.Root and copy it to a temporary file
+	// before handing it to ffmpeg. This prevents TOCTOU symlink races and keeps
+	// the video extractor from operating directly on user-supplied paths.
+	src, err := e.openValidatedFile(validPath)
+	if err != nil {
+		return "", fmt.Errorf("read video: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+
+	tmp, err := copyFileToTemp(ctx, src, maxVideoInputSize)
+	if err != nil {
+		return "", fmt.Errorf("read video: %w", err)
+	}
+	defer func() { _ = tmp.Close(); _ = os.Remove(tmp.Name()) }()
+
+	info, err := e.videoExtractor.Extract(ctx, tmp.Name(), maxFrames)
 	if err != nil {
 		return "", fmt.Errorf("read video: %w", err)
 	}
@@ -1435,6 +1613,9 @@ func (e *BuiltInToolExecutor) execGlob(ctx context.Context, args globArgs) (stri
 		var valid []string
 		for _, m := range matches {
 			abs := filepath.Join(e.sandboxRoot, filepath.FromSlash(m))
+			if _, vErr := ValidateFilePath(abs, e.sandboxRoot, e.protectedPaths); vErr != nil {
+				continue // drop out-of-sandbox or protected matches
+			}
 			valid = append(valid, abs)
 		}
 		return strings.Join(valid, "\n"), nil
@@ -1482,13 +1663,16 @@ func (e *BuiltInToolExecutor) execGrep(ctx context.Context, args grepArgs) (stri
 	}
 
 	if e.root != nil {
-		return e.execGrepRoot(validPath, re)
+		return e.execGrepRoot(ctx, validPath, re)
 	}
 
 	var results []string
 	var totalBytes int
 
 	walkFn := func(filePath string, d os.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("grep: %w", err)
+		}
 		if err != nil {
 			return nil // skip inaccessible entries
 		}
@@ -1532,8 +1716,15 @@ func (e *BuiltInToolExecutor) execGrep(ctx context.Context, args grepArgs) (stri
 		scanner.Buffer(make([]byte, 4096), maxFileReadSize)
 		lineNum := 1
 		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("grep: %w", err)
+			}
 			line := scanner.Text()
-			if re.MatchString(line) {
+			matched, mErr := matchStringWithContext(ctx, re, line)
+			if mErr != nil {
+				return fmt.Errorf("grep: %w", mErr)
+			}
+			if matched {
 				relPath, relErr := filepath.Rel(validPath, filePath)
 				if relErr != nil {
 					relPath = filePath
@@ -1570,11 +1761,14 @@ func (e *BuiltInToolExecutor) execGrep(ctx context.Context, args grepArgs) (stri
 	return strings.Join(results, "\n"), nil
 }
 
-func (e *BuiltInToolExecutor) execGrepRoot(relPath string, re *regexp.Regexp) (string, error) {
+func (e *BuiltInToolExecutor) execGrepRoot(ctx context.Context, relPath string, re *regexp.Regexp) (string, error) {
 	var results []string
 	var totalBytes int
 
 	walkFn := func(filePath string, d os.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("grep: %w", err)
+		}
 		if err != nil {
 			return nil // skip inaccessible entries
 		}
@@ -1610,8 +1804,17 @@ func (e *BuiltInToolExecutor) execGrepRoot(relPath string, re *regexp.Regexp) (s
 		scanner.Buffer(make([]byte, 4096), maxFileReadSize)
 		lineNum := 1
 		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				_ = f.Close()
+				return fmt.Errorf("grep: %w", err)
+			}
 			line := scanner.Text()
-			if re.MatchString(line) {
+			matched, mErr := matchStringWithContext(ctx, re, line)
+			if mErr != nil {
+				_ = f.Close()
+				return fmt.Errorf("grep: %w", mErr)
+			}
+			if matched {
 				relOut := filePath
 				if relPath != "." {
 					if r, relErr := filepath.Rel(relPath, filepath.FromSlash(filePath)); relErr == nil && r != "" && r != "." {
@@ -1715,13 +1918,16 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (st
 
 	timeout := e.shellTimeout
 	if args.Timeout != 0 {
-		requested := time.Duration(args.Timeout) * time.Second
-		if requested < 0 {
-			requested = 0
+		// Clamp before converting to time.Duration to prevent int64 overflow.
+		maxSecs := int(maxShellTimeoutOverride / time.Second)
+		secs := args.Timeout
+		if secs < 0 {
+			secs = 0
 		}
-		if requested > maxShellTimeoutOverride {
-			requested = maxShellTimeoutOverride
+		if secs > maxSecs {
+			secs = maxSecs
 		}
+		requested := time.Duration(secs) * time.Second
 		if requested > 0 {
 			timeout = requested
 		}
@@ -1869,7 +2075,8 @@ func (e *BuiltInToolExecutor) execWebSearch(ctx context.Context, args webSearchA
 			lines = append(lines, "   Content:\n"+indent(r.Content, "   "))
 		}
 	}
-	return strings.Join(lines, "\n\n"), nil
+	output := strings.Join(lines, "\n\n")
+	return "--- BEGIN UNTRUSTED EXTERNAL DATA ---\n" + output + "\n--- END UNTRUSTED EXTERNAL DATA ---", nil
 }
 
 // indent prefixes every line of s with prefix.
@@ -1968,6 +2175,9 @@ func (e *BuiltInToolExecutor) execDispatchSubagent(ctx context.Context, args dis
 }
 
 func (e *BuiltInToolExecutor) execFetchURL(ctx context.Context, args fetchURLArgs) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("fetch url cancelled: %w", err)
+	}
 	if args.URL == "" {
 		return "", fmt.Errorf("url is required")
 	}

@@ -28,8 +28,8 @@ type Theme struct {
 	Highlight       color.Color
 }
 
-// DarkTheme is the default dark theme.
-var DarkTheme = Theme{
+// darkTheme is the default dark theme.
+var darkTheme = Theme{
 	Name:            "dark",
 	Background:      lipgloss.Color("#1e1e2e"),
 	Foreground:      lipgloss.Color("#cdd6f4"),
@@ -49,8 +49,8 @@ var DarkTheme = Theme{
 	Highlight:       lipgloss.Color("#89b4fa"),
 }
 
-// LightTheme is the light theme.
-var LightTheme = Theme{
+// lightTheme is the light theme.
+var lightTheme = Theme{
 	Name:            "light",
 	Background:      lipgloss.Color("#eff1f5"),
 	Foreground:      lipgloss.Color("#4c4f69"),
@@ -95,9 +95,9 @@ func New(themeName string) *Styles {
 	var theme Theme
 	switch themeName {
 	case "light":
-		theme = LightTheme
+		theme = lightTheme
 	default:
-		theme = DarkTheme
+		theme = darkTheme
 	}
 
 	s := &Styles{Theme: theme}

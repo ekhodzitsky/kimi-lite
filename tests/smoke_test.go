@@ -114,12 +114,6 @@ func TestTurnLoop_ReadFile(t *testing.T) {
 		},
 	}
 
-	approval := core.NewApprovalGate(
-		core.ModeAuto,
-		[]string{"read_file"},
-		func(name string) bool { return name == "read_file" },
-		nil,
-	)
 	tools, err := core.NewBuiltInToolExecutor(core.ToolExecutorConfig{
 		SandboxRoot:  tmpDir,
 		ShellTimeout: 30 * time.Second,
@@ -129,7 +123,17 @@ func TestTurnLoop_ReadFile(t *testing.T) {
 	}
 	defer tools.Close()
 
-	tm := core.NewTurnManager(llm, tools, approval, st, &staticConfig{cfg: cfg})
+	approval := core.NewApprovalGate(
+		core.ModeAuto,
+		[]string{"read_file"},
+		tools.IsReadOnly,
+		nil,
+	)
+
+	tm, err := core.NewTurnManager(llm, tools, approval, st, &staticConfig{cfg: cfg})
+	if err != nil {
+		t.Fatalf("create turn manager: %v", err)
+	}
 
 	events, err := tm.RunTurn(context.Background(), session.ID, "read hello.txt")
 	if err != nil {
@@ -234,7 +238,10 @@ func TestRunTurn_RejectsConcurrentCalls(t *testing.T) {
 	}
 	defer tools.Close()
 
-	tm := core.NewTurnManager(llm, tools, approval, st, &staticConfig{cfg: &api.Config{}})
+	tm, err := core.NewTurnManager(llm, tools, approval, st, &staticConfig{cfg: &api.Config{}})
+	if err != nil {
+		t.Fatalf("create turn manager: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

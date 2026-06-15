@@ -3,11 +3,31 @@ package core
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
+)
+
+const (
+	// summaryPromptOverhead accounts for the framing and instructions in the
+	// summarization prompt itself.
+	summaryPromptOverhead = 50
+
+	// summarySizeEstimateBase is the fixed token cost of the generated summary
+	// message (prefix + per-message overhead).
+	summarySizeEstimateBase = 50
+
+	// summarySizeEstimateDivisor converts the summarization input token count
+	// into an estimated summary size.
+	summarySizeEstimateDivisor = 10
+
+	// boundedInputDivisor derives the maximum summarization input budget from
+	// the overall context window.
+	boundedInputDivisor = 2
 )
 
 // ContextCompressor summarizes conversation history using an LLM to reduce
@@ -17,43 +37,57 @@ type ContextCompressor struct {
 	contextWindow int
 	timeout       time.Duration
 	estimator     api.TokenEstimator
+	mu            sync.Mutex
 }
 
 // NewContextCompressor creates a new ContextCompressor.
-func NewContextCompressor(llm api.LLMClient, contextWindow int, timeout time.Duration) *ContextCompressor {
+func NewContextCompressor(llm api.LLMClient, contextWindow int, timeout time.Duration) (*ContextCompressor, error) {
+	if contextWindow < 0 {
+		return nil, fmt.Errorf("contextWindow must be non-negative")
+	}
+	if timeout < 0 {
+		return nil, fmt.Errorf("timeout must be non-negative")
+	}
 	return &ContextCompressor{
 		llm:           llm,
 		contextWindow: contextWindow,
 		timeout:       timeout,
-	}
+	}, nil
 }
 
 // SetTokenEstimator replaces the default len/4 estimator. A nil estimator is
-// ignored.
+// ignored. The estimator is protected by a mutex and is safe to call before
+// Compact, but SetTokenEstimator and Compact must not be called concurrently.
 func (c *ContextCompressor) SetTokenEstimator(est api.TokenEstimator) {
 	if est == nil {
 		return
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.estimator = est
 }
 
 // estimateTokens returns a token estimate using the configured estimator or a
-// len/4 fallback.
+// len/4 fallback. The estimator access is synchronized.
 func (c *ContextCompressor) estimateTokens(msgs []api.Message) int {
-	if c.estimator != nil {
-		return c.estimator.Estimate(msgs)
+	c.mu.Lock()
+	est := c.estimator
+	c.mu.Unlock()
+	if est != nil {
+		return est.Estimate(msgs)
 	}
 	return estimateTokensLegacy(msgs)
 }
 
-// estimateTokensLegacy returns a rough token estimate using a len/4 heuristic.
+// estimateTokensLegacy returns a rough token estimate using a len/4 heuristic,
+// rounding up so that small strings are not counted as zero tokens.
 func estimateTokensLegacy(msgs []api.Message) int {
 	tokens := 0
 	for _, m := range msgs {
-		tokens += len(m.Content) / 4
+		tokens += (len(m.Content) + 3) / 4
 		for _, tc := range m.ToolCalls {
-			tokens += len(tc.Name) / 4
-			tokens += len(tc.Arguments) / 4
+			tokens += (len(tc.Name) + 3) / 4
+			tokens += (len(tc.Arguments) + 3) / 4
 			tokens += 10
 		}
 		tokens += 3 // per-message overhead
@@ -66,13 +100,13 @@ func estimateTokensLegacy(msgs []api.Message) int {
 func formatMessageForSummary(msg api.Message) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s", msg.Role)
-	if msg.ToolCallID == "" {
+	if !isToolResult(msg) {
 		fmt.Fprintf(&b, ": %s", msg.Content)
 	}
 	for _, tc := range msg.ToolCalls {
 		fmt.Fprintf(&b, "\n  tool_call: %s(%s)", tc.Name, tc.Arguments)
 	}
-	if msg.ToolCallID != "" {
+	if isToolResult(msg) {
 		fmt.Fprintf(&b, "\n  tool_result for call %s: %s", msg.ToolCallID, msg.Content)
 	}
 	b.WriteString("\n")
@@ -120,13 +154,38 @@ func findSafeBoundary(messages []api.Message, keepRecent int) int {
 	return boundary
 }
 
+// selectWithinBudget returns the newest suffix of messages that fits within
+// maxTokens, walking backwards until adding another message would exceed the
+// budget. At least one message is always returned so the LLM has something to
+// summarize.
+func (c *ContextCompressor) selectWithinBudget(messages []api.Message, maxTokens int) []api.Message {
+	var included []api.Message
+	tokens := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		msgTokens := c.estimateTokens([]api.Message{msg})
+		if tokens+msgTokens > maxTokens && len(included) > 0 {
+			break
+		}
+		included = append(included, msg)
+		tokens += msgTokens
+	}
+	// Reverse to chronological order.
+	for i, j := 0, len(included)-1; i < j; i, j = i+1, j-1 {
+		included[i], included[j] = included[j], included[i]
+	}
+	return included
+}
+
 // Compact sends older messages to the LLM for summarization and replaces the
 // session message history with leading system messages, a summary system
 // message, and the most recent messages.
 //
-// keepRecent is the number of most recent non-system messages to preserve
-// verbatim. It returns the number of messages that were summarized (excluding
-// leading system messages).
+// keepRecent is the target number of most recent non-system messages to
+// preserve verbatim. The actual boundary is pair-aware: it walks backwards so
+// that assistant/tool-call groups are never split across the summary/recent
+// boundary. It returns the number of messages actually sent to the LLM for
+// summarization (excluding leading system messages).
 func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore, sessionID string, keepRecent int) (int, error) {
 	if c == nil || c.llm == nil {
 		return 0, fmt.Errorf("context compressor LLM client is nil")
@@ -143,7 +202,7 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 	// Gate compaction on token estimate vs context window.
 	totalTokens := c.estimateTokens(messages)
 	if c.contextWindow > 0 {
-		threshold := c.contextWindow / 2
+		threshold := c.contextWindow / boundedInputDivisor
 		if totalTokens <= threshold {
 			return 0, nil
 		}
@@ -166,52 +225,35 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 		return 0, nil
 	}
 
-	// Short-circuit when the estimated summary+recent would not be smaller
-	// than the originals.
+	// Determine which middle messages actually fit in the summarization budget.
+	var included []api.Message
 	if c.contextWindow > 0 {
-		toSummarizeTokens := c.estimateTokens(middle)
+		maxInputTokens := c.contextWindow / boundedInputDivisor
+		if maxInputTokens > summaryPromptOverhead {
+			maxInputTokens -= summaryPromptOverhead
+		} else {
+			maxInputTokens = 0
+		}
+		included = c.selectWithinBudget(middle, maxInputTokens)
+	} else {
+		included = middle
+	}
+
+	// Short-circuit when the estimated summary+recent would not be smaller
+	// than the originals. Use the bounded input so the estimate is accurate.
+	if c.contextWindow > 0 {
+		toSummarizeTokens := c.estimateTokens(included)
 		recentTokens := c.estimateTokens(recent)
 		leadingTokens := c.estimateTokens(leading)
-		summaryTokens := 50 + toSummarizeTokens/10
+		summaryTokens := summarySizeEstimateBase + toSummarizeTokens/summarySizeEstimateDivisor
 		if leadingTokens+summaryTokens+recentTokens >= totalTokens {
 			return 0, nil
 		}
 	}
 
 	var conversation strings.Builder
-	if c.contextWindow > 0 {
-		// Bound the summarization input so the request cannot exceed the
-		// context window. We walk backwards from the newest to-summarize
-		// message, including only what fits within the token budget.
-		const summaryPromptOverhead = 50
-		maxInputTokens := c.contextWindow / 2
-		if maxInputTokens < 1000 {
-			maxInputTokens = 1000
-		}
-		maxInputTokens -= summaryPromptOverhead
-
-		var included []api.Message
-		tokens := 0
-		for i := len(middle) - 1; i >= 0; i-- {
-			msg := middle[i]
-			msgTokens := c.estimateTokens([]api.Message{msg})
-			if tokens+msgTokens > maxInputTokens && len(included) > 0 {
-				break
-			}
-			included = append(included, msg)
-			tokens += msgTokens
-		}
-		// Reverse to chronological order.
-		for i, j := 0, len(included)-1; i < j; i, j = i+1, j-1 {
-			included[i], included[j] = included[j], included[i]
-		}
-		for _, msg := range included {
-			conversation.WriteString(formatMessageForSummary(msg))
-		}
-	} else {
-		for _, msg := range middle {
-			conversation.WriteString(formatMessageForSummary(msg))
-		}
+	for _, msg := range included {
+		conversation.WriteString(formatMessageForSummary(msg))
 	}
 
 	summaryPrompt := api.Message{
@@ -280,5 +322,13 @@ func (c *ContextCompressor) Compact(ctx context.Context, store api.MessageStore,
 		return 0, fmt.Errorf("replace messages: %w", err)
 	}
 
-	return len(middle), nil
+	dropped := len(middle) - len(included)
+	if dropped > 0 {
+		slog.Warn("dropped old messages from summarization input due to token budget",
+			"dropped", dropped,
+			"included", len(included),
+			"total", len(middle))
+	}
+
+	return len(included), nil
 }

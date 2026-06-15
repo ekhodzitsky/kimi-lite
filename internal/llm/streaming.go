@@ -2,7 +2,6 @@ package llm
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,14 +37,15 @@ func (r *StreamReader) Close() error {
 // readRawChunk reads the next raw SSE event. It is unexported so that
 // client.go can access the index field for incremental tool-call accumulation.
 // The caller is responsible for ensuring the context can unblock the underlying
-// reader (e.g. by closing the body on cancellation).
+// reader (e.g. by closing the body on cancellation); this method does not
+// accept a context because bufio.Scanner does not support context cancellation.
 //
 // Quirk: OpenAI-style streams may signal the end of the stream twice: once
 // through a payload with a non-empty finish_reason, and again through the
 // "[DONE]" sentinel. Both cases set Done=true, which means two consecutive
 // terminal chunks are possible. Callers must treat the first Done chunk as
 // terminal and stop reading (see internal/core/turn.go:350).
-func (r *StreamReader) readRawChunk(_ context.Context) (rawChunk, error) {
+func (r *StreamReader) readRawChunk() (rawChunk, error) {
 	var data strings.Builder
 
 	for r.scanner.Scan() {

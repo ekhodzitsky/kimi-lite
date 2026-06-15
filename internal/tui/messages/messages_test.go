@@ -392,6 +392,30 @@ func TestWordWrap(t *testing.T) {
 	}
 }
 
+func TestWordWrap_WideRunes(t *testing.T) {
+	t.Parallel()
+
+	// "日本語" has a display width of 6 (2 per CJK rune).
+	input := "日本語"
+	got := wordWrap(input, 4)
+	want := "日本\n語"
+	if got != want {
+		t.Errorf("wordWrap(%q, 4) = %q, want %q", input, got, want)
+	}
+}
+
+func TestWordWrap_ANSISequences(t *testing.T) {
+	t.Parallel()
+
+	// ANSI escape sequences contribute zero width and must not be split.
+	input := "\x1b[31mhello world\x1b[0m"
+	got := wordWrap(input, 5)
+	want := "\x1b[31mhello\x1b[0m\n\x1b[31m worl\x1b[0m\n\x1b[31md\x1b[0m"
+	if got != want {
+		t.Errorf("wordWrap(%q, 5) = %q, want %q", input, got, want)
+	}
+}
+
 func TestRenderedContent_SkipsGlamourWhileStreaming(t *testing.T) {
 	t.Parallel()
 

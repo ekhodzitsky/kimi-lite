@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
+	"go.uber.org/goleak"
 )
 
 func TestNewClient(t *testing.T) {
@@ -227,7 +227,7 @@ func TestClientChat(t *testing.T) {
 				Model:   "test-model",
 				Timeout: 5 * time.Second,
 			}, server.Client())
-			client.maxRetries = 2
+			client.maxAttempts = 3
 
 			msg, err := client.Chat(context.Background(), tt.messages, tt.tools)
 
@@ -310,7 +310,7 @@ func TestClientChatRetrySuccess(t *testing.T) {
 		Model:   "test-model",
 		Timeout: 5 * time.Second,
 	}, server.Client())
-	client.maxRetries = 3
+	client.maxAttempts = 3
 
 	msg, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "Hi"}}, nil)
 	if err != nil {
@@ -592,10 +592,13 @@ func TestClientChatStreamContextCancellation(t *testing.T) {
 }
 
 func TestClientChatStream_GoroutineReaped(t *testing.T) {
-	// Not parallel: it counts global goroutines, and concurrent tests
-	// would make the baseline/current comparison noisy.
+	// Not parallel: goleak snapshots goroutines and concurrent tests can make
+	// the comparison noisy.
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
+	streamDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(streamDone)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, ok := w.(http.Flusher)
@@ -609,10 +612,6 @@ func TestClientChatStream_GoroutineReaped(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	defer server.Close()
-
-	// Let the test-server goroutine settle before taking a baseline.
-	time.Sleep(100 * time.Millisecond)
-	baseline := runtime.NumGoroutine()
 
 	client := NewClient(api.LLMConfig{
 		BaseURL: server.URL,
@@ -629,7 +628,7 @@ func TestClientChatStream_GoroutineReaped(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Consume the first chunk, then cancel mid-stream.
+	// Consume the first chunk, then cancel mid-stream and drain the channel.
 	for chunk := range ch {
 		if chunk.Error != nil {
 			break
@@ -639,20 +638,16 @@ func TestClientChatStream_GoroutineReaped(t *testing.T) {
 			break
 		}
 	}
-	// Drain any trailing error/done chunk so the stream goroutine can exit.
 	for range ch {
 	}
 
-	const delta = 2
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if runtime.NumGoroutine() <= baseline+delta {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	// Wait for the server side to observe cancellation so goleak does not race
+	// with the request handler goroutine.
+	select {
+	case <-streamDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server stream did not close")
 	}
-
-	t.Fatalf("goroutines not reaped: baseline=%d current=%d", baseline, runtime.NumGoroutine())
 }
 
 func TestClientModels(t *testing.T) {
@@ -827,7 +822,7 @@ data: [DONE]
 
 			var chunks []rawChunk
 			for {
-				chunk, err := reader.readRawChunk(context.Background())
+				chunk, err := reader.readRawChunk()
 				if err == io.EOF {
 					if chunk.Done || chunk.Content != "" {
 						chunks = append(chunks, chunk)
@@ -907,7 +902,7 @@ func TestIsRetryableError(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"context canceled", context.Canceled, false},
-		{"context deadline exceeded", context.DeadlineExceeded, true},
+		{"context deadline exceeded", context.DeadlineExceeded, false},
 		{"network timeout", &net.DNSError{IsTimeout: true}, true},
 		{"dns not found", &net.DNSError{IsNotFound: true}, false},
 		{"connection refused", &net.OpError{Err: syscall.ECONNREFUSED}, false},
@@ -1065,7 +1060,7 @@ func TestStreamReader_LargePayload(t *testing.T) {
 	reader := NewStreamReader(io.NopCloser(strings.NewReader(input)))
 	defer reader.Close()
 
-	chunk, err := reader.readRawChunk(context.Background())
+	chunk, err := reader.readRawChunk()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1073,7 +1068,7 @@ func TestStreamReader_LargePayload(t *testing.T) {
 		t.Errorf("content length = %d, want %d", len(chunk.Content), len(largeContent))
 	}
 
-	chunk, err = reader.readRawChunk(context.Background())
+	chunk, err = reader.readRawChunk()
 	if err != io.EOF {
 		t.Fatalf("expected io.EOF, got %v", err)
 	}
@@ -1681,7 +1676,7 @@ func TestDoRequestWithRetry_MaxRetriesExceeded(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(api.LLMConfig{BaseURL: server.URL, APIKey: "key", Model: "m"}, server.Client())
-	client.maxRetries = 2
+	client.maxAttempts = 3
 
 	_, err := client.Chat(context.Background(), []api.Message{{Role: api.RoleUser, Content: "hi"}}, nil)
 	if err == nil {

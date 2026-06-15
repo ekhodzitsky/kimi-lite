@@ -181,7 +181,9 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 			if sm != nil && sessionID != "" {
 				ctx, cancel := context.WithTimeout(appCtx, timeout)
 				defer cancel()
-				_ = sm.ClearMessages(ctx, sessionID)
+				if err := sm.ClearMessages(ctx, sessionID); err != nil {
+					return ErrorMsg{Err: fmt.Errorf("clear messages: %w", err)}
+				}
 			}
 			return ClearMsg{}
 		}
@@ -222,9 +224,7 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 		appCtx := m.appCtx
 		m.mu.RUnlock()
 
-		if mc == nil {
-			m.addMessage(msgcomp.NewUserMessage("No MCP tools connected.", m.styles))
-		} else {
+		if mc != nil {
 			m.addMessage(msgcomp.NewUserMessage("Listing MCP tools...", m.styles))
 		}
 		timeout := commandTimeout

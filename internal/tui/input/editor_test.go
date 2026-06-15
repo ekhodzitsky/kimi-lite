@@ -89,6 +89,40 @@ func TestParseEditor(t *testing.T) {
 			t.Error("expected error when editor executable not found")
 		}
 	})
+
+	t.Run("quoted executable with spaces", func(t *testing.T) {
+		t.Parallel()
+		// go is a known executable; treat the quoted part as the binary name
+		// and "version" as an argument.
+		cmd, err := parseEditor(context.Background(), `"go" version`, "/tmp/file.txt")
+		if err != nil {
+			t.Fatalf("parseEditor error = %v", err)
+		}
+		want := []string{"go", "version", "/tmp/file.txt"}
+		if strings.Join(cmd.Args, " ") != strings.Join(want, " ") {
+			t.Errorf("cmd.Args = %v, want %v", cmd.Args, want)
+		}
+	})
+
+	t.Run("argument with spaces", func(t *testing.T) {
+		t.Parallel()
+		cmd, err := parseEditor(context.Background(), `go "version --verbose"`, "/tmp/file.txt")
+		if err != nil {
+			t.Fatalf("parseEditor error = %v", err)
+		}
+		want := []string{"go", "version --verbose", "/tmp/file.txt"}
+		if strings.Join(cmd.Args, " ") != strings.Join(want, " ") {
+			t.Errorf("cmd.Args = %v, want %v", cmd.Args, want)
+		}
+	})
+
+	t.Run("unterminated quote", func(t *testing.T) {
+		t.Parallel()
+		_, err := parseEditor(context.Background(), `"go version`, "/tmp/file.txt")
+		if err == nil {
+			t.Error("expected error for unterminated quote")
+		}
+	})
 }
 
 func TestWriteReadTempFile(t *testing.T) {

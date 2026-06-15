@@ -48,11 +48,77 @@ func resolveEditor(configured string) string {
 	return "vi"
 }
 
+// parseShellArgs splits a string by whitespace while respecting single and
+// double quotes. It returns an error for unterminated quotes.
+func parseShellArgs(s string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	var inSingle, inDouble bool
+	var escaped bool
+
+	flush := func() {
+		if current.Len() > 0 {
+			args = append(args, current.String())
+			current.Reset()
+		}
+	}
+
+	for _, r := range s {
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if inSingle {
+			if r == '\'' {
+				inSingle = false
+			} else {
+				current.WriteRune(r)
+			}
+			continue
+		}
+		if inDouble {
+			if r == '"' {
+				inDouble = false
+			} else {
+				current.WriteRune(r)
+			}
+			continue
+		}
+		switch r {
+		case '"':
+			inDouble = true
+		case '\'':
+			inSingle = true
+		case ' ', '\t', '\n', '\r':
+			flush()
+		default:
+			current.WriteRune(r)
+		}
+	}
+
+	if inSingle || inDouble {
+		return nil, fmt.Errorf("unterminated quote in editor command")
+	}
+	if escaped {
+		current.WriteRune('\\')
+	}
+	flush()
+	return args, nil
+}
+
 // parseEditor splits an editor command into name and arguments and appends the
 // file path as the final argument. It validates that the editor executable can
 // be located.
 func parseEditor(ctx context.Context, editor, path string) (*exec.Cmd, error) {
-	parts := strings.Fields(editor)
+	parts, err := parseShellArgs(editor)
+	if err != nil {
+		return nil, fmt.Errorf("parse editor command: %w", err)
+	}
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("editor command is empty")
 	}
@@ -105,16 +171,15 @@ func readTempFile(path string) (string, error) {
 	return string(data), nil
 }
 
-// openExternalEditor writes the current textarea value to a temp file and
-// returns a tea.Cmd that launches the configured editor via tea.ExecProcess.
-// The temp file is removed after the editor exits. The supplied context
-// controls the editor subprocess; when it is cancelled the editor is killed.
-func (m *Model) openExternalEditor(ctx context.Context, editor string) tea.Cmd {
+// openExternalEditor writes the provided content to a temp file and returns a
+// tea.Cmd that launches the configured editor via tea.ExecProcess. The temp
+// file is removed after the editor exits. The supplied context controls the
+// editor subprocess; when it is cancelled the editor is killed.
+func (m *Model) openExternalEditor(ctx context.Context, editor, content string) tea.Cmd {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	content := m.textarea.Value()
 	path, err := writeTempFile(content)
 	if err != nil {
 		return func() tea.Msg {

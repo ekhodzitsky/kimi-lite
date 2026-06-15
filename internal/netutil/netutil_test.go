@@ -48,9 +48,55 @@ func TestIsBlockedHost(t *testing.T) {
 		{"fd12:3456::1", true},
 		{"::ffff:10.0.0.1", true},
 		{"::ffff:127.0.0.1", true},
+		{"::127.0.0.1", true},     // IPv4-compatible loopback
+		{"::10.0.0.1", true},      // IPv4-compatible private
+		{"::192.0.2.1", true},     // IPv4-compatible documentation
+		{"255.255.255.255", true}, // broadcast
+		{"224.0.0.1", true},       // multicast
+		{"239.255.255.255", true}, // multicast
+		{"240.0.0.1", true},       // reserved
+		{"192.0.2.1", true},       // TEST-NET-1
+		{"198.51.100.1", true},    // TEST-NET-2
+		{"203.0.113.1", true},     // TEST-NET-3
+		{"0.0.0.1", true},         // this network
+		{"2001:db8::1", true},     // IPv6 documentation
+		{"ff02::1", true},         // IPv6 link-local multicast
+		{"ff05::1", true},         // IPv6 site-local multicast
 		{"8.8.8.8", false},
 		{"example.com", false},
 		{"1.1.1.1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			t.Parallel()
+			if got := IsBlockedHost(tt.host); got != tt.want {
+				t.Errorf("IsBlockedHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsBlockedHost_AuditBlockedRanges(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"::127.0.0.1", true},
+		{"::10.0.0.1", true},
+		{"::192.0.2.1", true},
+		{"::255.255.255.255", true},
+		{"255.255.255.255", true},
+		{"224.0.0.1", true},
+		{"240.0.0.1", true},
+		{"192.0.2.1", true},
+		{"198.51.100.1", true},
+		{"203.0.113.1", true},
+		{"0.0.0.1", true},
+		{"2001:db8::1", true},
+		{"ff02::1", true},
 	}
 
 	for _, tt := range tests {

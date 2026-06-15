@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	clientName    = "kimi-lite"
-	clientVersion = "0.1.0"
+	clientName             = "kimi-lite"
+	clientVersion          = "0.1.0"
+	requestedProtocolVersion = "2024-11-05"
 )
 
 // Client implements api.MCPClient using a JSON-RPC transport.
@@ -63,7 +64,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	initParams := map[string]any{
-		"protocolVersion": "2024-11-05",
+		"protocolVersion": requestedProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo": map[string]any{
 			"name":    clientName,
@@ -95,7 +96,10 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 		return fmt.Errorf("mcp initialize: server returned empty protocol version")
 	}
-	if initResult.ProtocolVersion != "2024-11-05" {
+	// Accept the server's chosen version if it is the same as or older than
+	// the version we requested. Reject newer versions explicitly because we
+	// have not been implemented against them.
+	if initResult.ProtocolVersion > requestedProtocolVersion {
 		if closeErr := c.transport.Close(); closeErr != nil {
 			slog.Warn("failed to close mcp transport after unsupported protocol version", "error", closeErr)
 		}

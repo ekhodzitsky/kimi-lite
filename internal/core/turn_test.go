@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -56,7 +57,7 @@ func TestTurnManager_RunTurn_Simple(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Hi")
 	if err != nil {
@@ -142,7 +143,7 @@ func TestTurnManager_RunTurn_WithToolCalls(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
 	if err != nil {
@@ -189,6 +190,9 @@ func TestTurnManager_RunTurn_WithToolCalls(t *testing.T) {
 
 func TestTurnManager_RunTurn_ShellNonZeroExitPreservesOutput(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell exit-code semantics are not portable on windows")
+	}
 	ctx := context.Background()
 	store := newMockStore()
 	sess, _ := store.CreateSession(ctx, "/tmp/proj")
@@ -219,7 +223,7 @@ func TestTurnManager_RunTurn_ShellNonZeroExitPreservesOutput(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Run a command")
 	if err != nil {
@@ -284,7 +288,7 @@ func TestTurnManager_RunTurn_ManualApproval(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Write a file")
 	if err != nil {
@@ -391,7 +395,7 @@ func TestTurnManager_RunTurn_ApprovalDiffThenYes(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 	tm.SetSandboxRoot(tmp)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Write a file")
@@ -495,7 +499,7 @@ func TestTurnManager_RunTurn_MaxTurns(t *testing.T) {
 	approval := &mockApprovalGate{}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 2}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	_, err := tm.RunTurn(ctx, sess.ID, "Hi")
 	if err == nil {
@@ -526,7 +530,7 @@ func TestTurnManager_RunTurn_MaxTurnsAbove100(t *testing.T) {
 	approval := &mockApprovalGate{}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 100}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	_, err := tm.RunTurn(ctx, sess.ID, "Hi")
 	if err == nil {
@@ -559,7 +563,7 @@ func TestTurnManager_RunTurn_MaxTurnsIgnoresErrored(t *testing.T) {
 	}}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 3}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Hi")
 	if err != nil {
@@ -597,7 +601,7 @@ func TestTurnManager_RunTurn_StreamError(t *testing.T) {
 	}}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Hi")
 	if err != nil {
@@ -682,7 +686,7 @@ func TestTurnManager_RunTurn_ContextCancellation(t *testing.T) {
 	}}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Hi")
 	if err != nil {
@@ -728,7 +732,7 @@ func TestTurnManager_RunTurn_LLMError(t *testing.T) {
 	approval := &mockApprovalGate{}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	_, err := tm.RunTurn(ctx, sess.ID, "Hi")
 	if err == nil {
@@ -741,7 +745,7 @@ func TestTurnManager_RunTurn_LLMError(t *testing.T) {
 
 func TestTurnManager_CurrentTurn_Nil(t *testing.T) {
 	t.Parallel()
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 	if tm.CurrentTurn() != nil {
 		t.Error("expected nil current turn")
 	}
@@ -749,7 +753,7 @@ func TestTurnManager_CurrentTurn_Nil(t *testing.T) {
 
 func TestTurnManager_CurrentTurn_DeepCopy(t *testing.T) {
 	t.Parallel()
-	tm := NewTurnManager(nil, nil, nil, nil, nil)
+	tm := newTestTurnManager(t, nil, nil, nil, nil, nil)
 	tm.turn = &api.Turn{
 		ID:    "turn-1",
 		State: api.TurnThinking,
@@ -799,7 +803,7 @@ func TestTurnManager_RunTurn_NoConfig(t *testing.T) {
 		return api.ApprovalYes, true
 	}}
 
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Hi")
 	if err != nil {
@@ -859,7 +863,7 @@ func TestTurnManager_ToolCallID_PreservedAcrossRounds(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
 	if err != nil {
@@ -910,7 +914,7 @@ func TestTurnManager_RunTurn_Overlapping(t *testing.T) {
 			api.StreamChunk{Done: true},
 		),
 	}
-	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
 
 	ctx := context.Background()
 	ch1, err := tm.RunTurn(ctx, "sess-1", "first")
@@ -981,7 +985,7 @@ func TestTurnManager_RunTurn_StaleRequestIDIgnored(t *testing.T) {
 		},
 	}
 
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "test input")
 	if err != nil {
@@ -1084,7 +1088,7 @@ func TestTurnManager_executeToolCalls_ContextCancellation(t *testing.T) {
 		},
 	}
 
-	tm := NewTurnManager(&mockLLMClient{}, tools, approval, store, nil)
+	tm := newTestTurnManager(t, &mockLLMClient{}, tools, approval, store, nil)
 	turn := &api.Turn{ID: "turn-1", State: api.TurnToolCalls}
 
 	calls := []api.ToolCall{
@@ -1115,6 +1119,38 @@ func TestTurnManager_executeToolCalls_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestTurnManager_executeToolCall_RecoversPanic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	panicTools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			panic("tool explosion")
+		},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+
+	tm := newTestTurnManager(t, &mockLLMClient{}, panicTools, approval, store, nil)
+	turn := &api.Turn{ID: "turn-1", State: api.TurnToolCalls}
+
+	results, _, _ := tm.executeToolCalls(ctx, sess.ID, turn, []api.ToolCall{
+		{ID: "tc1", Name: "shell", Arguments: `{}`},
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !strings.Contains(results[0].Error, "panicked") {
+		t.Errorf("result error = %q, want containing panicked", results[0].Error)
+	}
+}
+
 func TestTurnManager_RunTurn_StreamErrorTypedEvent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1128,7 +1164,7 @@ func TestTurnManager_RunTurn_StreamErrorTypedEvent(t *testing.T) {
 			api.StreamChunk{Error: streamErr},
 		),
 	}
-	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "test")
 	if err != nil {
@@ -1217,7 +1253,7 @@ func TestTurnManager_RunTurn_AppendMessageFailure(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
 	if err != nil {
@@ -1277,7 +1313,7 @@ func TestTurnManager_RunTurn_EmptyTrailingAssistantSkipped(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
 	if err != nil {
@@ -1324,7 +1360,7 @@ func TestTurnManager_RunTurn_MaxToolRounds(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 50, MaxToolRounds: 3}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Read the file")
 	if err != nil {
@@ -1395,7 +1431,7 @@ func TestTurnManager_RunTurn_SingleSaveBeforeStream(t *testing.T) {
 	}
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 
-	tm := NewTurnManager(llm, tools, approval, store, cfg)
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Hi")
 	if err != nil {
@@ -1445,7 +1481,7 @@ func TestTurnManager_ResumeWithApproval_SessionIDMismatch(t *testing.T) {
 		},
 	}
 
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Write")
 	if err != nil {
@@ -1512,7 +1548,7 @@ func TestTurnManager_ExecuteToolCalls_PreservesMixedOrder(t *testing.T) {
 		},
 	}
 
-	tm := NewTurnManager(llm, tools, approval, store, nil)
+	tm := newTestTurnManager(t, llm, tools, approval, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "Mixed calls")
 	if err != nil {
@@ -1566,7 +1602,7 @@ func TestTurnManager_RunTurn_ErrorEventEmitted(t *testing.T) {
 			api.StreamChunk{Error: streamErr},
 		),
 	}
-	tm := NewTurnManager(llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
 
 	outCh, err := tm.RunTurn(ctx, sess.ID, "test")
 	if err != nil {

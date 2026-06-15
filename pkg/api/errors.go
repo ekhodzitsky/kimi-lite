@@ -11,6 +11,9 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
+	if e == nil {
+		return ""
+	}
 	msg := fmt.Sprintf("API error %d", e.StatusCode)
 	if e.Message != "" {
 		msg = fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
@@ -28,15 +31,15 @@ func (e *APIError) Error() string {
 
 // IsClientError reports whether the error is a 4xx status code.
 func (e *APIError) IsClientError() bool {
-	return e.StatusCode >= 400 && e.StatusCode < 500
+	return e != nil && e.StatusCode >= 400 && e.StatusCode < 500
 }
 
 // IsServerError reports whether the error is a 5xx status code.
 func (e *APIError) IsServerError() bool {
-	return e.StatusCode >= 500
+	return e != nil && e.StatusCode >= 500
 }
 
 // IsRateLimit reports whether the error is a 429 Too Many Requests.
 func (e *APIError) IsRateLimit() bool {
-	return e.StatusCode == 429
+	return e != nil && e.StatusCode == 429
 }

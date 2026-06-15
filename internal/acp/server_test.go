@@ -277,8 +277,8 @@ func TestServer_PromptReturnsFinalResponse(t *testing.T) {
 	if result["response"] != "Hello, world!" {
 		t.Fatalf("unexpected response: %v", result["response"])
 	}
-	if !app.setYoloCalled {
-		t.Error("expected SetYolo(true) to be called")
+	if app.setYoloCalled {
+		t.Error("expected SetYolo NOT to be called by ACP prompt")
 	}
 	if app.runTurnInput != "say hello" {
 		t.Fatalf("expected prompt %q, got %q", "say hello", app.runTurnInput)
@@ -310,8 +310,8 @@ func TestServer_PromptStreamsUpdates(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("expected 5 lines, got %d: %s", len(lines), stdout.String())
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 lines, got %d: %s", len(lines), stdout.String())
 	}
 
 	// First update: agent_message_chunk
@@ -337,14 +337,10 @@ func TestServer_PromptStreamsUpdates(t *testing.T) {
 		t.Fatalf("unexpected update type: %v", params2["sessionUpdate"])
 	}
 
-	// Third update: approval_request
-	var update3 jsonRPCNotification
-	if err := json.Unmarshal([]byte(lines[3]), &update3); err != nil {
-		t.Fatalf("unmarshal update3: %v", err)
-	}
-	params3, _ := update3.Params.(map[string]any)
-	if params3["sessionUpdate"] != "approval_request" {
-		t.Fatalf("unexpected update type: %v", params3["sessionUpdate"])
+	// Approval requests are not supported over ACP, so the prompt returns an error.
+	resp := parseLine(t, lines[3])
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("expected prompt error for approval request, got %v", resp.Error)
 	}
 }
 
@@ -933,7 +929,7 @@ func TestChangeWorkingDir_SameDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	if err := changeWorkingDir(cwd); err != nil {
+	if err := changeWorkingDir(cwd, cwd); err != nil {
 		t.Fatalf("changeWorkingDir same dir: %v", err)
 	}
 }
@@ -949,8 +945,26 @@ func TestChangeWorkingDir_ChdirError(t *testing.T) {
 		}
 	}()
 
-	if err := changeWorkingDir(tmpDir); err == nil {
+	if err := changeWorkingDir(tmpDir, tmpDir); err == nil {
 		t.Fatal("expected chdir error")
+	}
+}
+
+func TestChangeWorkingDir_RejectsEscape(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "sub")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if err := changeWorkingDir(subDir, tmpDir); err != nil {
+		t.Fatalf("changeWorkingDir sub dir: %v", err)
+	}
+	if err := changeWorkingDir(tmpDir, subDir); err == nil {
+		t.Fatal("expected error for directory outside allowed root")
+	}
+	// Empty allowed root disables validation.
+	if err := changeWorkingDir(tmpDir, ""); err != nil {
+		t.Fatalf("changeWorkingDir with empty root: %v", err)
 	}
 }
 

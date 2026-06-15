@@ -61,9 +61,18 @@ func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message,
 
 	// Peek the stream until we see the first non-empty content chunk or an error.
 	// If the stream closes before either, fall back.
+	const firstChunkTimeout = 5 * time.Second
+	timer := time.NewTimer(firstChunkTimeout)
+	defer timer.Stop()
 	for {
 		select {
 		case chunk, ok := <-stream:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			if !ok {
 				cancelPrimary()
 				if c.fallback != nil {
@@ -110,7 +119,8 @@ func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message,
 				return out, nil
 			}
 			// Empty chunk (no content, no error) — keep reading.
-		case <-time.After(5 * time.Second):
+			timer.Reset(firstChunkTimeout)
+		case <-timer.C:
 			cancelPrimary()
 			if c.fallback != nil {
 				slog.Warn("primary LLM stream idle on first chunk, trying fallback")

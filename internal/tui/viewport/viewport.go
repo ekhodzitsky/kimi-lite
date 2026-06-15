@@ -136,6 +136,7 @@ func (m *Model) SetContent(s string) {
 	if m.autoScroll {
 		m.vp.GotoBottom()
 	}
+	m.scrollPercent = m.vp.ScrollPercent()
 }
 
 // ScrollPercent returns the current scroll percentage.

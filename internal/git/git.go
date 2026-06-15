@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const gitTimeout = 5 * time.Second
+const defaultGitTimeout = 30 * time.Second
 
 // gitEnvOverlay contains the environment variables forced for every git
 // command. It is precomputed once to avoid rebuilding the slice per call.
@@ -21,6 +21,16 @@ var gitEnvOverlay = []string{
 	"GIT_OPTIONAL_LOCKS=0",
 	"GIT_PAGER=cat",
 	"LC_ALL=C",
+}
+
+// gitEnvSanitize lists variables that must be stripped from the parent
+// environment before applying gitEnvOverlay, so callers cannot redirect git to
+// an unexpected repository or configuration.
+var gitEnvSanitize = []string{
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_CONFIG_GLOBAL",
+	"GIT_CONFIG_SYSTEM",
 }
 
 // cmdRunner abstracts command execution for testability.
@@ -58,33 +68,66 @@ func (r *execRunner) buildCmd(ctx context.Context, dir, name string, args ...str
 		cmd.Dir = dir
 	}
 	cmd.Stdin = nil
-	cmd.Env = append(append([]string(nil), os.Environ()...), gitEnvOverlay...)
+	cmd.Env = append(sanitizeEnv(os.Environ(), gitEnvSanitize), gitEnvOverlay...)
 	return cmd
+}
+
+func sanitizeEnv(env []string, remove []string) []string {
+	rm := make(map[string]struct{}, len(remove))
+	for _, k := range remove {
+		rm[k] = struct{}{}
+	}
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			if _, found := rm[k]; found {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // Provider implements api.GitProvider by executing git commands.
 type Provider struct {
-	runner cmdRunner
-	dir    string
+	runner  cmdRunner
+	dir     string
+	timeout time.Duration
 }
 
-// NewProvider creates a new Git provider that operates in dir.
-// If dir is empty, git commands run in the current working directory.
-// The directory is validated when a command is actually executed; an invalid
-// directory returns an error from the operation rather than from NewProvider,
-// preserving the existing constructor signature.
+// NewProvider creates a new Git provider that operates in dir with the default
+// command timeout. If dir is empty, git commands run in the current working
+// directory. The directory is validated when a command is actually executed;
+// an invalid directory returns an error from the operation rather than from
+// NewProvider, preserving the existing constructor signature.
 func NewProvider(dir string) *Provider {
+	return NewProviderWithTimeout(dir, defaultGitTimeout)
+}
+
+// NewProviderWithTimeout creates a new Git provider that operates in dir with
+// the given command timeout. A non-positive timeout is replaced by the default.
+func NewProviderWithTimeout(dir string, timeout time.Duration) *Provider {
+	if timeout <= 0 {
+		timeout = defaultGitTimeout
+	}
 	return &Provider{
-		runner: &execRunner{},
-		dir:    dir,
+		runner:  &execRunner{},
+		dir:     dir,
+		timeout: timeout,
 	}
 }
 
 // newProvider creates a new Git provider with the given runner for testing.
-func newProvider(runner cmdRunner, dir string) *Provider {
+func newProvider(runner cmdRunner, dir string, timeout ...time.Duration) *Provider {
+	t := defaultGitTimeout
+	if len(timeout) > 0 && timeout[0] > 0 {
+		t = timeout[0]
+	}
 	return &Provider{
-		runner: runner,
-		dir:    dir,
+		runner:  runner,
+		dir:     dir,
+		timeout: t,
 	}
 }
 
@@ -104,12 +147,24 @@ func isNotRepo(output string) bool {
 }
 
 // classifyErr returns a wrapped, classified error for git operation failures.
+// The captured stderr is included in the message so callers can see why git
+// failed without losing the underlying error.
 func classifyErr(op string, out []byte, err error) error {
 	if errors.Is(err, exec.ErrNotFound) {
 		return fmt.Errorf("git is not installed: %w", err)
 	}
-	if isNotRepo(string(out)) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%s timed out: %w", op, err)
+	}
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%s canceled: %w", op, err)
+	}
+	msg := strings.TrimSpace(string(out))
+	if isNotRepo(msg) {
 		return fmt.Errorf("not a git repository: %w", err)
+	}
+	if msg != "" {
+		return fmt.Errorf("%s failed: %s: %w", op, msg, err)
 	}
 	return fmt.Errorf("%s failed: %w", op, err)
 }

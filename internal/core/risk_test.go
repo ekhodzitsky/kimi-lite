@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -21,6 +22,8 @@ func TestRiskEvaluator_Baseline(t *testing.T) {
 	}{
 		{"read_file", api.ToolCall{Name: "read_file", Arguments: `{"path":"main.go"}`}, api.RiskLevelLow},
 		{"glob", api.ToolCall{Name: "glob", Arguments: `{"pattern":"*.go"}`}, api.RiskLevelLow},
+		{"read_video", api.ToolCall{Name: "read_video", Arguments: `{"path":"vid.mp4"}`}, api.RiskLevelLow},
+		{"dispatch_subagent", api.ToolCall{Name: "dispatch_subagent", Arguments: `{}`}, api.RiskLevelMedium},
 		{"write_file", api.ToolCall{Name: "write_file", Arguments: `{"path":"main.go"}`}, api.RiskLevelMedium},
 		{"str_replace_file", api.ToolCall{Name: "str_replace_file", Arguments: `{"path":"main.go"}`}, api.RiskLevelMedium},
 		{"shell", api.ToolCall{Name: "shell", Arguments: `{"command":"ls"}`}, api.RiskLevelHigh},
@@ -113,6 +116,37 @@ func TestRiskEvaluator_CustomRuleGlob(t *testing.T) {
 	level, _ := e.Evaluate(api.ToolCall{Name: "write_file", Arguments: `{"path":"README.md"}`})
 	if level != api.RiskLevelLow {
 		t.Errorf("glob rule risk = %q, want low", level)
+	}
+}
+
+func TestRiskEvaluator_ParseArgsError(t *testing.T) {
+	t.Parallel()
+	e := NewRiskEvaluator(nil, t.TempDir())
+	level, reason := e.Evaluate(api.ToolCall{Name: "read_file", Arguments: `not json`})
+	if level != api.RiskLevelLow {
+		t.Errorf("level = %q, want low", level)
+	}
+	if !strings.Contains(reason, "failed to parse") {
+		t.Errorf("reason = %q, want containing failed to parse", reason)
+	}
+}
+
+func TestRiskEvaluator_NewCopiesRules(t *testing.T) {
+	t.Parallel()
+	rules := []api.RiskRule{{Tool: "shell", Level: api.RiskLevelLow}}
+	e := NewRiskEvaluator(rules, t.TempDir())
+	rules[0].Tool = "read_file"
+	level, _ := e.Evaluate(api.ToolCall{Name: "shell", Arguments: `{}`})
+	if level != api.RiskLevelLow {
+		t.Errorf("level = %q, want low (rules slice was not copied)", level)
+	}
+}
+
+func TestRiskEvaluator_SandboxRootSlash(t *testing.T) {
+	t.Parallel()
+	e := NewRiskEvaluator(nil, "/")
+	if e.pathEscapes("/tmp/foo.txt") {
+		t.Error("expected /tmp/foo.txt not to escape when sandbox root is /")
 	}
 }
 

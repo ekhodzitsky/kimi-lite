@@ -390,6 +390,7 @@ type Config struct {
 	Models          map[string]ModelAlias      `mapstructure:"models"`
 	DefaultProvider string                     `mapstructure:"default_provider"`
 	DefaultModel    string                     `mapstructure:"default_model"`
+	GitTimeout      time.Duration              `mapstructure:"git_timeout"`
 	PprofAddr       string                     `mapstructure:"pprof_addr"`
 }
 

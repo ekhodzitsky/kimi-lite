@@ -45,10 +45,19 @@ Available built-in tools:
 - str_replace_file(path, old_string, new_string): Replace an exact string in a
   file. Use this for surgical edits. The old_string must match the file text
   exactly, including whitespace.
+- edit(path, instruction): Apply an instruction-driven edit to a file. Use this
+  for changes that are easier to describe in natural language than as an exact
+  string replacement.
 - shell(command): Run a shell command in the current working directory. Use
   this for builds, tests, git operations, or package-manager commands.
 - fetch_url(url): Fetch the contents of a web URL. Use this to read
   documentation or references online.
+- web_search(query): Search the web for the given query when configured.
+- read_video(path): Extract frames and metadata from a local video file.
+- TodoList(action, items?): Manage a lightweight todo list for tracking plan
+  steps during a session.
+- dispatch_subagent(type, prompt): Delegate a focused task to a built-in
+  subagent with a restricted tool set.
 
 Guidelines:
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1950,6 +1951,32 @@ func TestBuiltInToolExecutor_Execute_Shell_TimeoutOverride(t *testing.T) {
 	}
 }
 
+func TestBuiltInToolExecutor_Execute_Shell_HugeTimeoutClamped(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell semantics")
+	}
+
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	start := time.Now()
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "shell",
+		Arguments: fmt.Sprintf(`{"command":"sleep 0.1","timeout":%d}`, math.MaxInt32),
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("huge timeout should be clamped; took %v", elapsed)
+	}
+}
+
 func TestBuiltInToolExecutor_Execute_Shell_CuratedEnv(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix shell semantics")
@@ -2188,6 +2215,30 @@ func TestBuiltInToolExecutor_Execute_WebSearch_ProviderError(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "provider down") {
 		t.Errorf("expected provider error, got: %q", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_WebSearch_WrapsUntrustedData(t *testing.T) {
+	t.Parallel()
+	fake := &fakeWebSearcher{results: []api.WebSearchResult{{Title: "Go", URL: "https://go.dev", Snippet: "The Go programming language"}}}
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, WebSearcher: fake})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:        "call_1",
+		Name:      "web_search",
+		Arguments: `{"query":"golang","limit":1}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if !strings.HasPrefix(result.Output, "--- BEGIN UNTRUSTED EXTERNAL DATA ---") {
+		t.Errorf("expected untrusted data prefix, got: %q", result.Output)
+	}
+	if !strings.HasSuffix(result.Output, "--- END UNTRUSTED EXTERNAL DATA ---") {
+		t.Errorf("expected untrusted data suffix, got: %q", result.Output)
 	}
 }
 
@@ -2745,6 +2796,51 @@ func TestBuiltInToolExecutor_Execute_Grep_ContextCancellationDuringCompile(t *te
 	}
 	if result.Error == "" {
 		t.Fatal("expected context cancellation error")
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_Grep_RejectsComplexPattern(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second, SandboxRoot: tmp})
+
+	result, err := exec.Execute(context.Background(), api.ToolCall{
+		ID:   "call_1",
+		Name: "grep",
+		Arguments: fmt.Sprintf(`{"pattern":"%s","path":"%s"}`,
+			strings.Repeat("(", maxRegexpDepth+1)+"a"+strings.Repeat(")", maxRegexpDepth+1), tmp),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected error for complex pattern")
+	}
+	if !strings.Contains(result.Error, "nesting depth") {
+		t.Errorf("expected nesting depth error, got: %s", result.Error)
+	}
+}
+
+func TestBuiltInToolExecutor_Execute_FetchURL_CancellationAtEntry(t *testing.T) {
+	t.Parallel()
+	exec := newTestExecutor(t, ToolExecutorConfig{ShellTimeout: 30 * time.Second})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := exec.Execute(ctx, api.ToolCall{
+		ID:        "call_1",
+		Name:      "fetch_url",
+		Arguments: `{"url":"http://example.com"}`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Error == "" {
+		t.Fatal("expected context cancellation error")
+	}
+	if !strings.Contains(result.Error, "cancelled") {
+		t.Errorf("expected cancellation error, got: %q", result.Error)
 	}
 }
 

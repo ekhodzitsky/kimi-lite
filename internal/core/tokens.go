@@ -30,6 +30,11 @@ func NewHeuristicTokenEstimator() *HeuristicTokenEstimator {
 }
 
 // Estimate returns the estimated token count for the provided messages.
+//
+// Limitations: this is a coarse heuristic. It does not use a real tokenizer,
+// does not model per-role formatting overhead beyond a fixed per-message cost,
+// and treats all non-ASCII runes as a single token. Use it for budgeting and
+// ordering, not for exact billing or context limits.
 func (e *HeuristicTokenEstimator) Estimate(messages []api.Message) int {
 	tokens := 0
 	for _, m := range messages {

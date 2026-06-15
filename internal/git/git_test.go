@@ -316,6 +316,23 @@ func TestNewProvider(t *testing.T) {
 	if p.runner == nil {
 		t.Fatal("expected non-nil runner")
 	}
+	if p.timeout != defaultGitTimeout {
+		t.Fatalf("expected default timeout %v, got %v", defaultGitTimeout, p.timeout)
+	}
+}
+
+func TestNewProviderWithTimeout(t *testing.T) {
+	t.Parallel()
+
+	p := NewProviderWithTimeout("/some/dir", 5*time.Second)
+	if p.timeout != 5*time.Second {
+		t.Fatalf("expected timeout 5s, got %v", p.timeout)
+	}
+
+	p2 := NewProviderWithTimeout("/some/dir", 0)
+	if p2.timeout != defaultGitTimeout {
+		t.Fatalf("expected default timeout for non-positive value, got %v", p2.timeout)
+	}
 }
 
 func assertCalls(t *testing.T, got, want []mockCall) {
@@ -344,8 +361,9 @@ func assertCalls(t *testing.T, got, want []mockCall) {
 func TestProvider_Status_Timeout(t *testing.T) {
 	t.Parallel()
 
-	m := &mockRunner{delay: 10 * time.Second}
-	p := newProvider(m, "/project")
+	timeout := 50 * time.Millisecond
+	m := &mockRunner{delay: 100 * time.Millisecond}
+	p := newProvider(m, "/project", timeout)
 
 	start := time.Now()
 	_, err := p.Status(context.Background())
@@ -357,7 +375,7 @@ func TestProvider_Status_Timeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %q", err.Error())
 	}
-	if elapsed > gitTimeout+500*time.Millisecond {
+	if elapsed > timeout+500*time.Millisecond {
 		t.Fatalf("expected prompt timeout, took %v", elapsed)
 	}
 }
@@ -365,8 +383,9 @@ func TestProvider_Status_Timeout(t *testing.T) {
 func TestProvider_Diff_Timeout(t *testing.T) {
 	t.Parallel()
 
-	m := &mockRunner{delay: 10 * time.Second}
-	p := newProvider(m, "/project")
+	timeout := 50 * time.Millisecond
+	m := &mockRunner{delay: 100 * time.Millisecond}
+	p := newProvider(m, "/project", timeout)
 
 	start := time.Now()
 	_, err := p.Diff(context.Background(), "main.go")
@@ -378,7 +397,7 @@ func TestProvider_Diff_Timeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %q", err.Error())
 	}
-	if elapsed > gitTimeout+500*time.Millisecond {
+	if elapsed > timeout+500*time.Millisecond {
 		t.Fatalf("expected prompt timeout, took %v", elapsed)
 	}
 }
@@ -417,6 +436,29 @@ func TestExecRunner_BuildCmd(t *testing.T) {
 	}
 }
 
+func TestExecRunner_SanitizesGitEnv(t *testing.T) {
+	t.Setenv("GIT_DIR", "/malicious")
+	t.Setenv("GIT_WORK_TREE", "/malicious")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/malicious/global")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/malicious/system")
+
+	r := &execRunner{}
+	cmd := r.buildCmd(context.Background(), "/project", "git", "status")
+
+	envMap := make(map[string]string)
+	for _, e := range cmd.Env {
+		if i := strings.Index(e, "="); i >= 0 {
+			envMap[e[:i]] = e[i+1:]
+		}
+	}
+
+	for _, k := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"} {
+		if _, ok := envMap[k]; ok {
+			t.Fatalf("expected %s to be sanitized from git environment", k)
+		}
+	}
+}
+
 func TestProvider_Status_StderrWarning(t *testing.T) {
 	t.Parallel()
 
@@ -444,8 +486,9 @@ func TestProvider_Status_StderrWarning(t *testing.T) {
 func TestProvider_IsRepo_Timeout(t *testing.T) {
 	t.Parallel()
 
-	m := &mockRunner{delay: 10 * time.Second}
-	p := newProvider(m, "/project")
+	timeout := 50 * time.Millisecond
+	m := &mockRunner{delay: 100 * time.Millisecond}
+	p := newProvider(m, "/project", timeout)
 
 	start := time.Now()
 	_, err := p.IsRepo(context.Background())
@@ -457,7 +500,7 @@ func TestProvider_IsRepo_Timeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %q", err.Error())
 	}
-	if elapsed > gitTimeout+500*time.Millisecond {
+	if elapsed > timeout+500*time.Millisecond {
 		t.Fatalf("expected prompt timeout, took %v", elapsed)
 	}
 }
@@ -474,23 +517,20 @@ func TestProvider_Commit(t *testing.T) {
 	}
 
 	calls := m.callsSnapshot()
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 calls, got %d", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if calls[0].name != "git" || len(calls[0].args) != 2 || calls[0].args[0] != "add" || calls[0].args[1] != "-A" {
-		t.Errorf("expected git add -A, got %v", calls[0])
+	if calls[0].name != "git" || len(calls[0].args) != 8 {
+		t.Errorf("expected git commit with identity and --no-verify, got %v", calls[0])
 	}
-	if calls[1].name != "git" || len(calls[1].args) != 8 {
-		t.Errorf("expected git commit with identity and --no-verify, got %v", calls[1])
+	if calls[0].args[0] != "-c" || calls[0].args[1] != "user.name="+defaultCommitName {
+		t.Errorf("expected user.name config, got %v", calls[0].args)
 	}
-	if calls[1].args[0] != "-c" || calls[1].args[1] != "user.name="+defaultCommitName {
-		t.Errorf("expected user.name config, got %v", calls[1].args)
+	if calls[0].args[2] != "-c" || calls[0].args[3] != "user.email="+defaultCommitEmail {
+		t.Errorf("expected user.email config, got %v", calls[0].args)
 	}
-	if calls[1].args[2] != "-c" || calls[1].args[3] != "user.email="+defaultCommitEmail {
-		t.Errorf("expected user.email config, got %v", calls[1].args)
-	}
-	if calls[1].args[4] != "commit" || calls[1].args[5] != "-m" || calls[1].args[6] != "test checkpoint" || calls[1].args[7] != "--no-verify" {
-		t.Errorf("expected git commit -m test checkpoint --no-verify, got %v", calls[1].args)
+	if calls[0].args[4] != "commit" || calls[0].args[5] != "-m" || calls[0].args[6] != "test checkpoint" || calls[0].args[7] != "--no-verify" {
+		t.Errorf("expected git commit -m test checkpoint --no-verify, got %v", calls[0].args)
 	}
 }
 
@@ -506,19 +546,20 @@ func TestProvider_Commit_DefaultMessage(t *testing.T) {
 	}
 
 	calls := m.callsSnapshot()
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 calls, got %d", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if calls[1].args[6] != "kimi-lite checkpoint" {
-		t.Errorf("expected default message, got %q", calls[1].args[6])
+	if calls[0].args[6] != "kimi-lite checkpoint" {
+		t.Errorf("expected default message, got %q", calls[0].args[6])
 	}
 }
 
 func TestProvider_Commit_Timeout(t *testing.T) {
 	t.Parallel()
 
-	m := &mockRunner{delay: 10 * time.Second}
-	p := newProvider(m, "/project")
+	timeout := 50 * time.Millisecond
+	m := &mockRunner{delay: 100 * time.Millisecond}
+	p := newProvider(m, "/project", timeout)
 
 	start := time.Now()
 	err := p.Commit(context.Background(), "msg")
@@ -530,7 +571,7 @@ func TestProvider_Commit_Timeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %q", err.Error())
 	}
-	if elapsed > gitTimeout+500*time.Millisecond {
+	if elapsed > timeout+500*time.Millisecond {
 		t.Fatalf("expected prompt timeout, took %v", elapsed)
 	}
 }
@@ -581,8 +622,23 @@ func TestProvider_Diff_PathValidation(t *testing.T) {
 	}
 }
 
-// commitCleanTreeRunner simulates a clean tree: git add succeeds and git
-// commit exits with the "nothing to commit" message.
+func TestProvider_Diff_PathStartingWithDotDot(t *testing.T) {
+	t.Parallel()
+
+	m := &mockRunner{stdout: []byte("diff --git a/..dotfile.go b/..dotfile.go\n+new line\n")}
+	p := newProvider(m, "/project")
+
+	got, err := p.Diff(context.Background(), "..dotfile.go")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "..dotfile.go") {
+		t.Fatalf("expected diff for ..dotfile.go, got %q", got)
+	}
+}
+
+// commitCleanTreeRunner simulates a clean tree: git commit exits with the
+// "nothing to commit" message.
 type commitCleanTreeRunner struct {
 	mu    sync.Mutex
 	calls []mockCall
@@ -593,9 +649,6 @@ func (r *commitCleanTreeRunner) Output(ctx context.Context, dir, name string, ar
 	r.calls = append(r.calls, mockCall{dir: dir, name: name, args: args})
 	r.mu.Unlock()
 
-	if len(args) >= 1 && args[0] == "add" {
-		return nil, nil, nil
-	}
 	return []byte("On branch main\nnothing to commit, working tree clean\n"), nil, errors.New("exit status 1")
 }
 
@@ -610,11 +663,11 @@ func TestProvider_Commit_NothingToCommit(t *testing.T) {
 		t.Fatalf("expected success for clean tree, got %v", err)
 	}
 
-	if len(m.calls) != 2 {
-		t.Fatalf("expected 2 calls, got %d", len(m.calls))
+	if len(m.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(m.calls))
 	}
-	if m.calls[1].name != "git" || len(m.calls[1].args) < 5 || m.calls[1].args[4] != "commit" {
-		t.Errorf("expected commit call, got %v", m.calls[1])
+	if m.calls[0].name != "git" || len(m.calls[0].args) < 5 || m.calls[0].args[4] != "commit" {
+		t.Errorf("expected commit call, got %v", m.calls[0])
 	}
 }
 
@@ -668,6 +721,9 @@ func TestProvider_Integration(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
 		t.Fatalf("write file failed: %v", err)
 	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "add", "hello.txt").Run(); err != nil {
+		t.Fatalf("git add hello.txt failed: %v", err)
+	}
 	if err := p.Commit(ctx, "add hello"); err != nil {
 		t.Fatalf("commit hello failed: %v", err)
 	}
@@ -693,6 +749,9 @@ func TestProvider_Integration(t *testing.T) {
 		t.Fatalf("expected diff to contain change, got %q", diff)
 	}
 
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "add", "hello.txt").Run(); err != nil {
+		t.Fatalf("git add hello.txt failed: %v", err)
+	}
 	if err := p.Commit(ctx, "update hello"); err != nil {
 		t.Fatalf("commit failed: %v", err)
 	}
@@ -729,6 +788,9 @@ func TestProvider_Integration_NoVerify(t *testing.T) {
 
 	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data\n"), 0o644); err != nil {
 		t.Fatalf("write file failed: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "add", "file.txt").Run(); err != nil {
+		t.Fatalf("git add file.txt failed: %v", err)
 	}
 
 	if err := p.Commit(ctx, "commit with --no-verify"); err != nil {
@@ -859,31 +921,11 @@ func (r *sequenceRunner) Output(ctx context.Context, dir, name string, args ...s
 	return resp.stdout, resp.stderr, resp.err
 }
 
-func TestProvider_Commit_AddError(t *testing.T) {
+func TestProvider_Commit_Error(t *testing.T) {
 	t.Parallel()
 
 	r := &sequenceRunner{
 		responses: []sequenceResponse{
-			{stderr: []byte("add failed"), err: errors.New("exit status 1")},
-		},
-	}
-	p := newProvider(r, "/project")
-
-	err := p.Commit(context.Background(), "msg")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "git add failed") {
-		t.Fatalf("expected git add failed error, got %q", err.Error())
-	}
-}
-
-func TestProvider_Commit_CommitError(t *testing.T) {
-	t.Parallel()
-
-	r := &sequenceRunner{
-		responses: []sequenceResponse{
-			{err: nil},
 			{stderr: []byte("commit failed"), err: errors.New("exit status 1")},
 		},
 	}
@@ -898,11 +940,11 @@ func TestProvider_Commit_CommitError(t *testing.T) {
 	}
 }
 
-type commitAddDelayRunner struct {
+type commitDelayRunner struct {
 	delay time.Duration
 }
 
-func (r *commitAddDelayRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+func (r *commitDelayRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
 	if r.delay > 0 {
 		timer := time.NewTimer(r.delay)
 		defer timer.Stop()
@@ -915,72 +957,10 @@ func (r *commitAddDelayRunner) Output(ctx context.Context, dir, name string, arg
 	return nil, nil, nil
 }
 
-func TestProvider_Commit_AddCanceled(t *testing.T) {
+func TestProvider_Commit_Canceled(t *testing.T) {
 	t.Parallel()
 
-	r := &commitAddDelayRunner{delay: 10 * time.Second}
-	p := newProvider(r, "/project")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
-
-	err := p.Commit(ctx, "msg")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "git add canceled") {
-		t.Fatalf("expected git add canceled error, got %q", err.Error())
-	}
-}
-
-type commitAddOkRunner struct {
-	delay time.Duration
-}
-
-func (r *commitAddOkRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
-	if len(args) > 0 && args[0] == "add" {
-		return nil, nil, nil
-	}
-	if r.delay > 0 {
-		timer := time.NewTimer(r.delay)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		}
-	}
-	return nil, nil, nil
-}
-
-func TestProvider_Commit_CommitTimeout(t *testing.T) {
-	t.Parallel()
-
-	r := &commitAddOkRunner{delay: 10 * time.Second}
-	p := newProvider(r, "/project")
-
-	start := time.Now()
-	err := p.Commit(context.Background(), "msg")
-	elapsed := time.Since(start)
-
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "git commit timed out") {
-		t.Fatalf("expected git commit timed out error, got %q", err.Error())
-	}
-	if elapsed > gitTimeout+500*time.Millisecond {
-		t.Fatalf("expected prompt timeout, took %v", elapsed)
-	}
-}
-
-func TestProvider_Commit_CommitCanceled(t *testing.T) {
-	t.Parallel()
-
-	r := &commitAddOkRunner{delay: 10 * time.Second}
+	r := &commitDelayRunner{delay: 10 * time.Second}
 	p := newProvider(r, "/project")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1112,6 +1092,9 @@ func TestProvider_Integration_Diff_NoChanges(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
 		t.Fatalf("write file failed: %v", err)
 	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "add", "hello.txt").Run(); err != nil {
+		t.Fatalf("git add hello.txt failed: %v", err)
+	}
 	if err := p.Commit(ctx, "add hello"); err != nil {
 		t.Fatalf("commit failed: %v", err)
 	}
@@ -1147,6 +1130,9 @@ func TestProvider_Integration_Diff_Binary(t *testing.T) {
 	binPath := filepath.Join(dir, "data.bin")
 	if err := os.WriteFile(binPath, []byte{0x00, 0x01, 0x02}, 0o644); err != nil {
 		t.Fatalf("write binary file failed: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", dir, "add", "data.bin").Run(); err != nil {
+		t.Fatalf("git add data.bin failed: %v", err)
 	}
 	if err := p.Commit(ctx, "add binary"); err != nil {
 		t.Fatalf("commit failed: %v", err)

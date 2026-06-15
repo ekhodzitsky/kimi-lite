@@ -125,6 +125,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
+	// External editor performs file I/O and subprocess lookup; handle it outside
+	// the critical section so the lock is not held during I/O.
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		if key.Matches(keyMsg, m.keyMap.ExternalEditor) {
+			return m.openExternalEditorCmd()
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		// Lock for the entire key handling path so mutable state (history,
@@ -187,10 +195,6 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 
-		if key.Matches(msg, km.ExternalEditor) {
-			return m.openExternalEditor(m.ctx, m.editor)
-		}
-
 		// History navigation
 		if msg.String() == "up" || msg.String() == "ctrl+p" {
 			if len(m.history) == 0 {
@@ -224,13 +228,26 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			return tea.Batch(cmds...)
 		}
 
+		// Key was not handled above; pass it to the textarea below while still
+		// holding the lock so concurrent SetFileCandidates/SetEditor calls do
+		// not interleave with the update.
+		var cmd tea.Cmd
+		m.textarea, cmd = m.textarea.Update(msg)
+		cmds = append(cmds, cmd)
+		m.detectMention()
+		return tea.Batch(cmds...)
+
 	case editorFinishedMsg:
+		m.mu.Lock()
+		defer m.mu.Unlock()
 		m.handleEditorFinished(msg)
 		m.detectMention()
 		return tea.Batch(cmds...)
 	}
 
 	// Pass other messages to textarea
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
 	cmds = append(cmds, cmd)
@@ -238,8 +255,21 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// openExternalEditorCmd returns a command that launches the external editor
+// without holding m.mu during file I/O or exec.LookPath.
+func (m *Model) openExternalEditorCmd() tea.Cmd {
+	m.mu.Lock()
+	content := m.textarea.Value()
+	editor := m.editor
+	ctx := m.ctx
+	m.mu.Unlock()
+	return m.openExternalEditor(ctx, editor, content)
+}
+
 // View implements tea.Model.
 func (m *Model) View() tea.View {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	view := m.styles.InputBox.Render(m.textarea.View())
 	if comp := m.completionView(); comp != "" {
 		view += "\n" + comp
@@ -249,6 +279,8 @@ func (m *Model) View() tea.View {
 
 // Height returns the rendered height of the input component.
 func (m *Model) Height() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	view := m.styles.InputBox.Render(m.textarea.View())
 	if comp := m.completionView(); comp != "" {
 		view += "\n" + comp
@@ -277,9 +309,14 @@ func (m *Model) Value() string {
 	return m.textarea.Value()
 }
 
-// Reset clears the input.
+// Reset clears the input and any transient state.
 func (m *Model) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.textarea.Reset()
+	m.mention = nil
+	m.draft = ""
+	m.histIdx = -1
 }
 
 // SetValue sets the input value.

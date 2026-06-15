@@ -63,7 +63,7 @@ func (s *Server) handleSessionNew(ctx context.Context, req jsonRPCRequest, enc *
 		return s.writeError(ctx, enc, req.ID, -32603, "invalid working directory", fmt.Errorf("get current directory: %w", err))
 	}
 
-	if err := changeWorkingDir(params.WorkingDir); err != nil {
+	if err := changeWorkingDir(params.WorkingDir, s.allowedRoot); err != nil {
 		return s.writeError(ctx, enc, req.ID, -32603, "invalid working directory", err)
 	}
 
@@ -99,7 +99,7 @@ func (s *Server) handleSessionLoad(ctx context.Context, req jsonRPCRequest, enc 
 		return s.writeError(ctx, enc, req.ID, -32603, "failed to load session", err)
 	}
 
-	if err := changeWorkingDir(sess.Path); err != nil {
+	if err := changeWorkingDir(sess.Path, s.allowedRoot); err != nil {
 		return s.writeError(ctx, enc, req.ID, -32603, "invalid session path", err)
 	}
 

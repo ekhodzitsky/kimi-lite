@@ -224,7 +224,10 @@ func TestMultiClient_ListTools_PartialFailure(t *testing.T) {
 
 	multi := NewMultiClient(
 		map[string]api.MCPClient{"good": good, "bad": bad},
-		map[string]api.MCPServerConfig{"good": {}, "bad": {}},
+		map[string]api.MCPServerConfig{
+			"good": {Enabled: true, Transport: api.MCPTransportStdio, Command: "good"},
+			"bad":  {Enabled: true, Transport: api.MCPTransportStdio, Command: "bad"},
+		},
 	)
 
 	tools, err := multi.ListTools(context.Background())
@@ -242,7 +245,7 @@ func TestMultiClient_ListTools_AllFail(t *testing.T) {
 	bad := &fakeMCPClient{listErr: errors.New("unavailable")}
 	multi := NewMultiClient(
 		map[string]api.MCPClient{"bad": bad},
-		map[string]api.MCPServerConfig{"bad": {}},
+		map[string]api.MCPServerConfig{"bad": {Enabled: true, Transport: api.MCPTransportStdio, Command: "bad"}},
 	)
 
 	_, err := multi.ListTools(context.Background())
@@ -362,5 +365,95 @@ func TestMultiClient_CallTool_MissingClient(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected missing client error, got: %v", err)
+	}
+}
+
+func TestMultiClient_ListTools_SkipsDisabled(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeMCPClient{
+		tools: []api.ToolDefinition{{Name: "tool", Description: "A tool"}},
+	}
+
+	multi := NewMultiClient(
+		map[string]api.MCPClient{"srv": client},
+		map[string]api.MCPServerConfig{"srv": {Enabled: false}},
+	)
+
+	tools, err := multi.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tools) != 0 {
+		t.Fatalf("expected disabled server to be skipped, got %+v", tools)
+	}
+}
+
+func TestMultiClient_Connect_SkipsDisabled(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeMCPClient{connectErr: errors.New("should not be called")}
+
+	multi := NewMultiClient(
+		map[string]api.MCPClient{"srv": client},
+		map[string]api.MCPServerConfig{"srv": {Enabled: false}},
+	)
+
+	if err := multi.Connect(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMultiClient_ListTools_PrefixedNameCollision(t *testing.T) {
+	t.Parallel()
+
+	// Server "a" has tools "tool" and "b_tool". Server "b" also has a tool
+	// named "tool". The natural prefix for the duplicate "tool" from "b" is
+	// "b_tool", which collides with "a"'s original "b_tool". The multi-client
+	// must detect the collision and disambiguate further to "b_b_tool".
+	a := &fakeMCPClient{
+		tools: []api.ToolDefinition{
+			{Name: "tool", Description: "a tool"},
+			{Name: "b_tool", Description: "a b_tool"},
+		},
+	}
+	b := &fakeMCPClient{
+		tools: []api.ToolDefinition{
+			{Name: "tool", Description: "b tool"},
+		},
+	}
+
+	multi := NewMultiClient(
+		map[string]api.MCPClient{"a": a, "b": b},
+		map[string]api.MCPServerConfig{
+			"a": {Enabled: true, Transport: api.MCPTransportStdio, Command: "a"},
+			"b": {Enabled: true, Transport: api.MCPTransportStdio, Command: "b"},
+		},
+	)
+
+	tools, err := multi.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools error: %v", err)
+	}
+
+	names := make(map[string]bool, len(tools))
+	for _, tt := range tools {
+		names[tt.Name] = true
+	}
+	if !names["tool"] {
+		t.Fatalf("expected original tool to be present, got %+v", tools)
+	}
+	if !names["b_tool"] {
+		t.Fatalf("expected original b_tool to be present, got %+v", tools)
+	}
+	if !names["b_b_tool"] {
+		t.Fatalf("expected disambiguated b_b_tool to be present, got %+v", tools)
+	}
+
+	if _, err := multi.CallTool(context.Background(), "b_b_tool", nil); err != nil {
+		t.Fatalf("CallTool b_b_tool error: %v", err)
+	}
+	if b.lastCallName != "tool" {
+		t.Errorf("b called with %q, want tool", b.lastCallName)
 	}
 }

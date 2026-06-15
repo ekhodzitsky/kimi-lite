@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
+
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/llm"
 	"github.com/ekhodzitsky/kimi-lite/internal/store"
@@ -41,7 +43,10 @@ func TestAgenticLoop(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	ctx := context.Background()
+	defer goleak.VerifyNone(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	tmpDir := t.TempDir()
 
 	// Create a file for the read_file tool to read.
@@ -88,7 +93,9 @@ func TestAgenticLoop(t *testing.T) {
 			writeSSE(w, `{"choices":[{"delta":{"content":"Done reading."},"finish_reason":""}]}`)
 			writeSSE(w, `{"choices":[{"delta":{},"finish_reason":"stop"}]}`)
 		} else {
-			writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"%s\"}"}}]},"finish_reason":"tool_calls"}]}`, testFile))
+			args, _ := json.Marshal(map[string]string{"path": testFile})
+			argsJSON, _ := json.Marshal(string(args))
+			writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":%s}}]},"finish_reason":"tool_calls"}]}`, string(argsJSON)))
 		}
 		writeSSE(w, "[DONE]")
 	}))
@@ -125,7 +132,10 @@ func TestAgenticLoop(t *testing.T) {
 	}
 	approval := core.NewApprovalGate(core.ModeAuto, cfg.Behavior.AutoApprove, executor.IsReadOnly, nil)
 
-	turnMgr := core.NewTurnManager(llmClient, executor, approval, st, &testConfigProvider{cfg: cfg})
+	turnMgr, err := core.NewTurnManager(llmClient, executor, approval, st, &testConfigProvider{cfg: cfg})
+	if err != nil {
+		t.Fatalf("create turn manager: %v", err)
+	}
 
 	// Run the turn.
 	events, err := turnMgr.RunTurn(ctx, session.ID, "please read the file")
@@ -188,7 +198,8 @@ func TestAgenticLoop(t *testing.T) {
 	if msgs[1].ToolCalls[0].Name != "read_file" {
 		t.Errorf("tool call name = %q, want read_file", msgs[1].ToolCalls[0].Name)
 	}
-	wantArgs := fmt.Sprintf(`{"path":"%s"}`, testFile)
+	wantArgsBytes, _ := json.Marshal(map[string]string{"path": testFile})
+	wantArgs := string(wantArgsBytes)
 	if msgs[1].ToolCalls[0].Arguments != wantArgs {
 		t.Errorf("tool call arguments = %q, want %q (SQLite round-trip)", msgs[1].ToolCalls[0].Arguments, wantArgs)
 	}

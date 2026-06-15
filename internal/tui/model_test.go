@@ -1799,8 +1799,12 @@ func TestClearMessagesTimeout(t *testing.T) {
 		t.Fatal("expected command")
 	}
 	msg := cmd()
-	if _, ok := msg.(ClearMsg); !ok {
-		t.Fatalf("expected ClearMsg, got %T", msg)
+	errMsg, ok := msg.(ErrorMsg)
+	if !ok {
+		t.Fatalf("expected ErrorMsg, got %T", msg)
+	}
+	if !errors.Is(errMsg.Err, context.DeadlineExceeded) {
+		t.Errorf("expected context deadline exceeded, got %v", errMsg.Err)
 	}
 	if len(model.messages) != 0 {
 		t.Errorf("messages length = %d, want 0", len(model.messages))

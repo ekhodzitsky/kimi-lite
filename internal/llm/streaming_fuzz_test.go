@@ -2,7 +2,6 @@ package llm
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"strings"
 	"testing"
@@ -54,7 +53,7 @@ func FuzzReadChunk(f *testing.F) {
 		// Drain the reader until EOF or any error. The parser is allowed to
 		// return errors for malformed payloads, but it must never panic.
 		for {
-			_, err := r.readRawChunk(context.Background())
+			_, err := r.readRawChunk()
 			if err != nil {
 				return
 			}

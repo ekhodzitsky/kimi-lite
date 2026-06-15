@@ -613,8 +613,8 @@ model = "kimi-k2.5"
 	if !mock.startSessionCalled {
 		t.Error("expected StartSession to be called")
 	}
-	if !mock.setYoloCalled {
-		t.Error("expected yolo to be enabled for prompt mode")
+	if mock.setYoloCalled {
+		t.Error("expected yolo NOT to be enabled when --yolo is not passed")
 	}
 	if mock.runTurnInput != "say hello" {
 		t.Errorf("expected input %q, got %q", "say hello", mock.runTurnInput)
@@ -913,6 +913,8 @@ db_path = "` + customDBPath + `"
 enabled = true
 transport = "http"
 url = "http://localhost:1"
+startup_timeout_ms = 1000
+tool_timeout_ms = 1000
 `
 	configPath := filepath.Join(tmpDir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {

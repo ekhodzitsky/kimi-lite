@@ -58,7 +58,13 @@ func (r *Runner) Run(ctx context.Context, data api.HookData) error {
 		}
 		rendered, err := renderArgs(h.Args, data)
 		if err != nil {
-			return fmt.Errorf("prepare hook %q: %w", h.Event, err)
+			err = fmt.Errorf("prepare hook %q: %w", h.Event, err)
+			if h.ContinueOnError {
+				slog.Warn("hook template failed, continuing", "event", h.Event, "error", err)
+				errs = append(errs, err)
+				continue
+			}
+			return err
 		}
 		cfg := h
 		cfg.Args = rendered

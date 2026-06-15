@@ -12,6 +12,8 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
+const defaultToolTimeout = 30 * time.Second
+
 // MultiClient implements api.MCPClient by aggregating multiple underlying MCP
 // clients. It is used when the user configures direct MCP servers via
 // cfg.MCPServers.
@@ -41,6 +43,9 @@ func (m *MultiClient) Connect(ctx context.Context) error {
 	var errs []error
 	for name, cli := range m.clients {
 		cfg := m.configs[name]
+		if !cfg.Enabled {
+			continue
+		}
 		timeout := time.Duration(cfg.StartupTimeoutMs) * time.Millisecond
 		if timeout <= 0 {
 			timeout = 5 * time.Second
@@ -66,6 +71,7 @@ func (m *MultiClient) ListTools(ctx context.Context) ([]api.ToolDefinition, erro
 
 	all := make([]api.ToolDefinition, 0)
 	seen := make(map[string]string) // original tool name -> first server key
+	used := make(map[string]struct{})
 	routes := make(map[string]string)
 	origins := make(map[string]string)
 
@@ -73,10 +79,13 @@ func (m *MultiClient) ListTools(ctx context.Context) ([]api.ToolDefinition, erro
 	for _, name := range names {
 		cli := m.clients[name]
 		cfg := m.configs[name]
+		if !cfg.Enabled {
+			continue
+		}
 
 		timeout := time.Duration(cfg.ToolTimeoutMs) * time.Millisecond
 		if timeout <= 0 {
-			timeout = 5 * time.Second
+			timeout = defaultToolTimeout
 		}
 		cctx, cancel := context.WithTimeout(ctx, timeout)
 		tools, err := cli.ListTools(cctx)
@@ -92,14 +101,21 @@ func (m *MultiClient) ListTools(ctx context.Context) ([]api.ToolDefinition, erro
 				continue
 			}
 			finalName := t.Name
-			if first, ok := seen[t.Name]; ok {
+			if _, ok := seen[t.Name]; ok {
 				finalName = name + "_" + t.Name
-				// If the first occurrence of this name is still un-prefixed,
-				// make sure it remains routable under its original name.
-				_ = first
 			} else {
 				seen[t.Name] = name
 			}
+			// Detect collisions between prefixed names and existing names
+			// (including names generated for another server) and disambiguate
+			// further by prefixing again with this server's key.
+			for {
+				if _, ok := used[finalName]; !ok {
+					break
+				}
+				finalName = name + "_" + finalName
+			}
+			used[finalName] = struct{}{}
 			routes[finalName] = name
 			origins[finalName] = t.Name
 			t.Name = finalName
@@ -145,16 +161,12 @@ func (m *MultiClient) CallTool(ctx context.Context, name string, args map[string
 	original := origins[name]
 
 	timeout := time.Duration(cfg.ToolTimeoutMs) * time.Millisecond
-	if timeout > 0 {
-		cctx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		res, err := cli.CallTool(cctx, original, args)
-		if err != nil {
-			return "", fmt.Errorf("call tool %s on server %s: %w", original, server, err)
-		}
-		return res, nil
+	if timeout <= 0 {
+		timeout = defaultToolTimeout
 	}
-	res, err := cli.CallTool(ctx, original, args)
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	res, err := cli.CallTool(cctx, original, args)
 	if err != nil {
 		return "", fmt.Errorf("call tool %s on server %s: %w", original, server, err)
 	}

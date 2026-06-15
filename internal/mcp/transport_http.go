@@ -98,6 +98,7 @@ func (t *HTTPTransport) Send(ctx context.Context, method string, params any) (re
 	}
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(httpResp.Body, maxHTTPResponseSize+1))
 		return nil, fmt.Errorf("http %d for %s: %s", httpResp.StatusCode, method, string(body))
 	}
 
@@ -151,6 +152,7 @@ func (t *HTTPTransport) Notify(ctx context.Context, method string, params any) (
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxHTTPResponseSize+1))
+		_, _ = io.Copy(io.Discard, io.LimitReader(httpResp.Body, maxHTTPResponseSize+1))
 		return fmt.Errorf("http %d for notification %s: %s", httpResp.StatusCode, method, string(body))
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(httpResp.Body, maxHTTPResponseSize+1))

@@ -214,3 +214,32 @@ func TestCompositeToolExecutor_NewCompositeToolExecutor_LogsCollision(t *testing
 		t.Errorf("expected first to win, got %q", result.Output)
 	}
 }
+
+func TestCompositeToolExecutor_Execute_ReResolvesDefinitions(t *testing.T) {
+	t.Parallel()
+	exec1 := &mockToolExecutor{
+		defs: []api.ToolDefinition{{Name: "tool_a", Description: "a"}},
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{CallID: call.ID, Output: "from_a"}, nil
+		},
+	}
+	composite := NewCompositeToolExecutor(exec1)
+
+	if _, err := composite.Execute(context.Background(), api.ToolCall{ID: "1", Name: "tool_b"}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	// Add tool_b to the child after construction; routing should pick it up.
+	exec1.defs = append(exec1.defs, api.ToolDefinition{Name: "tool_b", Description: "b"})
+	exec1.executeFunc = func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+		return api.ToolResult{CallID: call.ID, Output: "from_b"}, nil
+	}
+
+	result, err := composite.Execute(context.Background(), api.ToolCall{ID: "2", Name: "tool_b"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Output != "from_b" {
+		t.Errorf("expected dynamic resolution to find tool_b, got %q", result.Output)
+	}
+}
