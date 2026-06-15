@@ -1306,7 +1306,7 @@ func (e *BuiltInToolExecutor) openValidatedFile(path string) (*os.File, error) {
 			if isRootEscapeErr(err) {
 				return nil, fmt.Errorf("%w: path escapes sandbox", ErrSandboxViolation)
 			}
-			return nil, err
+			return nil, fmt.Errorf("open file: %w", err)
 		}
 		if err := checkFileHardlinkEscape(f); err != nil {
 			_ = f.Close()
@@ -1331,7 +1331,7 @@ func (e *BuiltInToolExecutor) openValidatedFile(path string) (*os.File, error) {
 // copyFileToTemp copies the opened file to a temporary file up to maxBytes.
 // The returned file is positioned at the start of the copied data. The caller
 // is responsible for closing and removing the returned file.
-func copyFileToTemp(ctx context.Context, src *os.File, maxBytes int64) (*os.File, error) {
+func copyFileToTemp(src *os.File, maxBytes int64) (*os.File, error) {
 	info, err := src.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)
@@ -1403,7 +1403,7 @@ func (e *BuiltInToolExecutor) execReadVideo(ctx context.Context, args readVideoA
 	}
 	defer func() { _ = src.Close() }()
 
-	tmp, err := copyFileToTemp(ctx, src, maxVideoInputSize)
+	tmp, err := copyFileToTemp(src, maxVideoInputSize)
 	if err != nil {
 		return "", fmt.Errorf("read video: %w", err)
 	}

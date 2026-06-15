@@ -198,7 +198,10 @@ func TestAgenticLoop(t *testing.T) {
 	if msgs[1].ToolCalls[0].Name != "read_file" {
 		t.Errorf("tool call name = %q, want read_file", msgs[1].ToolCalls[0].Name)
 	}
-	wantArgsBytes, _ := json.Marshal(map[string]string{"path": testFile})
+	wantArgsBytes, err := json.Marshal(map[string]string{"path": testFile})
+	if err != nil {
+		t.Fatalf("marshal want args: %v", err)
+	}
 	wantArgs := string(wantArgsBytes)
 	if msgs[1].ToolCalls[0].Arguments != wantArgs {
 		t.Errorf("tool call arguments = %q, want %q (SQLite round-trip)", msgs[1].ToolCalls[0].Arguments, wantArgs)

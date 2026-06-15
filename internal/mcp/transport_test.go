@@ -245,10 +245,9 @@ env | sort
 }
 
 func TestStdioTransport_StderrCaptured(t *testing.T) {
-	t.Parallel()
-
 	script := `#!/bin/sh
 echo "diagnostic message" >&2
+sleep 0.2
 exit 1
 `
 
@@ -267,7 +266,7 @@ exit 1
 	defer tr.Close()
 
 	// Give the readLoop time to observe the subprocess exit and capture stderr.
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	_, err := tr.Send(ctx, "ping", nil)
 	if err == nil {
@@ -697,12 +696,11 @@ func (h *testLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *testLogHandler) WithGroup(string) slog.Handler      { return h }
 
 func TestStdioTransport_UnmatchedFrameDebugLog(t *testing.T) {
-	t.Parallel()
-
 	script := `#!/bin/sh
 read line
 echo '{"jsonrpc":"2.0","id":99,"result":{}}'
 echo '{"jsonrpc":"2.0","id":1,"result":{}}'
+sleep 0.1
 `
 
 	tmpDir := t.TempDir()
@@ -1070,11 +1068,10 @@ done
 }
 
 func TestStdioTransport_Send_ResponseError(t *testing.T) {
-	t.Parallel()
-
 	script := `#!/bin/sh
 read line
 echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad request"}}'
+cat >/dev/null
 `
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "err.sh")

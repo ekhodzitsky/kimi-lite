@@ -589,7 +589,7 @@ func runDoctor(ctx context.Context, configPath string) error {
 			issues = append(issues, "llm-client")
 		} else {
 			if closer, ok := client.(io.Closer); ok {
-				defer closer.Close()
+				defer func() { _ = closer.Close() }()
 			}
 			cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()

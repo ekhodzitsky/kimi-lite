@@ -98,7 +98,7 @@ func isIPv4Compatible(ip net.IP) bool {
 			return false
 		}
 	}
-	return !(ip[10] == 0xff && ip[11] == 0xff)
+	return ip[10] != 0xff || ip[11] != 0xff
 }
 
 // SecureTransport returns an *http.Transport with SSRF-hardened dial logic:

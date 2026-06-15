@@ -41,6 +41,7 @@ func readFileForDiff(path string) (string, error) {
 	if info.Size() > maxFileReadSize {
 		return "", fmt.Errorf("%w: %d bytes exceeds max %d bytes", ErrDiffFileTooLarge, info.Size(), maxFileReadSize)
 	}
+	// #nosec G304 -- path has been validated by ValidateFilePath before this call.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)

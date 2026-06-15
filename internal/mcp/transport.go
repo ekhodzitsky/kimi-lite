@@ -408,12 +408,16 @@ func (t *StdioTransport) readLoop(r io.Reader) {
 				} else {
 					t.readErr = fmt.Errorf("mcp transport: subprocess closed connection")
 				}
+				closeMsg := "transport closed"
+				if stderr != "" {
+					closeMsg = fmt.Sprintf("transport closed (stderr: %s)", stderr)
+				}
 				for id, ch := range t.pending {
 					ch <- &JSONRPCResponse{
 						ID: id,
 						Error: &JSONRPCError{
 							Code:    -32000,
-							Message: "transport closed",
+							Message: closeMsg,
 						},
 					}
 					delete(t.pending, id)
