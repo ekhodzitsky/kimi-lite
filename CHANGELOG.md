@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-06-14
+
+### Fixed
+
+- **Comprehensive audit fixes** — addressed resource leaks, concurrency bugs, and security issues across the codebase:
+  - App/ACP: `App.Close()` now closes MCP/executor/store even on turn shutdown timeout; removed double-close in ACP mode; bounded ACP frame reads to prevent OOM; pprof binds to loopback only; subagent tool allowlist is enforced at execution time.
+  - Config: loader defaults match `DefaultConfig()`; env vars resolve correctly when unset; map key casing is preserved for provider/MCP env and headers; MCP timeouts and turn/tool-round bounds are validated; default config is written atomically.
+  - Store: `GetTurns` reports parse errors; migrations reject gaps/duplicates; in-memory DBs are isolated; `ClearMessages` updates session timestamp; `UpdateSession`/`DeleteSession` report missing rows; DB file is created with `0600` atomically.
+  - LLM: fixed `ChatStream` goroutine/connection leaks and `FallbackClient` timer leaks; `context.DeadlineExceeded` is no longer retried; `ModelAlias.Provider` is honored.
+  - Core: turn context is cancelled on completion; tool execution recovers from panics; `Fork` is atomic; `RiskEvaluator` aligns with `ValidateFilePath`; context compressor reports accurate summarized counts and avoids floor overflow.
+  - Tools: `read_video` uses sandboxed open + temp copy; ReDoS pattern limits and cancellable grep; shell timeout clamped before duration conversion; process-group cleanup shared across core and hooks.
+  - MCP/Git: `StdioTransport.Close` cannot hang on blocked writers; prefixed-name collisions are disambiguated; git timeout is configurable; `Commit` no longer stages unrelated files; git environment is sanitized.
+  - Netutil/TUI: expanded SSRF blocklist (IPv4-compatible IPv6, multicast, documentation ranges); TUI message cache is written under lock; sidebar mouse click works; external editor handles paths with spaces.
+  - Tests: portable JSON in integration test; `goleak` coverage; `IsReadOnly` taken from executor.
+
 ## [0.2.9] - 2026-06-13
 
 ### Added
