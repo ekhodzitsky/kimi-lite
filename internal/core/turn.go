@@ -574,6 +574,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn,
 
 	drain := func() {
 		for range streamCh {
+			continue // drain remaining chunks so the producer can unblock and exit
 		}
 	}
 
