@@ -40,6 +40,7 @@ read line
 echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}'
 read line
 echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"test","description":"A test tool"}]}}'
+cat >/dev/null
 `
 
 	tmpDir := t.TempDir()
@@ -115,6 +116,7 @@ func TestStdioTransport_Notify(t *testing.T) {
 read line
 read line
 echo '{"jsonrpc":"2.0","id":1,"result":{}}'
+cat >/dev/null
 `
 
 	tmpDir := t.TempDir()
@@ -497,11 +499,10 @@ func TestStdioTransport_ConnectStartFailureCleanup(t *testing.T) {
 }
 
 func TestStdioTransport_DecodeErrorBroadcast(t *testing.T) {
-	t.Parallel()
-
 	script := `#!/bin/sh
 read line
 echo 'this is not json'
+cat >/dev/null
 `
 
 	tmpDir := t.TempDir()
@@ -1009,8 +1010,6 @@ func TestStdioTransport_Connect_StdoutPipeError(t *testing.T) {
 }
 
 func TestStdioTransport_IncompleteFrame(t *testing.T) {
-	t.Parallel()
-
 	script := `#!/bin/sh
 read line
 printf '{"jsonrpc":"2.0","id":1,"result":{'
