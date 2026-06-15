@@ -1098,12 +1098,6 @@ func (m *Model) lastAssistantMessage() *msgcomp.Message {
 	return nil
 }
 
-func (m *Model) refreshViewport() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.vp.SetContent(m.rb.String())
-}
-
 func (m *Model) renderApprovalDialog(background string) string {
 	m.mu.RLock()
 	call, ok := m.approval.currentCall()

@@ -341,17 +341,17 @@ func (s *Server) cancelCurrent() bool {
 }
 
 // readLine reads a single line terminated by '\n' from r, capping the returned
-// slice at max+1 bytes. This bounds per-frame memory even when an input line
+// slice at limit+1 bytes. This bounds per-frame memory even when an input line
 // far exceeds maxFrameSize; the remainder of an oversized line is discarded as
 // it is read.
-func readLine(r *bufio.Reader, max int) ([]byte, error) {
+func readLine(r *bufio.Reader, limit int) ([]byte, error) {
 	var line []byte
 	for {
 		b, err := r.ReadByte()
 		if err != nil {
-			return line, err
+			return line, fmt.Errorf("read byte: %w", err)
 		}
-		if len(line) <= max {
+		if len(line) <= limit {
 			line = append(line, b)
 		}
 		if b == '\n' {
@@ -380,11 +380,10 @@ func changeWorkingDir(dir, allowedRoot string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("not a directory: %s", dir)
 	}
+	// If the current directory has been deleted, os.Getwd() can fail. In that
+	// case we still attempt to chdir to dir, since dir was already validated.
 	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("get working directory: %w", err)
-	}
-	if cwd == dir {
+	if err == nil && cwd == dir {
 		return nil
 	}
 	if err := os.Chdir(dir); err != nil {

@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"fmt"
 	"os/exec"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core/procgroup"
@@ -15,5 +16,8 @@ func setProcessGroup(cmd *exec.Cmd) {
 // killProcessGroupPID terminates the process identified by pid and its
 // descendants.
 func killProcessGroupPID(pid int) error {
-	return procgroup.KillProcessGroupPID(pid)
+	if err := procgroup.KillProcessGroupPID(pid); err != nil {
+		return fmt.Errorf("kill process group: %w", err)
+	}
+	return nil
 }

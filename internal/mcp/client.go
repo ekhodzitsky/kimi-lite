@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	clientName             = "kimi-lite"
-	clientVersion          = "0.1.0"
+	clientName               = "kimi-lite"
+	clientVersion            = "0.1.0"
 	requestedProtocolVersion = "2024-11-05"
 )
 

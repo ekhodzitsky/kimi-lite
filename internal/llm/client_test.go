@@ -16,8 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 	"go.uber.org/goleak"
+
+	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
 func TestNewClient(t *testing.T) {
