@@ -37,8 +37,8 @@ const (
 	maxFetchBodySize        = 2 * 1024 * 1024   // 2 MB
 	maxGrepPatternLen       = 1024              // 1 KB
 	maxVideoInputSize       = 500 * 1024 * 1024 // 500 MB
-	maxRegexpOperators = 100
-	maxRegexpDepth     = 10
+	maxRegexpOperators      = 100
+	maxRegexpDepth          = 10
 )
 
 var (
