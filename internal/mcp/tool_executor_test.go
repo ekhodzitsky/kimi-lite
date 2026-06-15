@@ -387,7 +387,6 @@ func TestToolExecutor_Execute(t *testing.T) {
 	})
 }
 
-
 func TestToolExecutor_Execute_EmptyArguments(t *testing.T) {
 	t.Parallel()
 

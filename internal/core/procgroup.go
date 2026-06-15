@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"os/exec"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core/procgroup"
@@ -14,5 +15,8 @@ func setProcessGroup(cmd *exec.Cmd) {
 
 // killProcessGroupPID sends SIGKILL to the entire process group identified by pid.
 func killProcessGroupPID(pid int) error {
-	return procgroup.KillProcessGroupPID(pid)
+	if err := procgroup.KillProcessGroupPID(pid); err != nil {
+		return fmt.Errorf("kill process group: %w", err)
+	}
+	return nil
 }

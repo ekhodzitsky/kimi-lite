@@ -951,6 +951,16 @@ func TestChangeWorkingDir_ChdirError(t *testing.T) {
 }
 
 func TestChangeWorkingDir_RejectsEscape(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	}()
+
 	tmpDir := t.TempDir()
 	subDir := filepath.Join(tmpDir, "sub")
 	if err := os.MkdirAll(subDir, 0755); err != nil {
