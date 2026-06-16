@@ -935,6 +935,25 @@ func TestStatusBar_HidesContextUsageWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestStatusBar_TruncatesLongStatusOnNarrowTerminal(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 30
+	m.height = 10
+	m.updateLayout()
+	m.statusText = strings.Repeat("x", 200)
+
+	bar := m.statusBar()
+	for _, line := range strings.Split(bar, "\n") {
+		if w := lipgloss.Width(line); w > m.width {
+			t.Errorf("status bar line width = %d, want <= %d", w, m.width)
+		}
+	}
+}
+
 func TestStreamChunkWithToolCalls(t *testing.T) {
 	t.Parallel()
 

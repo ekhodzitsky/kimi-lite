@@ -650,7 +650,7 @@ func TestTurnManager_ExecuteToolCalls_ApprovalNo(t *testing.T) {
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalNo, true }}
 	tm := newTestTurnManager(t, nil, tools, approval, store, nil)
 
-	results, pending, _ := tm.executeToolCalls(ctx, sess.ID, &api.Turn{ID: "t1"}, []api.ToolCall{{ID: "tc1", Name: "write_file"}})
+	results, pending, _ := tm.executeToolCalls(ctx, sess.ID, &api.Turn{ID: "t1"}, []api.ToolCall{{ID: "tc1", Name: "write_file"}}, nil)
 	if len(pending) != 0 {
 		t.Errorf("expected no pending, got %d", len(pending))
 	}
@@ -676,7 +676,7 @@ func TestTurnManager_ExecuteToolCalls_ExecuteError(t *testing.T) {
 	approval := &mockApprovalGate{shouldAutoApprove: func(_ api.ToolCall) (api.ApprovalDecision, bool) { return api.ApprovalYes, true }}
 	tm := newTestTurnManager(t, nil, tools, approval, store, nil)
 
-	results, _, _ := tm.executeToolCalls(ctx, sess.ID, &api.Turn{ID: "t1"}, []api.ToolCall{{ID: "tc1", Name: "write_file"}})
+	results, _, _ := tm.executeToolCalls(ctx, sess.ID, &api.Turn{ID: "t1"}, []api.ToolCall{{ID: "tc1", Name: "write_file"}}, nil)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -695,7 +695,7 @@ func TestTurnManager_ExecuteToolCalls_PendingSaveTurnError(t *testing.T) {
 	tm := newTestTurnManager(t, nil, nil, approval, store, nil)
 
 	turn := &api.Turn{ID: "t1", State: api.TurnToolCalls}
-	results, pending, _ := tm.executeToolCalls(ctx, sess.ID, turn, []api.ToolCall{{ID: "tc1", Name: "write_file"}})
+	results, pending, _ := tm.executeToolCalls(ctx, sess.ID, turn, []api.ToolCall{{ID: "tc1", Name: "write_file"}}, nil)
 	if len(pending) != 1 {
 		t.Fatalf("expected 1 pending, got %d", len(pending))
 	}

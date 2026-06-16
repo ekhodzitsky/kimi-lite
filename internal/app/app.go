@@ -446,12 +446,15 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 		a.logger.Debug("git is-repo failed", "error", repoErr)
 	}
 
+	// Build a compact workspace tree for the system prompt.
+	workspaceTree := buildWorkspaceTree(session.Path)
+
 	// Add system message with agentic prompt. Its timestamp is slightly after
 	// the optional git-status message so ordering is deterministic.
 	if appendErr := a.store.AppendMessage(ctx, session.ID, api.Message{
 		ID:        idgen.GenerateID(),
 		Role:      api.RoleSystem,
-		Content:   systemPrompt(session.Path, a.skillsContent),
+		Content:   systemPrompt(session.Path, a.skillsContent, workspaceTree),
 		CreatedAt: now.Add(time.Millisecond),
 	}); appendErr != nil {
 		a.logger.Warn("failed to append system message", "error", appendErr)

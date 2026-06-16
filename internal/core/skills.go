@@ -13,6 +13,7 @@ import (
 // Skill represents a user-provided skill loaded from a markdown file.
 type Skill struct {
 	Name    string
+	Dir     string
 	Content string
 }
 
@@ -64,6 +65,7 @@ func DiscoverSkills(ctx context.Context, dir string) ([]Skill, error) {
 		}
 		skills = append(skills, Skill{
 			Name:    name,
+			Dir:     filepath.Dir(path),
 			Content: string(data),
 		})
 		return nil
@@ -94,14 +96,15 @@ func FilterSkills(all []Skill, names []string) []Skill {
 }
 
 // LoadSkillContent concatenates skill contents into a single system-prompt
-// fragment.
+// fragment. Each skill's directory is included so the skill can reference
+// adjacent scripts, templates, or data files by relative path.
 func LoadSkillContent(skills []Skill) string {
 	var b strings.Builder
 	for _, s := range skills {
 		if b.Len() > 0 {
 			b.WriteString("\n\n---\n\n")
 		}
-		fmt.Fprintf(&b, "# Skill: %s\n\n%s", s.Name, s.Content)
+		fmt.Fprintf(&b, "# Skill: %s\nDirectory: %s\n\n%s", s.Name, s.Dir, s.Content)
 	}
 	return b.String()
 }

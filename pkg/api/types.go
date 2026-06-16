@@ -263,6 +263,8 @@ const (
 	TurnEventToolResult
 	// TurnEventApprovalDiff carries a diff preview for a pending tool call.
 	TurnEventApprovalDiff
+	// TurnEventStatus carries a transient status message for the TUI.
+	TurnEventStatus
 )
 
 // TurnEvent is emitted by TurnManager.RunTurn to report streaming progress.

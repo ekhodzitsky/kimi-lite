@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-16
+
+### Added
+
+- `mcp.NewClientFromServerConfig` now supports `transport = "sse"`, so direct SSE MCP servers work with `kimi-lite doctor` and the ACP/MCP subcommands.
+- Same-language status sentence displayed in the TUI before non-trivial tool calls (`shell`, `write_file`, `edit`, etc.).
+- MCP JSON Schema normalization layer adapts standard MCP `inputSchema` to Moonshot's stricter schema subset (fills missing types, collapses `["string","null"]` arrays, removes parent `type` with `anyOf`/`oneOf`).
+- Workspace tree added to the system prompt; hidden directories are collapsed with a hint to use `list_directory` to expand them.
+- Compaction now emits the generated summary into the TUI transcript so the user sees what was preserved.
+- Media type detection from file headers in `read_video`, with extension-based fallback.
+- Skill directory is included in the loaded-skill context block so skills can reference adjacent files.
+- Cancel key (`ctrl+c`) first clears the draft input text while a stream is running; a second press cancels the stream.
+- System prompt now instructs the model to keep reasoning/thinking in the user's language.
+- Status bar truncates long status text to stay within narrow terminal widths.
+
+### Fixed
+
+- All-sessions picker shows a hint to press `a` when the current directory has no sessions.
+
 ## [0.3.0] - 2026-06-16
 
 ### Added

@@ -103,7 +103,7 @@ func TestConfigProvider_Get(t *testing.T) {
 func TestSystemPrompt_ContainsToolNames(t *testing.T) {
 	t.Parallel()
 
-	prompt := systemPrompt("/tmp/test-dir", "")
+	prompt := systemPrompt("/tmp/test-dir", "", "")
 
 	requiredTools := []string{"read_file", "glob", "grep", "list_directory", "write_file", "str_replace_file", "edit", "shell", "fetch_url", "web_search", "read_video", "TodoList", "dispatch_subagent"}
 	for _, tool := range requiredTools {
@@ -1314,7 +1314,7 @@ func TestApp_PprofServerStartsAndStops(t *testing.T) {
 func TestSystemPrompt_IncludesSkills(t *testing.T) {
 	t.Parallel()
 
-	prompt := systemPrompt("/tmp/test-dir", "# Go\nUse gofmt.")
+	prompt := systemPrompt("/tmp/test-dir", "# Go\nUse gofmt.", "")
 	if !strings.Contains(prompt, "Additional skills context") {
 		t.Error("system prompt missing skills header")
 	}
@@ -1460,12 +1460,50 @@ func TestApp_ImportSession_ClearsMessagesOnFailure(t *testing.T) {
 func TestSystemPrompt_NoLeadingTabs(t *testing.T) {
 	t.Parallel()
 
-	prompt := systemPrompt("/tmp/test-dir", "")
+	prompt := systemPrompt("/tmp/test-dir", "", "")
 	lines := strings.Split(prompt, "\n")
 	for i, line := range lines {
 		if strings.HasPrefix(line, "\t") {
 			t.Fatalf("line %d has leading tab: %q", i, line)
 		}
+	}
+}
+
+func TestBuildWorkspaceTree_CollapsesHidden(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	mustCreate := func(path string, isDir bool) {
+		full := filepath.Join(root, path)
+		if isDir {
+			if err := os.MkdirAll(full, 0755); err != nil {
+				t.Fatalf("mkdir %s: %v", path, err)
+			}
+			return
+		}
+		if err := os.WriteFile(full, []byte("x"), 0644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	mustCreate("visible", true)
+	mustCreate("visible/file.go", false)
+	mustCreate(".hidden", true)
+	mustCreate(".hidden/secret.txt", false)
+	mustCreate("top.txt", false)
+
+	tree := buildWorkspaceTree(root)
+	if !strings.Contains(tree, "visible/") {
+		t.Errorf("tree should contain visible dir")
+	}
+	if !strings.Contains(tree, "file.go") {
+		t.Errorf("tree should contain visible/file.go")
+	}
+	if !strings.Contains(tree, ".hidden/") {
+		t.Errorf("tree should contain .hidden dir")
+	}
+	if strings.Contains(tree, "secret.txt") {
+		t.Errorf("hidden directory contents should be collapsed")
 	}
 }
 

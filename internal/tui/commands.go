@@ -36,6 +36,11 @@ type ToolResultMsg struct {
 	Result api.ToolResult
 }
 
+// StatusMsg carries a transient status sentence for the status bar.
+type StatusMsg struct {
+	Text string
+}
+
 // ErrorMsg carries an error to display.
 type ErrorMsg struct {
 	Err error
@@ -74,7 +79,8 @@ type CompactMsg struct{}
 
 // CompactResultMsg carries the result of a compaction operation.
 type CompactResultMsg struct {
-	Count int
+	Count   int
+	Summary string
 }
 
 // ClearMsg signals the app to clear messages.
@@ -163,7 +169,18 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 				if err != nil {
 					return ErrorMsg{Err: err}
 				}
-				return CompactResultMsg{Count: summarized}
+				summary := ""
+				if summarized > 0 {
+					if msgs, getErr := store.GetMessages(ctx, sessionID, 0); getErr == nil {
+						for _, msg := range msgs {
+							if msg.Role == api.RoleSystem && strings.HasPrefix(msg.Content, "Previous conversation summary:") {
+								summary = strings.TrimSpace(strings.TrimPrefix(msg.Content, "Previous conversation summary:"))
+								break
+							}
+						}
+					}
+				}
+				return CompactResultMsg{Count: summarized, Summary: summary}
 			}
 			return CompactMsg{}
 		}

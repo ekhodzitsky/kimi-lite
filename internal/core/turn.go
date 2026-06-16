@@ -335,7 +335,7 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 			tm.setError(ctx, sessionID, turn, fmt.Errorf("max tool rounds (%d) exceeded", maxToolRounds), eventCh)
 			return
 		}
-		results, pending, pendingIdx := tm.executeToolCalls(ctx, sessionID, turn, toolCalls)
+		results, pending, pendingIdx := tm.executeToolCalls(ctx, sessionID, turn, toolCalls, eventCh)
 
 		if len(pending) > 0 {
 			_, reqID := tm.PendingApprovals()
@@ -434,7 +434,7 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 							Error:  "tool call denied",
 						}
 					} else {
-						result, err = tm.executeToolCall(ctx, call)
+						result, err = tm.executeToolCall(ctx, call, eventCh)
 						if err != nil {
 							result.Error = err.Error()
 						}
@@ -663,7 +663,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn,
 // It returns a result slice with placeholders for pending calls, the pending
 // calls, and the indices at which pending-call results must be inserted to
 // preserve the original call order.
-func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, turn *api.Turn, calls []api.ToolCall) ([]api.ToolResult, []api.ToolCall, []int) {
+func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, turn *api.Turn, calls []api.ToolCall, eventCh chan api.TurnEvent) ([]api.ToolResult, []api.ToolCall, []int) {
 	results := make([]api.ToolResult, len(calls))
 	pending := make([]api.ToolCall, 0)
 	pendingIdx := make([]int, 0)
@@ -695,7 +695,7 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 			continue
 		}
 
-		result, err := tm.executeToolCall(ctx, call)
+		result, err := tm.executeToolCall(ctx, call, eventCh)
 		if err != nil {
 			result.Error = err.Error()
 		}
@@ -726,8 +726,23 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 
 // executeToolCall runs a single tool call and recovers from panics, converting
 // them into a ToolResult with an error message so one bad tool cannot crash the
-// whole turn.
-func (tm *TurnManager) executeToolCall(ctx context.Context, call api.ToolCall) (result api.ToolResult, err error) {
+// whole turn. For non-trivial tools, it emits a transient status event in the
+// user's language before execution.
+func (tm *TurnManager) executeToolCall(ctx context.Context, call api.ToolCall, eventCh chan api.TurnEvent) (result api.ToolResult, err error) {
+	if IsStatusWorthyTool(call.Name) && eventCh != nil {
+		tm.mu.RLock()
+		input := ""
+		if tm.turn != nil {
+			input = tm.turn.Input
+		}
+		tm.mu.RUnlock()
+		lang := DetectLanguage(input)
+		select {
+		case eventCh <- api.TurnEvent{Type: api.TurnEventStatus, Content: StatusMessage(call.Name, lang)}:
+		case <-ctx.Done():
+		}
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			result = api.ToolResult{

@@ -36,13 +36,13 @@ func NewClientFromConfig(cfg api.MCPConfig) *Client {
 }
 
 // NewClientFromServerConfig creates a new MCP client from a direct server
-// configuration. It selects stdio or http transport based on cfg.Transport.
+// configuration. It selects stdio, http, or sse transport based on cfg.Transport.
 //
 // Trust model: stdio transports execute the configured command with arguments
 // directly. Only configure servers and commands you trust, because arbitrary
-// command execution is possible. HTTP transports use the provided httpClient,
-// or netutil.SecureHTTPClient() when nil, to harden outbound requests against
-// SSRF.
+// command execution is possible. HTTP and SSE transports use the provided
+// httpClient, or netutil.SecureHTTPClient() when nil, to harden outbound
+// requests against SSRF.
 func NewClientFromServerConfig(cfg api.MCPServerConfig, httpClient *http.Client) (*Client, error) {
 	switch cfg.Transport {
 	case api.MCPTransportStdio:
@@ -52,6 +52,8 @@ func NewClientFromServerConfig(cfg api.MCPServerConfig, httpClient *http.Client)
 		return NewClient(tr), nil
 	case api.MCPTransportHTTP:
 		return NewClient(NewHTTPTransport(cfg.URL, cfg.Headers, cfg.BearerTokenEnvVar, httpClient)), nil
+	case api.MCPTransportSSE:
+		return NewClient(NewSSETransport(cfg.URL, cfg.Headers, cfg.BearerTokenEnvVar, httpClient)), nil
 	default:
 		return nil, fmt.Errorf("unsupported mcp transport %q", cfg.Transport)
 	}
@@ -130,7 +132,11 @@ func (c *Client) ListTools(ctx context.Context) ([]api.ToolDefinition, error) {
 		return nil, fmt.Errorf("unmarshal tools/list response: %w", err)
 	}
 
-	return result.Tools, nil
+	tools, err := normalizeToolDefinitions(result.Tools)
+	if err != nil {
+		return nil, fmt.Errorf("normalize tools: %w", err)
+	}
+	return tools, nil
 }
 
 // CallTool invokes an MCP tool with the given name and arguments.

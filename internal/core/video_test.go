@@ -369,3 +369,28 @@ func writeScript(t *testing.T, path, content string) {
 		t.Fatalf("write script: %v", err)
 	}
 }
+
+func TestDetectMediaType_HeaderBeforeExtension(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	// A PNG file saved with a .txt extension should be detected as image/png.
+	pngPath := filepath.Join(root, "not-actually.txt")
+	pngHeader := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+	if err := os.WriteFile(pngPath, pngHeader, 0644); err != nil {
+		t.Fatalf("write png header: %v", err)
+	}
+	if got := detectMediaType(pngPath); got != "image/png" {
+		t.Errorf("detectMediaType(png with .txt) = %q, want image/png", got)
+	}
+
+	// An empty .mp4 file falls back to the extension.
+	mp4Path := filepath.Join(root, "empty.mp4")
+	if err := os.WriteFile(mp4Path, []byte{}, 0644); err != nil {
+		t.Fatalf("write empty mp4: %v", err)
+	}
+	if got := detectMediaType(mp4Path); got != "video/mp4" {
+		t.Errorf("detectMediaType(empty .mp4) = %q, want video/mp4", got)
+	}
+}
