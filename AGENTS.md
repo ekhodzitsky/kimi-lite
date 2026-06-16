@@ -98,7 +98,8 @@ Bubble Tea terminal UI.
 - `Model` — root model composing child components
 - `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`)
 - `viewport` — scrollable output
-- `messages` — message rendering (Markdown via Glamour)
+- `messages` — message rendering (Markdown via Glamour); tool-call blocks show status icons, `Using`/`Used`/`Error` verbs, and elapsed duration
+- `activity` — transient activity panel between the viewport and input; shows spinner and pending tool names during `Thinking`, `Streaming`, and `ToolCalls` turns
 - `sessions` — modal session picker with search, pagination, current/all-directory toggle, and a hint to press `a` when the current directory has no sessions
 - `mentions` — file-path candidate provider for `@`-mention completion
 - `styles` — Lipgloss themes
