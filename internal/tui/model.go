@@ -16,9 +16,9 @@ import (
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/mentions"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/sessions"
-	"github.com/ekhodzitsky/kimi-lite/internal/tui/sidebar"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/viewport"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
@@ -29,7 +29,6 @@ type focusedComponent int
 
 const (
 	focusInput focusedComponent = iota
-	focusSidebar
 	focusViewport
 )
 
@@ -37,7 +36,7 @@ const (
 	statusHeight      = 1
 	minContentWidth   = 20
 	minViewportHeight = 5
-	// viewportWidthPadding accounts for sidebar border + content padding.
+	// viewportWidthPadding accounts for viewport border + content padding.
 	viewportWidthPadding = 4
 	minInputHeight       = 3
 
@@ -60,7 +59,6 @@ func (m *Model) inputHeight() int {
 
 // layoutRect holds computed geometry for a single frame.
 type layoutRect struct {
-	sbWidth      int
 	contentWidth int
 	vpWidth      int
 	vpHeight     int
@@ -70,8 +68,7 @@ type layoutRect struct {
 
 // eq reports whether two layouts have identical geometry.
 func (r layoutRect) eq(o layoutRect) bool {
-	return r.sbWidth == o.sbWidth &&
-		r.contentWidth == o.contentWidth &&
+	return r.contentWidth == o.contentWidth &&
 		r.vpWidth == o.vpWidth &&
 		r.vpHeight == o.vpHeight &&
 		r.inputHeight == o.inputHeight &&
@@ -80,11 +77,7 @@ func (r layoutRect) eq(o layoutRect) bool {
 
 // layout computes all geometry once, folding in min-content/min-viewport clamps.
 func (m *Model) layout() layoutRect {
-	sbWidth := 0
-	if m.sidebar.Visible() {
-		sbWidth = m.sidebar.Width()
-	}
-	contentWidth := m.width - sbWidth
+	contentWidth := m.width
 	if contentWidth < minContentWidth {
 		contentWidth = minContentWidth
 	}
@@ -98,7 +91,6 @@ func (m *Model) layout() layoutRect {
 		statusY = m.height
 	}
 	return layoutRect{
-		sbWidth:      sbWidth,
 		contentWidth: contentWidth,
 		vpWidth:      contentWidth - viewportWidthPadding,
 		vpHeight:     vpHeight,
@@ -137,8 +129,9 @@ type Model struct {
 
 	input    *input.Model
 	vp       *viewport.Model
-	sidebar  *sidebar.Model
 	messages []*msgcomp.Message
+
+	mentionProvider mentions.Provider
 
 	state       api.TurnState
 	session     *api.Session
@@ -210,30 +203,40 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 	inp.SetContext(appCtx)
 	vp := viewport.New(st)
 
-	sb, err := sidebar.New(st, session.Path)
-	if err != nil {
-		return nil, fmt.Errorf("create sidebar: %w", err)
-	}
-
+	mp := &mentions.FileWalker{MaxDepth: 3}
 	m := &Model{
-		styles:       st,
-		config:       cfg,
-		input:        inp,
-		vp:           vp,
-		sidebar:      sb,
-		messages:     make([]*msgcomp.Message, 0),
-		state:        api.TurnIdle,
-		session:      session,
-		contextMax:   0,
-		modelName:    cfg.LLM.Model,
-		focused:      focusInput,
-		appCtx:       appCtx,
-		rb:           newRenderBuffer(),
-		approval:     newApprovalController(),
-		approvalMode: approvalModeAuto,
+		styles:          st,
+		config:          cfg,
+		input:           inp,
+		vp:              vp,
+		messages:        make([]*msgcomp.Message, 0),
+		state:           api.TurnIdle,
+		session:         session,
+		contextMax:      0,
+		modelName:       cfg.LLM.Model,
+		focused:         focusInput,
+		appCtx:          appCtx,
+		rb:              newRenderBuffer(),
+		approval:        newApprovalController(),
+		approvalMode:    approvalModeAuto,
+		mentionProvider: mp,
 	}
+	inp.SetCandidateFunc(func() []string {
+		m.mu.RLock()
+		provider := m.mentionProvider
+		path := ""
+		if m.session != nil {
+			path = m.session.Path
+		}
+		m.mu.RUnlock()
+		if provider == nil {
+			return nil
+		}
+		cands, _ := provider.Candidates(path)
+		return cands
+	})
 	m.updateLayout()
-	m.syncInputCandidates()
+	m.refreshFileCandidates()
 	return m, nil
 }
 
@@ -312,7 +315,6 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.input.Init(),
 		m.vp.Init(),
-		m.sidebar.Init(),
 	)
 }
 
@@ -450,7 +452,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = nil
 			m.rb = newRenderBuffer()
 			m.mu.Unlock()
-			_ = m.sidebar.SetRoot(msg.Session.Path)
+			m.refreshFileCandidates()
 			for _, msg := range msg.Session.Messages {
 				m.appendSessionMessage(msg)
 			}
@@ -487,9 +489,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case input.SendMsg:
 		cmds = append(cmds, m.handleSend(msg.Content)...)
-
-	case sidebar.SelectFileMsg:
-		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Selected file: %s", msg.Path), m.styles))
 	}
 
 	// Update focused child component for KeyMsg; all children for other messages
@@ -502,18 +501,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.input.UpdateMsg(msg))
 			case focusViewport:
 				cmds = append(cmds, m.vp.UpdateMsg(msg))
-			case focusSidebar:
-				if m.sidebar.Visible() {
-					cmds = append(cmds, m.sidebar.UpdateMsg(msg))
-					m.syncInputCandidates()
-				}
 			}
 		}
 	} else {
 		cmds = append(cmds, m.input.UpdateMsg(msg))
 		cmds = append(cmds, m.vp.UpdateMsg(msg))
-		cmds = append(cmds, m.sidebar.UpdateMsg(msg))
-		m.syncInputCandidates()
 	}
 
 	// Update messages - pass KeyMsg through only when the viewport is focused
@@ -557,13 +549,6 @@ func (m *Model) View() tea.View {
 	mainContent.WriteString(m.statusBar())
 
 	view := mainContent.String()
-	if m.sidebar.Visible() {
-		view = lipgloss.JoinHorizontal(
-			lipgloss.Top,
-			m.sidebar.View().Content,
-			view,
-		)
-	}
 
 	if m.state == api.TurnWaitingApproval && m.approvalIsActive() {
 		view = m.renderApprovalDialog(view)
@@ -638,12 +623,6 @@ func (m *Model) setState(s api.TurnState) {
 	m.state = s
 }
 
-// syncInputCandidates refreshes the input's file completion list from the
-// sidebar's currently visible tree.
-func (m *Model) syncInputCandidates() {
-	m.input.SetFileCandidates(m.sidebar.RefreshVisiblePaths())
-}
-
 func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 
@@ -698,16 +677,6 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 			m.mu.Unlock()
 			m.setState(api.TurnIdle)
 		}
-	case m.config.Keybindings.ToggleSidebar:
-		m.sidebar.Toggle()
-		m.updateLayout()
-		if !m.sidebar.Visible() && m.focused == focusSidebar {
-			m.focused = focusInput
-			m.syncInputCandidates()
-			if cmd := m.input.Focus(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
 	case m.config.Keybindings.FocusNext:
 		if cmd := m.cycleFocus(1); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -735,9 +704,6 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 
 func (m *Model) cycleFocus(delta int) tea.Cmd {
 	components := []focusedComponent{focusInput, focusViewport}
-	if m.sidebar.Visible() {
-		components = []focusedComponent{focusInput, focusSidebar, focusViewport}
-	}
 
 	currentIdx := -1
 	for i, c := range components {
@@ -756,7 +722,6 @@ func (m *Model) cycleFocus(delta int) tea.Cmd {
 	m.focused = components[newIdx]
 
 	if m.focused == focusInput {
-		m.syncInputCandidates()
 		return m.input.Focus()
 	}
 	m.input.Blur()
@@ -770,14 +735,8 @@ func (m *Model) handleMouseMsg(msg tea.MouseReleaseMsg) {
 
 	l := m.layout()
 
-	if m.sidebar.Visible() && msg.X < l.sbWidth {
-		m.focused = focusSidebar
-		return
-	}
-
 	if msg.Y >= l.vpHeight && msg.Y < l.statusY {
 		m.focused = focusInput
-		m.syncInputCandidates()
 	} else if msg.Y < l.vpHeight {
 		m.focused = focusViewport
 	}
@@ -1436,9 +1395,23 @@ func (m *Model) updateLayout() {
 
 // applyLayoutSizes updates child component sizes without rebuilding the transcript.
 func (m *Model) applyLayoutSizes(l layoutRect) {
-	m.sidebar.SetSize(l.sbWidth, m.height-1)
 	m.vp.SetSize(l.contentWidth, l.vpHeight)
 	m.input.SetWidth(l.contentWidth)
+}
+
+func (m *Model) refreshFileCandidates() {
+	m.mu.RLock()
+	provider := m.mentionProvider
+	path := ""
+	if m.session != nil {
+		path = m.session.Path
+	}
+	m.mu.RUnlock()
+	if provider == nil {
+		return
+	}
+	cands, _ := provider.Candidates(path)
+	m.input.SetFileCandidates(cands)
 }
 
 func (m *Model) contentWidth() int {

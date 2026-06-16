@@ -14,17 +14,6 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
-func TestNew_Error(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: "/nonexistent/path/that/does/not/exist"}
-	_, err := New(cfg, session, context.Background())
-	if err == nil {
-		t.Fatal("expected error for non-existent session path")
-	}
-}
-
 func TestCycleFocus_Forward(t *testing.T) {
 	t.Parallel()
 
@@ -42,20 +31,14 @@ func TestCycleFocus_Forward(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	model := updated.(*Model)
-	if model.focused != focusSidebar {
-		t.Errorf("first tab focus = %d, want focusSidebar", model.focused)
+	if model.focused != focusViewport {
+		t.Errorf("first tab focus = %d, want focusViewport", model.focused)
 	}
 
 	updated2, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	model2 := updated2.(*Model)
-	if model2.focused != focusViewport {
-		t.Errorf("second tab focus = %d, want focusViewport", model2.focused)
-	}
-
-	updated3, _ := model2.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	model3 := updated3.(*Model)
-	if model3.focused != focusInput {
-		t.Errorf("third tab focus = %d, want focusInput", model3.focused)
+	if model2.focused != focusInput {
+		t.Errorf("second tab focus = %d, want focusInput", model2.focused)
 	}
 }
 
@@ -72,44 +55,14 @@ func TestCycleFocus_Backward(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	model := updated.(*Model)
-	if model.focused != focusSidebar {
-		t.Errorf("shift+tab from viewport = %d, want focusSidebar", model.focused)
+	if model.focused != focusInput {
+		t.Errorf("shift+tab from viewport = %d, want focusInput", model.focused)
 	}
 
 	updated2, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	model2 := updated2.(*Model)
-	if model2.focused != focusInput {
-		t.Errorf("shift+tab from sidebar = %d, want focusInput", model2.focused)
-	}
-
-	updated3, _ := model2.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	model3 := updated3.(*Model)
-	if model3.focused != focusViewport {
-		t.Errorf("shift+tab from input = %d, want focusViewport", model3.focused)
-	}
-}
-
-func TestCycleFocus_HiddenSidebar(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
-	m.width = 120
-	m.height = 40
-	m.updateLayout()
-	m.sidebar.Toggle()
-
-	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	model := updated.(*Model)
-	if model.focused != focusViewport {
-		t.Errorf("tab with hidden sidebar = %d, want focusViewport", model.focused)
-	}
-
-	updated2, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	model2 := updated2.(*Model)
-	if model2.focused != focusInput {
-		t.Errorf("tab back with hidden sidebar = %d, want focusInput", model2.focused)
+	if model2.focused != focusViewport {
+		t.Errorf("shift+tab from input = %d, want focusViewport", model2.focused)
 	}
 }
 
@@ -248,7 +201,7 @@ func TestHandleMouseMsg_RightButtonIgnored(t *testing.T) {
 	}
 }
 
-func TestHandleMouseMsg_SidebarClick(t *testing.T) {
+func TestHandleMouseMsg_ViewportClick(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
@@ -260,8 +213,8 @@ func TestHandleMouseMsg_SidebarClick(t *testing.T) {
 
 	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft, X: 5, Y: 5})
 	model := updated.(*Model)
-	if model.focused != focusSidebar {
-		t.Errorf("focus = %d, want focusSidebar after sidebar click", model.focused)
+	if model.focused != focusViewport {
+		t.Errorf("focus = %d, want focusViewport after viewport click", model.focused)
 	}
 }
 
@@ -274,7 +227,6 @@ func TestHandleMouseMsg_InputClick(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
-	m.sidebar.Toggle()
 
 	l := m.layout()
 	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft, X: 50, Y: l.vpHeight})

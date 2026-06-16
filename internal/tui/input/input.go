@@ -86,6 +86,7 @@ type Model struct {
 	maxHistory     int
 	editor         string // configured editor; env vars used as fallback
 	fileCandidates []string
+	candidateFn    func() []string
 	mention        *mentionState
 	ctx            context.Context
 	mu             sync.RWMutex
@@ -332,6 +333,13 @@ func (m *Model) SetEditor(editor string) {
 	m.editor = editor
 }
 
+// SetCandidateFunc sets a function that returns fresh file candidates on demand.
+func (m *Model) SetCandidateFunc(fn func() []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.candidateFn = fn
+}
+
 // SetContext sets the context used to control the external editor subprocess.
 // When the context is cancelled, the running editor process is terminated.
 func (m *Model) SetContext(ctx context.Context) {
@@ -341,8 +349,7 @@ func (m *Model) SetContext(ctx context.Context) {
 }
 
 // SetFileCandidates sets the list of file paths available for @-mention
-// completion. The caller is responsible for keeping the list in sync with the
-// sidebar tree.
+// completion.
 func (m *Model) SetFileCandidates(paths []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -456,6 +463,9 @@ func (m *Model) detectMention() {
 		return
 	}
 	query := strings.ToLower(word[1:])
+	if len(m.fileCandidates) == 0 && m.candidateFn != nil {
+		m.fileCandidates = m.candidateFn()
+	}
 	candidates := m.filterCandidates(query)
 	if len(candidates) == 0 {
 		m.mention = nil

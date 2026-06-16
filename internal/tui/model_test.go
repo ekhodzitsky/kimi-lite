@@ -13,7 +13,6 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
-	"github.com/ekhodzitsky/kimi-lite/internal/tui/sidebar"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -599,7 +598,6 @@ func TestApprovalDialog_WideRunes(t *testing.T) {
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: t.TempDir()}
 	m, _ := New(cfg, session, context.Background())
-	m.sidebar.Toggle()
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -635,7 +633,6 @@ func TestApprovalDialog_NarrowTerminal(t *testing.T) {
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: t.TempDir()}
 	m, _ := New(cfg, session, context.Background())
-	m.sidebar.Toggle()
 	m.width = 30
 	m.height = 10
 	m.updateLayout()
@@ -732,25 +729,6 @@ func TestCancelKey(t *testing.T) {
 
 	if model.state != api.TurnIdle {
 		t.Errorf("state = %d, want TurnIdle after cancel", model.state)
-	}
-}
-
-func TestToggleSidebar(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
-	m.width = 120
-	m.height = 40
-	m.updateLayout()
-
-	visibleBefore := m.sidebar.Visible()
-	updated, _ := m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
-	model := updated.(*Model)
-
-	if model.sidebar.Visible() == visibleBefore {
-		t.Error("sidebar visibility should toggle")
 	}
 }
 
@@ -1069,27 +1047,6 @@ func TestTurnWithToolCallRendersToolCallAndResult(t *testing.T) {
 	}
 	if !strings.Contains(toolCallMsg.View().Content, "done") {
 		t.Errorf("tool call message should render done status, got %q", toolCallMsg.View().Content)
-	}
-}
-
-func TestSidebarSelectFile(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
-	m.width = 120
-	m.height = 40
-	m.updateLayout()
-
-	updated, _ := m.Update(sidebar.SelectFileMsg{Path: "/tmp/test.go"})
-	model := updated.(*Model)
-
-	if len(model.messages) != 1 {
-		t.Fatalf("messages length = %d, want 1", len(model.messages))
-	}
-	if !strings.Contains(model.messages[0].Content, "/tmp/test.go") {
-		t.Errorf("message should contain file path, got %q", model.messages[0].Content)
 	}
 }
 
@@ -2104,7 +2061,6 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 }
 
 // TestGoldenViewIdle is a smoke golden test for the deterministic TUI harness.
-// It renders the idle state with the sidebar hidden so the output is stable.
 func TestGoldenViewIdle(t *testing.T) {
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: t.TempDir()}
@@ -2113,7 +2069,6 @@ func TestGoldenViewIdle(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	m.sidebar.Toggle()
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -2128,7 +2083,6 @@ func newGoldenModel(t *testing.T) *Model {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	m.sidebar.Toggle()
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
