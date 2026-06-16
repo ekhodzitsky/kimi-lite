@@ -31,22 +31,22 @@ type Theme struct {
 // darkTheme is the default dark theme.
 var darkTheme = Theme{
 	Name:            "dark",
-	Background:      lipgloss.Color("#1e1e2e"),
-	Foreground:      lipgloss.Color("#cdd6f4"),
-	Primary:         lipgloss.Color("#89b4fa"),
-	Secondary:       lipgloss.Color("#cba6f7"),
-	Success:         lipgloss.Color("#a6e3a1"),
-	Warning:         lipgloss.Color("#f9e2af"),
-	Error:           lipgloss.Color("#f38ba8"),
-	Muted:           lipgloss.Color("#6c7086"),
-	Border:          lipgloss.Color("#45475a"),
-	UserBubble:      lipgloss.Color("#313244"),
-	AssistantBubble: lipgloss.Color("#1e1e2e"),
-	ToolBubble:      lipgloss.Color("#45475a"),
-	StatusBarBg:     lipgloss.Color("#181825"),
-	SidebarBg:       lipgloss.Color("#181825"),
-	InputBg:         lipgloss.Color("#313244"),
-	Highlight:       lipgloss.Color("#89b4fa"),
+	Background:      lipgloss.Color("#1a1a1a"),
+	Foreground:      lipgloss.Color("#E0E0E0"),
+	Primary:         lipgloss.Color("#4FA8FF"),
+	Secondary:       lipgloss.Color("#5BC0BE"),
+	Success:         lipgloss.Color("#4EC87E"),
+	Warning:         lipgloss.Color("#E8A838"),
+	Error:           lipgloss.Color("#E85454"),
+	Muted:           lipgloss.Color("#6B6B6B"),
+	Border:          lipgloss.Color("#5A5A5A"),
+	UserBubble:      lipgloss.Color("#2a2a2a"),
+	AssistantBubble: lipgloss.Color("#1a1a1a"),
+	ToolBubble:      lipgloss.Color("#333333"),
+	StatusBarBg:     lipgloss.Color("#111111"),
+	SidebarBg:       lipgloss.Color("#111111"),
+	InputBg:         lipgloss.Color("#262626"),
+	Highlight:       lipgloss.Color("#4FA8FF"),
 }
 
 // lightTheme is the light theme.
@@ -122,13 +122,13 @@ func (s *Styles) init() {
 
 	s.UserMessage = lipgloss.NewStyle().
 		Background(t.UserBubble).
-		Foreground(t.Foreground).
+		Foreground(lipgloss.Color("#FFCB6B")).
 		Padding(0, 1).
-		MarginLeft(4).
-		MarginRight(1).
+		MarginLeft(1).
+		MarginRight(4).
 		MarginBottom(1).
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(t.Primary)
+		BorderForeground(lipgloss.Color("#FFCB6B"))
 
 	s.AssistantMessage = lipgloss.NewStyle().
 		Background(t.AssistantBubble).
