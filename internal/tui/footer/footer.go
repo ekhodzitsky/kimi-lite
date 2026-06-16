@@ -174,11 +174,16 @@ func (m *Model) gitBadge() string {
 
 func (m *Model) rotatingTip() string {
 	tips := []string{
-		"shift+tab: plan mode",
-		"/compact: compact context",
-		"ctrl+o: expand tool output",
-		"ctrl+s: steer mid-stream",
+		"enter: send message",
+		"alt+enter: insert newline",
+		"enter: expand tool output",
+		"r: toggle raw markdown",
+		"tab/shift+tab: switch focus",
+		"ctrl+g: external editor",
+		"ctrl+y: toggle yolo mode",
 		"@: mention files",
+		"/compact: compact context",
+		"/sessions: switch session",
 	}
 	if m.tipIdx < 0 {
 		m.tipIdx = 0

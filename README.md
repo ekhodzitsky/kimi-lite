@@ -10,7 +10,7 @@ A single-terminal AI assistant with no Node, Python runtime, or Electron depende
 ## Features
 
 - **Streaming TUI chat** — native Bubble Tea interface with multi-line input, history, `@`-mention file completion, and a two-line footer showing model, git, and context status.
-- **Built-in tools** — `read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, and `read_video` (ffmpeg/ffprobe) with sandboxed file access.
+- **Built-in tools** — `read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `dispatch_subagent`, and `TodoList` with sandboxed file access.
 - **Subagents** — delegate focused work to `coder`, `explore`, and `plan` subagents via `dispatch_subagent`.
 - **Lifecycle hooks** — run local commands at `session_start`, `turn_start`, `turn_end`, `tool_call`, `tool_result`, `approval_request`, and `approval_decision`.
 - **ACP server** — `kimi-lite acp` speaks JSON-RPC 2.0 over stdio for external agent integration.
@@ -105,7 +105,7 @@ make bench   # run benchmarks
 
 ## Status
 
-This is a Go reimplementation of the [original Python client](https://github.com/MoonshotAI/kimi-code), rewritten with dependency injection, context cancellation, and zero global state. The core feature set is implemented and the API is stabilizing; see [CHANGELOG.md](CHANGELOG.md) for recent additions.
+This is a Go reimplementation of the [original TypeScript client](https://github.com/MoonshotAI/kimi-code), rewritten with dependency injection, context cancellation, and zero global state. The core feature set is implemented and the API is stabilizing; see [CHANGELOG.md](CHANGELOG.md) for recent additions.
 
 ## License
 
