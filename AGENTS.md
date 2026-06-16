@@ -17,6 +17,8 @@ internal/
   idgen/                # Shared ID generation
   llm/                  # LLM client (OpenAI-compatible API)
   mcp/                  # MCP client (JSON-RPC over stdio to mcp-guard)
+  netutil/              # SSRF-hardened HTTP clients and network helpers
+  observability/        # Metrics collection and profiling helpers
   store/                # SQLite persistence (pure-Go, CGO-free)
   tui/                  # Terminal UI (Bubble Tea)
   git/                  # Git integration
@@ -31,12 +33,15 @@ Public types and interfaces used across all packages. **This is the contract lay
 Key interfaces and types:
 - `LLMClient` — Chat, ChatStream, Models
 - `Store` — Session/message/turn persistence
-- `ToolExecutor` — Execute, Definitions
+- `ToolExecutor` — Execute, Definitions, IsReadOnly
 - `ApprovalGate` — ShouldAutoApprove
 - `MCPClient` — Connect, ListTools, CallTool
 - `MCPServerConfig` — direct MCP server configuration (stdio, http, and sse transports)
-- `GitProvider` — Status, Diff, IsRepo
+- `GitProvider` — Status, Diff, IsRepo, Commit
 - `WebSearcher` — Search
+- `TokenEstimator` — Estimate
+- `MetricsCollector` / `HookRunner` — observability and lifecycle hooks
+- `TurnEventStatus` — transient status message event for the TUI
 
 ### `internal/config`
 Configuration loading from TOML files, environment variables, and CLI flags.
@@ -72,16 +77,19 @@ OpenAI-compatible LLM client with SSE streaming.
 Business logic layer.
 
 - `SessionManager` — create, resume, list sessions; recovers interrupted tool calls by synthesizing missing tool-result messages on resume
-- `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages
-- `BuiltInToolExecutor` — 12 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `TodoList`) with sandboxed file access; `web_search` is only registered when an `api.WebSearcher` provider is injected
+- `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages and emits `TurnEventStatus` messages for non-trivial tools
+- `BuiltInToolExecutor` — 13 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `dispatch_subagent`, `TodoList`) with sandboxed file access; `web_search` is only registered when an `api.WebSearcher` provider is injected
   - Uses `os.OpenRoot` when `SandboxRoot` is configured; falls back to `O_NOFOLLOW` (`openFileNoFollow`) when no sandbox root is set
   - Blocks protected paths and sensitive system/secret trees
   - Performs hardlink-escape checks on sandboxed reads
   - `NewBuiltInToolExecutor` returns `(*BuiltInToolExecutor, error)` and fails if the sandbox root cannot be opened
   - `ValidateFilePath` is an exported helper used by the TUI diff preview
+  - `read_video` detects media type from file headers before falling back to the extension
 - `CompositeToolExecutor` — routes tool calls across multiple executors
-- `ApprovalGate` — auto/manual/yolo approval modes; the TUI approval dialog supports an in-memory diff preview (`d`) for file-edit tools
-- `ContextCompressor` — summarizes conversation history via LLM while preserving leading system/identity prompts verbatim and using pair-aware boundaries so assistant/tool-call groups are not split across the summary/recent boundary
+- `ApprovalGate` — auto/manual/yolo approval modes; integrates with `RiskEvaluator` to require approval for calls above the configured risk threshold
+- `RiskEvaluator` — scores tool calls `low`/`medium`/`high` using built-in baselines, path-escape checks, and user-configured rules
+- `ContextCompressor` — summarizes conversation history via LLM while preserving leading system/identity prompts verbatim and using pair-aware boundaries so assistant/tool-call groups are not split across the summary/recent boundary; the generated summary is surfaced in the TUI transcript
+- `DetectLanguage` / `StatusMessage` — simple script-based language detection and localized status sentences used before non-trivial tool calls
 - DNS rebinding protection via custom `DialContext` in `netutil.SecureHTTPClient`/`netutil.SecureTransport` (used by `fetch_url` and MCP HTTP transports)
 
 ### `internal/tui`
@@ -92,8 +100,9 @@ Bubble Tea terminal UI.
 - `viewport` — scrollable output
 - `sidebar` — file browser
 - `messages` — message rendering (Markdown via Glamour)
-- `sessions` — modal session picker with search, pagination, and current/all-directory toggle
+- `sessions` — modal session picker with search, pagination, current/all-directory toggle, and a hint to press `a` when the current directory has no sessions
 - `styles` — Lipgloss themes
+- Status bar displays transient localized status messages before non-trivial tool calls and truncates them on narrow terminals
 
 ### `internal/mcp`
 MCP client implementation supporting the legacy `mcp-guard` stdio path, direct
@@ -107,6 +116,7 @@ MCP client implementation supporting the legacy `mcp-guard` stdio path, direct
 - `NewMultiClient(clients, configs)` — aggregates multiple MCP clients, disambiguates duplicate tool names by server key, and routes tool calls
 - `Connect()` — performs MCP initialize handshake
 - `ListTools()` / `CallTool()` — tool operations
+- Normalizes MCP tool parameter schemas to the stricter Moonshot JSON Schema subset (fills missing types, collapses type arrays, fixes `anyOf`/`oneOf` parent types)
 - Graceful degradation if mcp-guard or a configured server is unavailable
 
 ### `internal/git`
@@ -118,6 +128,13 @@ Git integration via shelling out to `git`.
 - `IsRepo()` — checks for `.git`
 - `Commit(ctx, message)` — creates a checkpoint commit with `--no-verify` and a local identity
 
+### `internal/observability`
+Metrics collection and profiling helpers.
+
+- `NewCollector()` — creates an in-memory metrics collector
+- `IncCounter` / `RecordLatency` / `RecordError` — counters and latency observations
+- Used by `TurnManager` and the `--pprof` server
+
 ### `internal/app`
 DI container and application lifecycle.
 
@@ -125,6 +142,8 @@ DI container and application lifecycle.
 - `Run(ctx, session)` — starts TUI program
 - `Close()` — graceful shutdown
 - `SetYolo()` / `SetAutoApprove()` — CLI flag application
+- `systemPrompt()` — builds the agentic system prompt, including a compact workspace tree with hidden directories collapsed and appended skill context
+- `buildWorkspaceTree()` — generates the workspace tree shown in the system prompt
 
 ## Code Style
 
@@ -172,7 +191,9 @@ make fmt vet
 1. Add tool definition to `BuiltInToolExecutor.Definitions()` in `internal/core/tools.go`
 2. Add execution logic in `BuiltInToolExecutor.Execute()` switch
 3. Mark as read-only in `NewBuiltInToolExecutor()` if appropriate
-4. Add tests in `internal/core/tools_test.go`
+4. Add the tool to `statusWorthyTools` in `internal/core/language.go` if it is long-running or non-trivial
+5. Update the baseline risk table in `internal/core/risk.go` if the tool is destructive or safety-relevant
+6. Add tests in `internal/core/tools_test.go`
 
 ## Adding a New TUI Component
 

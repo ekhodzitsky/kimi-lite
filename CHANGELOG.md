@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-16
+
+### Changed
+
+- Audited and updated `AGENTS.md` to match the current codebase: added `internal/observability`, corrected tool count, listed `dispatch_subagent`, `RiskEvaluator`, `TurnEventStatus`, MCP schema normalization, workspace prompt, and status-message behavior.
+
 ## [0.4.1] - 2026-06-16
 
 ### Changed
