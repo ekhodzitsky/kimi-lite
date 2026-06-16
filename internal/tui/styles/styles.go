@@ -71,29 +71,32 @@ var lightTheme = Theme{
 type Styles struct {
 	Theme Theme
 
-	UserMessage      lipgloss.Style
-	AssistantMessage lipgloss.Style
-	ToolCall         lipgloss.Style
-	ToolCallExpanded lipgloss.Style
-	ErrorMessage     lipgloss.Style
-	InputBox         lipgloss.Style
-	MentionPopup     lipgloss.Style
-	ScrollIndicator  lipgloss.Style
-	ApprovalDialog   lipgloss.Style
-	Footer           lipgloss.Style
-	FooterModel      lipgloss.Style
-	FooterCWD        lipgloss.Style
-	FooterGit        lipgloss.Style
-	FooterTip        lipgloss.Style
-	FooterStatus     lipgloss.Style
-	FooterContext    lipgloss.Style
-	ModeBadgeYolo    lipgloss.Style
-	ModeBadgeAuto    lipgloss.Style
-	WelcomeBox       lipgloss.Style
-	WelcomeTitle     lipgloss.Style
-	WelcomeText      lipgloss.Style
-	Activity         lipgloss.Style
-	ActivityTool     lipgloss.Style
+	UserMessage         lipgloss.Style
+	AssistantMessage    lipgloss.Style
+	ToolCall            lipgloss.Style
+	ToolCallExpanded    lipgloss.Style
+	ToolCallPendingIcon lipgloss.Style
+	ToolCallDoneIcon    lipgloss.Style
+	ToolCallErrorIcon   lipgloss.Style
+	ErrorMessage        lipgloss.Style
+	InputBox            lipgloss.Style
+	MentionPopup        lipgloss.Style
+	ScrollIndicator     lipgloss.Style
+	ApprovalDialog      lipgloss.Style
+	Footer              lipgloss.Style
+	FooterModel         lipgloss.Style
+	FooterCWD           lipgloss.Style
+	FooterGit           lipgloss.Style
+	FooterTip           lipgloss.Style
+	FooterStatus        lipgloss.Style
+	FooterContext       lipgloss.Style
+	ModeBadgeYolo       lipgloss.Style
+	ModeBadgeAuto       lipgloss.Style
+	WelcomeBox          lipgloss.Style
+	WelcomeTitle        lipgloss.Style
+	WelcomeText         lipgloss.Style
+	Activity            lipgloss.Style
+	ActivityTool        lipgloss.Style
 }
 
 // New creates a new Styles instance for the given theme name.
@@ -153,6 +156,10 @@ func (s *Styles) init() {
 		MarginBottom(1).
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(t.Warning)
+
+	s.ToolCallPendingIcon = lipgloss.NewStyle().Foreground(t.Primary)
+	s.ToolCallDoneIcon = lipgloss.NewStyle().Foreground(t.Success)
+	s.ToolCallErrorIcon = lipgloss.NewStyle().Foreground(t.Error)
 
 	s.ErrorMessage = lipgloss.NewStyle().
 		Background(t.Background).

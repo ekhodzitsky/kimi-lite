@@ -1092,8 +1092,8 @@ func TestTurnWithToolCallRendersToolCallAndResult(t *testing.T) {
 			if strings.Contains(view, "pending") {
 				t.Errorf("viewport should not contain pending status after result, got %q", view)
 			}
-			if !strings.Contains(toolCallMsg.View().Content, "done") {
-				t.Errorf("tool call message should render done status, got %q", toolCallMsg.View().Content)
+			if !strings.Contains(toolCallMsg.View().Content, "Used") {
+				t.Errorf("tool call message should render Used status, got %q", toolCallMsg.View().Content)
 			}
 		}
 	}
@@ -1110,8 +1110,8 @@ func TestTurnWithToolCallRendersToolCallAndResult(t *testing.T) {
 	if !strings.Contains(view, "read_file") {
 		t.Errorf("viewport should contain tool name, got %q", view)
 	}
-	if !strings.Contains(toolCallMsg.View().Content, "done") {
-		t.Errorf("tool call message should render done status, got %q", toolCallMsg.View().Content)
+	if !strings.Contains(toolCallMsg.View().Content, "Used") {
+		t.Errorf("tool call message should render Used status, got %q", toolCallMsg.View().Content)
 	}
 }
 

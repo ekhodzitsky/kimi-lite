@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -69,6 +70,10 @@ type Message struct {
 	ToolCall   api.ToolCall
 	ToolResult *api.ToolResult
 
+	// ToolCall timing tracks elapsed duration.
+	ToolStart time.Time
+	ToolEnd   time.Time
+
 	// Error fields (only for TypeError)
 	Err error
 
@@ -120,11 +125,12 @@ func NewAssistantMessage(content string, st *styles.Styles) *Message {
 // NewToolCallMessage creates a new tool call display message.
 func NewToolCallMessage(call api.ToolCall, st *styles.Styles) *Message {
 	return &Message{
-		Type:     TypeToolCall,
-		ToolCall: call,
-		Role:     api.RoleTool,
-		Styles:   st,
-		KeyMap:   DefaultKeyMap(),
+		Type:      TypeToolCall,
+		ToolCall:  call,
+		Role:      api.RoleTool,
+		Styles:    st,
+		KeyMap:    DefaultKeyMap(),
+		ToolStart: time.Now(),
 	}
 }
 
@@ -273,6 +279,7 @@ func (m *Message) SetToolResult(r api.ToolResult) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ToolResult = &r
+	m.ToolEnd = time.Now()
 	m.cacheWidth = -1
 }
 
@@ -331,40 +338,68 @@ func (m *Message) viewToolCall() string {
 		return m.cachedView
 	}
 	var b strings.Builder
+
 	icon := "▸"
 	if m.Expanded {
 		icon = "▾"
 	}
-	status := "pending"
-	if m.ToolResult != nil {
-		if m.ToolResult.Error != "" {
-			status = "error"
-		} else {
-			status = "done"
-		}
+
+	var statusIcon, verb string
+	done := m.ToolResult != nil
+	if !done {
+		statusIcon = m.Styles.ToolCallPendingIcon.Render("◉")
+		verb = "Using"
+	} else if m.ToolResult.Error != "" {
+		statusIcon = m.Styles.ToolCallErrorIcon.Render("✗")
+		verb = "Error"
+	} else {
+		statusIcon = m.Styles.ToolCallDoneIcon.Render("✓")
+		verb = "Used"
 	}
-	header := fmt.Sprintf("%s Tool: %s (%s)", icon, m.ToolCall.Name, status)
+
+	header := fmt.Sprintf("%s %s %s %s", icon, statusIcon, verb, m.ToolCall.Name)
+	if done && !m.ToolEnd.IsZero() && !m.ToolStart.IsZero() {
+		d := m.ToolEnd.Sub(m.ToolStart)
+		header += fmt.Sprintf(" (%s)", d.Round(time.Millisecond))
+	}
+
 	b.WriteString(m.Styles.ToolCall.Render(header))
 
 	if m.Expanded {
 		b.WriteString("\n")
-		args := wordWrap(m.ToolCall.Arguments, max(m.Width-messageWidthPadding, minMessageWidth))
-		b.WriteString(m.Styles.ToolCallExpanded.Render("Arguments: " + args))
+		args := prettyJSONArgs(m.ToolCall.Arguments)
+		argsWrapped := wordWrap(args, max(m.Width-messageWidthPadding, minMessageWidth))
+		b.WriteString(m.Styles.ToolCallExpanded.Render("Arguments: " + argsWrapped))
+
 		if m.ToolResult != nil {
 			b.WriteString("\n")
-			out := wordWrap(m.ToolResult.Output, max(m.Width-messageWidthPadding, minMessageWidth))
 			if m.ToolResult.Error != "" {
-				out = wordWrap(m.ToolResult.Error, max(m.Width-messageWidthPadding, minMessageWidth))
-				b.WriteString(m.Styles.ErrorMessage.Render("Error: " + out))
+				errWrapped := wordWrap(m.ToolResult.Error, max(m.Width-messageWidthPadding, minMessageWidth))
+				b.WriteString(m.Styles.ErrorMessage.Render("Error: " + errWrapped))
 			} else {
-				b.WriteString(m.Styles.ToolCallExpanded.Render("Output: " + out))
+				outWrapped := wordWrap(m.ToolResult.Output, max(m.Width-messageWidthPadding, minMessageWidth))
+				b.WriteString(m.Styles.ToolCallExpanded.Render("Output: " + outWrapped))
 			}
 		}
 	}
+
 	m.cachedView = b.String()
 	m.cacheWidth = m.Width
 	m.cacheExpanded = m.Expanded
 	return m.cachedView
+}
+
+func prettyJSONArgs(raw string) string {
+	var out strings.Builder
+	for _, r := range raw {
+		if r == '{' || r == '}' || r == ',' {
+			out.WriteRune(r)
+			out.WriteRune(' ')
+		} else {
+			out.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(out.String())
 }
 
 func (m *Message) viewError() string {
