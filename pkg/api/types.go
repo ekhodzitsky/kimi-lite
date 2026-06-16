@@ -395,6 +395,8 @@ type GitProvider interface {
 	// A genuine non-repository returns (false, nil); execution errors return
 	// a non-nil error so callers can distinguish them from "not a repo".
 	IsRepo(ctx context.Context) (bool, error)
+	// Branch returns the current branch name, or "HEAD" when detached.
+	Branch(ctx context.Context) (string, error)
 }
 
 // ConfigProvider provides access to application configuration.

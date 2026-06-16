@@ -88,6 +88,15 @@ type Styles struct {
 	MentionPopup     lipgloss.Style
 	ScrollIndicator  lipgloss.Style
 	ApprovalDialog   lipgloss.Style
+	Footer           lipgloss.Style
+	FooterModel      lipgloss.Style
+	FooterCWD        lipgloss.Style
+	FooterGit        lipgloss.Style
+	FooterTip        lipgloss.Style
+	FooterStatus     lipgloss.Style
+	FooterContext    lipgloss.Style
+	ModeBadgeYolo    lipgloss.Style
+	ModeBadgeAuto    lipgloss.Style
 }
 
 // New creates a new Styles instance for the given theme name.
@@ -213,4 +222,14 @@ func (s *Styles) init() {
 		BorderStyle(lipgloss.DoubleBorder()).
 		BorderForeground(t.Warning).
 		Padding(1, 2)
+
+	s.Footer = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Foreground)
+	s.FooterModel = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Primary).Bold(true)
+	s.FooterCWD = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Muted)
+	s.FooterGit = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Success)
+	s.FooterTip = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Muted)
+	s.FooterStatus = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Foreground)
+	s.FooterContext = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Secondary)
+	s.ModeBadgeYolo = lipgloss.NewStyle().Background(t.Error).Foreground(t.Foreground).Bold(true)
+	s.ModeBadgeAuto = lipgloss.NewStyle().Background(t.Primary).Foreground(t.Background).Bold(true)
 }

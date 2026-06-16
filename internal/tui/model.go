@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/footer"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/mentions"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
@@ -33,7 +34,7 @@ const (
 )
 
 const (
-	statusHeight      = 1
+	statusHeight      = 2
 	minContentWidth   = 20
 	minViewportHeight = 5
 	// viewportWidthPadding accounts for viewport border + content padding.
@@ -130,6 +131,7 @@ type Model struct {
 	input    *input.Model
 	vp       *viewport.Model
 	messages []*msgcomp.Message
+	footer   *footer.Model
 
 	mentionProvider mentions.Provider
 
@@ -140,6 +142,11 @@ type Model struct {
 	contextMax  int
 	toolCount   int
 	statusText  string
+
+	gitBranch string
+	gitDirty  bool
+	gitAhead  int
+	gitBehind int
 
 	width  int
 	height int
@@ -202,6 +209,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 	inp.SetEditor(cfg.UI.Editor)
 	inp.SetContext(appCtx)
 	vp := viewport.New(st)
+	ft := footer.New(st)
 
 	mp := &mentions.FileWalker{MaxDepth: 3}
 	m := &Model{
@@ -209,6 +217,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 		config:          cfg,
 		input:           inp,
 		vp:              vp,
+		footer:          ft,
 		messages:        make([]*msgcomp.Message, 0),
 		state:           api.TurnIdle,
 		session:         session,
@@ -315,6 +324,8 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.input.Init(),
 		m.vp.Init(),
+		m.footer.Init(),
+		m.scheduleGitRefreshCmd(),
 	)
 }
 
@@ -489,6 +500,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case input.SendMsg:
 		cmds = append(cmds, m.handleSend(msg.Content)...)
+
+	case footerGitRefreshMsg:
+		cmds = append(cmds, m.gitRefreshCmd(), m.scheduleGitRefreshCmd())
+
+	case FooterGitMsg:
+		m.mu.Lock()
+		m.gitBranch = msg.Branch
+		m.gitDirty = msg.Dirty
+		m.gitAhead = msg.Ahead
+		m.gitBehind = msg.Behind
+		m.mu.Unlock()
+		m.updateFooter()
 	}
 
 	// Update focused child component for KeyMsg; all children for other messages
@@ -522,6 +545,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	cmds = append(cmds, m.footer.UpdateMsg(msg))
+
 	m.mu.Lock()
 	if m.rb.isDirty() {
 		m.vp.SetContent(m.rb.String())
@@ -541,12 +566,14 @@ func (m *Model) View() tea.View {
 		return v
 	}
 
+	m.updateFooter()
+
 	var mainContent strings.Builder
 	mainContent.WriteString(m.vp.View().Content)
 	mainContent.WriteString("\n")
 	mainContent.WriteString(m.input.View().Content)
 	mainContent.WriteString("\n")
-	mainContent.WriteString(m.statusBar())
+	mainContent.WriteString(m.footer.View())
 
 	view := mainContent.String()
 
@@ -853,6 +880,36 @@ func (m *Model) checkpointCmd() tea.Cmd {
 			return CheckpointResultMsg{Err: fmt.Errorf("checkpoint failed: %w", err)}
 		}
 		return CheckpointResultMsg{}
+	}
+}
+
+// scheduleGitRefreshCmd schedules the next asynchronous git refresh.
+func (m *Model) scheduleGitRefreshCmd() tea.Cmd {
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg { return footerGitRefreshMsg{} })
+}
+
+// gitRefreshCmd returns a command that fetches the current git branch and
+// dirty state for the footer.
+func (m *Model) gitRefreshCmd() tea.Cmd {
+	m.mu.RLock()
+	gp := m.gitProvider
+	appCtx := m.appCtx
+	m.mu.RUnlock()
+
+	return func() tea.Msg {
+		if gp == nil {
+			return FooterGitMsg{}
+		}
+		ctx, cancel := context.WithTimeout(appCtx, 5*time.Second)
+		defer cancel()
+		repo, err := gp.IsRepo(ctx)
+		if err != nil || !repo {
+			return FooterGitMsg{}
+		}
+		branch, _ := gp.Branch(ctx)
+		status, _ := gp.Status(ctx)
+		dirty := strings.TrimSpace(status) != ""
+		return FooterGitMsg{Branch: branch, Dirty: dirty}
 	}
 }
 
@@ -1317,7 +1374,7 @@ func (m *Model) approvalApproveCurrent(decision api.ApprovalDecision) (ApprovalR
 	return m.approval.approveCurrent(decision)
 }
 
-func (m *Model) statusBar() string {
+func (m *Model) updateFooter() {
 	m.mu.RLock()
 	state := m.state
 	modelName := m.modelName
@@ -1325,54 +1382,32 @@ func (m *Model) statusBar() string {
 	contextMax := m.contextMax
 	toolCount := m.toolCount
 	approvalMode := m.approvalMode
+	statusText := m.statusText
+	cwd := ""
+	if m.session != nil {
+		cwd = m.session.Path
+	}
+	gitBranch := m.gitBranch
+	gitDirty := m.gitDirty
+	gitAhead := m.gitAhead
+	gitBehind := m.gitBehind
 	m.mu.RUnlock()
 
-	stateStr := state.ShortString()
-	width := m.contentWidth()
-
-	// Build fixed-width parts first so the status area can be truncated to fit
-	// on narrow terminals.
-	fixedParts := make([]string, 0, 4)
-	fixedParts = append(fixedParts, m.styles.StatusBar.Render(fmt.Sprintf(" %s ", modelName)))
-	if approvalMode == approvalModeYolo {
-		fixedParts = append(fixedParts, m.styles.StatusBar.Render(" YOLO "))
-	}
-	if m.config.UI.ShowTokenCount && contextMax > 0 {
-		pct := float64(contextUsed) / float64(contextMax) * 100
-		fixedParts = append(fixedParts, m.styles.StatusBar.Render(fmt.Sprintf("ctx: %.0f%%", pct)))
-	}
-	if toolCount > 0 {
-		fixedParts = append(fixedParts, m.styles.StatusBar.Render(fmt.Sprintf("tools: %d", toolCount)))
-	}
-
-	fixedWidth := 0
-	for _, p := range fixedParts {
-		fixedWidth += lipgloss.Width(p)
-	}
-
-	available := width - fixedWidth - 1
-	if available < 4 {
-		available = 4
-	}
-
-	var statusPart string
-	if m.statusText != "" {
-		text := m.statusText
-		if ansi.StringWidth(text) > available {
-			text = ansi.Cut(text, 0, available-1) + "…"
-		}
-		statusPart = m.styles.StatusBar.Render(fmt.Sprintf(" %s ", text))
-	} else {
-		statusPart = m.styles.StatusBar.Render(fmt.Sprintf("[%s]", stateStr))
-	}
-
-	parts := make([]string, 0, 5)
-	parts = append(parts, fixedParts[0]) // model name
-	parts = append(parts, statusPart)
-	parts = append(parts, fixedParts[1:]...)
-
-	bar := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
-	return m.styles.StatusBar.Width(width).Render(bar)
+	m.footer.SetSize(m.contentWidth())
+	m.footer.SetData(footer.Data{
+		ModelName:   modelName,
+		Mode:        approvalMode,
+		State:       state,
+		StatusText:  statusText,
+		CWD:         cwd,
+		ContextUsed: contextUsed,
+		ContextMax:  contextMax,
+		ToolCount:   toolCount,
+		GitBranch:   gitBranch,
+		GitDirty:    gitDirty,
+		GitAhead:    gitAhead,
+		GitBehind:   gitBehind,
+	})
 }
 
 func (m *Model) updateLayout() {
@@ -1397,6 +1432,7 @@ func (m *Model) updateLayout() {
 func (m *Model) applyLayoutSizes(l layoutRect) {
 	m.vp.SetSize(l.contentWidth, l.vpHeight)
 	m.input.SetWidth(l.contentWidth)
+	m.footer.SetSize(l.contentWidth)
 }
 
 func (m *Model) refreshFileCandidates() {

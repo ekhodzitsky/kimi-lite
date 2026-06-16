@@ -146,6 +146,22 @@ func isNotRepo(output string) bool {
 	return strings.Contains(output, "not a git repository")
 }
 
+// Branch returns the current git branch name.
+func (p *Provider) Branch(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+
+	stdout, stderr, err := p.runner.Output(ctx, p.dir, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", classifyErr("git branch", stderr, err)
+	}
+	branch := strings.TrimSpace(string(stdout))
+	if branch == "" {
+		return "HEAD", nil
+	}
+	return branch, nil
+}
+
 // classifyErr returns a wrapped, classified error for git operation failures.
 // The captured stderr is included in the message so callers can see why git
 // failed without losing the underlying error.

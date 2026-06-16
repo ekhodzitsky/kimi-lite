@@ -837,7 +837,7 @@ func TestState(t *testing.T) {
 	}
 }
 
-func TestStatusBarStates(t *testing.T) {
+func TestFooterStates(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
@@ -858,14 +858,15 @@ func TestStatusBarStates(t *testing.T) {
 
 	for _, s := range states {
 		m.setState(s)
-		view := m.statusBar()
+		m.updateFooter()
+		view := m.footer.View()
 		if view == "" {
-			t.Errorf("statusBar() empty for state %d", s)
+			t.Errorf("footer.View() empty for state %d", s)
 		}
 	}
 }
 
-func TestStatusBar_ShowsContextUsageAfterTurn(t *testing.T) {
+func TestFooter_ShowsContextUsageAfterTurn(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
@@ -884,18 +885,19 @@ func TestStatusBar_ShowsContextUsageAfterTurn(t *testing.T) {
 	})
 
 	m.updateContextStats()
+	m.updateFooter()
 
-	bar := m.statusBar()
-	if !strings.Contains(bar, "ctx:") {
-		t.Fatalf("status bar should show ctx usage, got %q", bar)
+	bar := m.footer.View()
+	if !strings.Contains(bar, "context:") {
+		t.Fatalf("footer should show context usage, got %q", bar)
 	}
 	// The percentage must be non-zero after a non-empty turn.
-	if strings.Contains(bar, "ctx: 0%") {
-		t.Errorf("status bar should show non-zero ctx usage, got %q", bar)
+	if strings.Contains(bar, "context: 0.0%") {
+		t.Errorf("footer should show non-zero context usage, got %q", bar)
 	}
 }
 
-func TestStatusBar_HidesContextUsageWhenDisabled(t *testing.T) {
+func TestFooter_ShowsContextUsageRegardlessOfTokenCountSetting(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
@@ -906,28 +908,30 @@ func TestStatusBar_HidesContextUsageWhenDisabled(t *testing.T) {
 	m.height = 40
 	m.updateLayout()
 	m.SetContextStats(50, 100)
+	m.updateFooter()
 
-	bar := m.statusBar()
-	if strings.Contains(bar, "ctx:") {
-		t.Errorf("status bar should omit ctx field when ShowTokenCount=false, got %q", bar)
+	bar := m.footer.View()
+	if !strings.Contains(bar, "context:") {
+		t.Errorf("footer should show context usage regardless of ShowTokenCount, got %q", bar)
 	}
 }
 
-func TestStatusBar_TruncatesLongStatusOnNarrowTerminal(t *testing.T) {
+func TestFooter_TruncatesLongStatusOnNarrowTerminal(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
 	m, _ := New(cfg, session, context.Background())
-	m.width = 30
+	m.width = 50
 	m.height = 10
 	m.updateLayout()
 	m.statusText = strings.Repeat("x", 200)
+	m.updateFooter()
 
-	bar := m.statusBar()
+	bar := m.footer.View()
 	for _, line := range strings.Split(bar, "\n") {
 		if w := lipgloss.Width(line); w > m.width {
-			t.Errorf("status bar line width = %d, want <= %d", w, m.width)
+			t.Errorf("footer line width = %d, want <= %d", w, m.width)
 		}
 	}
 }
@@ -1115,7 +1119,7 @@ func TestYoloToggle(t *testing.T) {
 	}
 }
 
-func TestYoloToggle_StatusBar(t *testing.T) {
+func TestYoloToggle_Footer(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
@@ -1125,17 +1129,19 @@ func TestYoloToggle_StatusBar(t *testing.T) {
 	m.height = 40
 	m.updateLayout()
 
-	// Default status bar should not contain YOLO.
-	view := m.statusBar()
+	// Default footer should not contain YOLO.
+	m.updateFooter()
+	view := m.footer.View()
 	if strings.Contains(view, "YOLO") {
-		t.Error("status bar should not contain YOLO in default mode")
+		t.Error("footer should not contain YOLO in default mode")
 	}
 
 	// Toggle to YOLO mode.
 	m.SetApprovalMode(2)
-	view = m.statusBar()
+	m.updateFooter()
+	view = m.footer.View()
 	if !strings.Contains(view, "YOLO") {
-		t.Error("status bar should contain YOLO when in yolo mode")
+		t.Error("footer should contain YOLO when in yolo mode")
 	}
 }
 
@@ -1409,7 +1415,8 @@ func (f *fakeGitProvider) Commit(ctx context.Context, message string) error {
 	f.commitMsg = message
 	return f.err
 }
-func (f *fakeGitProvider) IsRepo(ctx context.Context) (bool, error) { return true, nil }
+func (f *fakeGitProvider) IsRepo(ctx context.Context) (bool, error)   { return true, nil }
+func (f *fakeGitProvider) Branch(ctx context.Context) (string, error) { return "main", nil }
 
 type fakeTurnManager struct {
 	events []api.TurnEvent
@@ -2063,7 +2070,7 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 // TestGoldenViewIdle is a smoke golden test for the deterministic TUI harness.
 func TestGoldenViewIdle(t *testing.T) {
 	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: t.TempDir()}
+	session := &api.Session{ID: "test", Path: "/tmp/golden"}
 	m, err := New(cfg, session, context.Background())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -2078,7 +2085,7 @@ func TestGoldenViewIdle(t *testing.T) {
 
 func newGoldenModel(t *testing.T) *Model {
 	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: t.TempDir()}
+	session := &api.Session{ID: "test", Path: "/tmp/golden"}
 	m, err := New(cfg, session, context.Background())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

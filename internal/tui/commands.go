@@ -129,6 +129,17 @@ type debouncedResizeMsg struct {
 	gen int
 }
 
+// FooterGitMsg carries git status information for the footer.
+type FooterGitMsg struct {
+	Branch string
+	Dirty  bool
+	Ahead  int
+	Behind int
+}
+
+// footerGitRefreshMsg triggers an asynchronous git status refresh.
+type footerGitRefreshMsg struct{}
+
 func (m *Model) handleCommand(content string) tea.Cmd {
 	parts := strings.Fields(content)
 	if len(parts) == 0 {
