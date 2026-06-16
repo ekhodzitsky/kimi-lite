@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -217,6 +218,10 @@ type Model struct {
 
 // New creates the root TUI model.
 func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model, error) {
+	if _, err := os.Stat(session.Path); err != nil {
+		return nil, fmt.Errorf("session path %q: %w", session.Path, err)
+	}
+
 	st := styles.New(cfg.UI.Theme)
 
 	inp := input.New(st, input.ConfigurableKeyMap(cfg.Keybindings), cfg.Session.MaxHistory)

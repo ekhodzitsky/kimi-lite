@@ -841,7 +841,7 @@ func TestWelcomeVisibleWhenEmpty(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: "/tmp/golden"}
+	session := &api.Session{ID: "test", Path: "/tmp"}
 	m, _ := New(cfg, session, context.Background())
 	m.width = 80
 	m.height = 24
@@ -2136,7 +2136,7 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 // TestGoldenViewIdle is a smoke golden test for the deterministic TUI harness.
 func TestGoldenViewIdle(t *testing.T) {
 	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: "/tmp/golden"}
+	session := &api.Session{ID: "test", Path: "/tmp"}
 	m, err := New(cfg, session, context.Background())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -2151,7 +2151,7 @@ func TestGoldenViewIdle(t *testing.T) {
 
 func newGoldenModel(t *testing.T) *Model {
 	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: "/tmp/golden"}
+	session := &api.Session{ID: "test", Path: "/tmp"}
 	m, err := New(cfg, session, context.Background())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

@@ -3,7 +3,7 @@
 │  Welcome to Kimi Code!                                                   │
 │  Send /help for help info.                                               │
 │                                                                          │
-│  Directory: /tmp/golden                                                  │
+│  Directory: /tmp                                                         │
 │  Session:   test                                                         │
 │  Model:     kimi-k2.5                                                    │
 │  Version:   0.5.0-dev                                                    │
@@ -23,5 +23,5 @@
 │ ┃                                                                            │
 │ ┃                                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- AUTO  kimi-k2.5  tmp/golden                                shift+tab: plan mode
+ AUTO  kimi-k2.5  tmp                                       shift+tab: plan mode
  tools                                                                          
