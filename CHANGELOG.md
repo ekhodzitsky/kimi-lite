@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-16
+
+### Changed
+
+- Refreshed `README.md`: fixed stale "Python" claim, listed SSE MCP, all-sessions picker, multi-modal messages, language-aware UI, and workspace prompt.
+
 ## [0.4.0] - 2026-06-16
 
 ### Added
