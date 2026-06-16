@@ -376,6 +376,9 @@ func (m *Message) viewToolCall() string {
 			if m.ToolResult.Error != "" {
 				errWrapped := wordWrap(m.ToolResult.Error, max(m.Width-messageWidthPadding, minMessageWidth))
 				b.WriteString(m.Styles.ErrorMessage.Render("Error: " + errWrapped))
+			} else if isLineCountTool(m.ToolCall.Name) {
+				lines := countLines(m.ToolResult.Output)
+				b.WriteString(m.Styles.ToolCallExpanded.Render(fmt.Sprintf("%d lines", lines)))
 			} else {
 				outWrapped := wordWrap(m.ToolResult.Output, max(m.Width-messageWidthPadding, minMessageWidth))
 				b.WriteString(m.Styles.ToolCallExpanded.Render("Output: " + outWrapped))
@@ -400,6 +403,19 @@ func prettyJSONArgs(raw string) string {
 		}
 	}
 	return strings.TrimSpace(out.String())
+}
+
+// isLineCountTool reports whether the tool result should be summarized as a line count.
+func isLineCountTool(name string) bool {
+	return name == "write_file" || name == "str_replace_file"
+}
+
+// countLines returns the number of lines in s, treating an empty string as 0 lines.
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
 }
 
 func (m *Message) viewError() string {

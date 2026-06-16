@@ -379,6 +379,48 @@ func TestToolCallDone(t *testing.T) {
 	}
 }
 
+func TestToolCallWriteFile_LineCountChip(t *testing.T) {
+	st := styles.New("dark")
+	m := NewToolCallMessage(api.ToolCall{Name: "write_file"}, st)
+	m.Expanded = true
+	m.SetWidth(80)
+	m.SetToolResult(api.ToolResult{CallID: "1", Name: "write_file", Output: "line1\nline2\nline3"})
+	view := m.View().Content
+	if !strings.Contains(view, "3 lines") {
+		t.Errorf("expected '3 lines' chip for write_file, got %q", view)
+	}
+	if strings.Contains(view, "Output:") {
+		t.Errorf("write_file result should not show generic Output label, got %q", view)
+	}
+}
+
+func TestToolCallStrReplaceFile_LineCountChip(t *testing.T) {
+	st := styles.New("dark")
+	m := NewToolCallMessage(api.ToolCall{Name: "str_replace_file"}, st)
+	m.Expanded = true
+	m.SetWidth(80)
+	m.SetToolResult(api.ToolResult{CallID: "1", Name: "str_replace_file", Output: "alpha\nbeta"})
+	view := m.View().Content
+	if !strings.Contains(view, "2 lines") {
+		t.Errorf("expected '2 lines' chip for str_replace_file, got %q", view)
+	}
+	if strings.Contains(view, "Output:") {
+		t.Errorf("str_replace_file result should not show generic Output label, got %q", view)
+	}
+}
+
+func TestToolCallReadFile_KeepsGenericOutput(t *testing.T) {
+	st := styles.New("dark")
+	m := NewToolCallMessage(api.ToolCall{Name: "read_file"}, st)
+	m.Expanded = true
+	m.SetWidth(80)
+	m.SetToolResult(api.ToolResult{CallID: "1", Name: "read_file", Output: "file contents"})
+	view := m.View().Content
+	if !strings.Contains(view, "Output: file contents") {
+		t.Errorf("expected generic Output label for read_file, got %q", view)
+	}
+}
+
 func TestMessageViewError(t *testing.T) {
 	t.Parallel()
 
