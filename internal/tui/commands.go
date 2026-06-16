@@ -89,6 +89,12 @@ type SessionsResultMsg struct {
 	Err      error
 }
 
+// SessionSelectedMsg carries the result of resuming a session from the picker.
+type SessionSelectedMsg struct {
+	Session *api.Session
+	Err     error
+}
+
 // CheckpointMsg signals the app to create a checkpoint.
 type CheckpointMsg struct{}
 

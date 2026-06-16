@@ -460,6 +460,44 @@ func TestSQLite_AppendMessage_WithToolCalls(t *testing.T) {
 	}
 }
 
+func TestSQLite_AppendMessage_WithImageContentParts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, _ := s.CreateSession(ctx, "/tmp/proj")
+	msg := api.Message{
+		ID:      "msg-1",
+		Role:    api.RoleTool,
+		Content: "[image output]",
+		ContentParts: []api.ContentPart{
+			{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "data:image/png;base64,abcd", Detail: "low"}},
+		},
+		ToolCallID: "tc1",
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := s.AppendMessage(ctx, sess.ID, msg); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+
+	msgs, err := s.GetMessages(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("get messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if len(msgs[0].ContentParts) != 1 {
+		t.Fatalf("expected 1 content part, got %d", len(msgs[0].ContentParts))
+	}
+	if msgs[0].ContentParts[0].Type != api.ContentPartImageURL {
+		t.Errorf("content part type = %q, want image_url", msgs[0].ContentParts[0].Type)
+	}
+	if msgs[0].ContentParts[0].ImageURL == nil || msgs[0].ContentParts[0].ImageURL.URL != "data:image/png;base64,abcd" {
+		t.Errorf("image url = %v, want data:image/png;base64,abcd", msgs[0].ContentParts[0].ImageURL)
+	}
+}
+
 func TestSQLite_ClearMessages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1320,8 +1358,8 @@ func TestSQLite_MigrationRunner(t *testing.T) {
 		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 			t.Fatalf("read user_version: %v", err)
 		}
-		if version != 1 {
-			t.Errorf("user_version = %d, want 1", version)
+		if version != 2 {
+			t.Errorf("user_version = %d, want 2", version)
 		}
 	})
 

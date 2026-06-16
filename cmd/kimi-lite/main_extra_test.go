@@ -1396,6 +1396,9 @@ func (c *closingStore) GetLastSession(_ context.Context, _ string) (*api.Session
 func (c *closingStore) ListSessions(_ context.Context, _ string, _ int) ([]api.Session, error) {
 	return nil, nil
 }
+func (c *closingStore) ListAllSessions(_ context.Context, _ int) ([]api.Session, error) {
+	return nil, nil
+}
 func (c *closingStore) UpdateSession(_ context.Context, _ *api.Session) error { return nil }
 func (c *closingStore) DeleteSession(_ context.Context, _ string) error       { return nil }
 func (c *closingStore) AppendMessage(_ context.Context, _ string, _ api.Message) error {

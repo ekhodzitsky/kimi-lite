@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-16
+
 ### Added
 
 - `turn_interrupt` hook event that fires when the user cancels a running turn.
+- Legacy SSE MCP transport (`transport = "sse"`) for servers that expose JSON-RPC over Server-Sent Events.
+- Session recovery for interrupted tool calls: resuming a session now synthesizes missing tool-result messages so dangling assistant tool calls do not break the next turn.
+- Multi-modal message support for image tool outputs. `api.Message` now carries `ContentParts`, the OpenAI request builder emits `image_url` parts, and the SQLite store persists them via a new migration.
+- All-sessions picker (`/sessions`) with search, pagination, and a current-directory/all-directories toggle. Selecting a session resumes it and loads its transcript.
 
 ## [0.2.10] - 2026-06-14
 
@@ -154,6 +160,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `--debug` flag, sanitized error logging, structured `slog` output.
 - **Cross-platform** — static binary with `CGO_ENABLED=0`, supports macOS, Linux (glibc & musl), ARM64.
 
+[0.3.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.3.0
+[0.2.10]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.10
+[0.2.9]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.9
+[0.2.8]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.8
 [0.2.7]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.7
 [0.2.6]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.6
 [0.2.5]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.5

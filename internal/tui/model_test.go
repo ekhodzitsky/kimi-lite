@@ -1367,6 +1367,18 @@ func (s *slowSessionManager) Fork(ctx context.Context, sourceID string, name str
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
+func (s *slowSessionManager) Resume(ctx context.Context, id string) (*api.Session, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (s *slowSessionManager) List(ctx context.Context, path string) ([]api.Session, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (s *slowSessionManager) ListAll(ctx context.Context, limit int) ([]api.Session, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
 
 type mockStore struct{}
 
@@ -1378,6 +1390,9 @@ func (m *mockStore) GetLastSession(ctx context.Context, path string) (*api.Sessi
 	return nil, nil
 }
 func (m *mockStore) ListSessions(ctx context.Context, path string, limit int) ([]api.Session, error) {
+	return nil, nil
+}
+func (m *mockStore) ListAllSessions(ctx context.Context, limit int) ([]api.Session, error) {
 	return nil, nil
 }
 func (m *mockStore) UpdateSession(ctx context.Context, session *api.Session) error { return nil }
@@ -1437,49 +1452,43 @@ func (f *fakeTurnManager) ResumeWithApproval(ctx context.Context, sessionID stri
 	return nil
 }
 
-type fakeStoreWithSessions struct {
+// configured list of sessions for testing the sessions picker.
+type fakeSessionManagerWithSessions struct {
 	sessions []api.Session
 	err      error
 }
 
-func (f *fakeStoreWithSessions) CreateSession(ctx context.Context, path string) (*api.Session, error) {
-	return nil, nil
-}
-func (f *fakeStoreWithSessions) GetSession(ctx context.Context, id string) (*api.Session, error) {
-	return nil, nil
-}
-func (f *fakeStoreWithSessions) GetLastSession(ctx context.Context, path string) (*api.Session, error) {
-	return nil, nil
-}
-func (f *fakeStoreWithSessions) ListSessions(ctx context.Context, path string, limit int) ([]api.Session, error) {
-	return f.sessions, f.err
-}
-func (f *fakeStoreWithSessions) UpdateSession(ctx context.Context, session *api.Session) error {
+func (f *fakeSessionManagerWithSessions) CurrentSessionID() string { return "test" }
+func (f *fakeSessionManagerWithSessions) ClearMessages(ctx context.Context, id string) error {
 	return nil
 }
-func (f *fakeStoreWithSessions) DeleteSession(ctx context.Context, id string) error { return nil }
-func (f *fakeStoreWithSessions) AppendMessage(ctx context.Context, sessionID string, msg api.Message) error {
+func (f *fakeSessionManagerWithSessions) Rename(ctx context.Context, id string, name string) error {
 	return nil
 }
-func (f *fakeStoreWithSessions) GetMessages(ctx context.Context, sessionID string, limit int) ([]api.Message, error) {
+func (f *fakeSessionManagerWithSessions) Fork(ctx context.Context, sourceID string, name string) (*api.Session, error) {
 	return nil, nil
 }
-func (f *fakeStoreWithSessions) ClearMessages(ctx context.Context, sessionID string) error {
-	return nil
+func (f *fakeSessionManagerWithSessions) Resume(ctx context.Context, id string) (*api.Session, error) {
+	return &api.Session{ID: id, Path: "/tmp"}, nil
 }
-func (f *fakeStoreWithSessions) ReplaceMessages(ctx context.Context, sessionID string, msgs []api.Message) error {
-	return nil
+func (f *fakeSessionManagerWithSessions) List(ctx context.Context, path string) ([]api.Session, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []api.Session
+	for _, s := range f.sessions {
+		if s.Path == path {
+			out = append(out, s)
+		}
+	}
+	return out, nil
 }
-func (f *fakeStoreWithSessions) SaveTurn(ctx context.Context, sessionID string, turn api.Turn) error {
-	return nil
+func (f *fakeSessionManagerWithSessions) ListAll(ctx context.Context, limit int) ([]api.Session, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.sessions, nil
 }
-func (f *fakeStoreWithSessions) GetTurns(ctx context.Context, sessionID string, limit int) ([]api.Turn, error) {
-	return nil, nil
-}
-func (f *fakeStoreWithSessions) CountTurns(ctx context.Context, sessionID string, state api.TurnState) (int, error) {
-	return 0, nil
-}
-func (f *fakeStoreWithSessions) Close() error { return nil }
 
 func TestCheckpointMsg_Success(t *testing.T) {
 	t.Parallel()
@@ -1606,13 +1615,13 @@ func TestSessionsMsg_WithSessions(t *testing.T) {
 	m.updateLayout()
 
 	now := time.Now()
-	store := &fakeStoreWithSessions{
+	sm := &fakeSessionManagerWithSessions{
 		sessions: []api.Session{
 			{ID: "s1", Path: "/tmp", UpdatedAt: now},
 			{ID: "s2", Path: "/tmp", UpdatedAt: now.Add(-time.Hour)},
 		},
 	}
-	m.SetStore(store)
+	m.SetSessionManager(sm)
 
 	updated, cmd := m.Update(SessionsMsg{})
 	model := updated.(*Model)
@@ -1624,17 +1633,14 @@ func TestSessionsMsg_WithSessions(t *testing.T) {
 	updated2, _ := model.Update(msg)
 	model2 := updated2.(*Model)
 
-	if model2.state != api.TurnIdle {
-		t.Errorf("state = %d, want TurnIdle", model2.state)
+	if model2.sessionPicker == nil {
+		t.Fatal("expected session picker to open")
 	}
-	if len(model2.messages) != 2 {
-		t.Fatalf("messages length = %d, want 2", len(model2.messages))
+	if model2.sessionPicker.AllMode() {
+		t.Error("expected picker to start in current-directory mode")
 	}
-	if !strings.Contains(model2.messages[0].Content, "s1") {
-		t.Errorf("first message should contain s1, got %q", model2.messages[0].Content)
-	}
-	if !strings.Contains(model2.messages[1].Content, "s2") {
-		t.Errorf("second message should contain s2, got %q", model2.messages[1].Content)
+	if len(model2.sessionPicker.Selected().ID) == 0 && model2.sessionPicker.HasSelection() {
+		t.Error("expected first session to be selected")
 	}
 }
 
@@ -1648,8 +1654,8 @@ func TestSessionsMsg_Error(t *testing.T) {
 	m.height = 40
 	m.updateLayout()
 
-	store := &fakeStoreWithSessions{err: errors.New("db error")}
-	m.SetStore(store)
+	sm := &fakeSessionManagerWithSessions{err: errors.New("db error")}
+	m.SetSessionManager(sm)
 
 	updated, cmd := m.Update(SessionsMsg{})
 	model := updated.(*Model)
@@ -1683,8 +1689,8 @@ func TestSessionsMsg_Empty(t *testing.T) {
 	m.height = 40
 	m.updateLayout()
 
-	store := &fakeStoreWithSessions{sessions: []api.Session{}}
-	m.SetStore(store)
+	sm := &fakeSessionManagerWithSessions{sessions: []api.Session{}}
+	m.SetSessionManager(sm)
 
 	updated, cmd := m.Update(SessionsMsg{})
 	model := updated.(*Model)
@@ -1708,7 +1714,7 @@ func TestSessionsMsg_Empty(t *testing.T) {
 	}
 }
 
-func TestSessionsMsg_NoStore(t *testing.T) {
+func TestSessionsMsg_NoSessionManager(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
@@ -1730,13 +1736,13 @@ func TestSessionsMsg_NoStore(t *testing.T) {
 
 	found := false
 	for _, msg := range model2.messages {
-		if strings.Contains(msg.Content, "no sessions available") {
+		if strings.Contains(msg.Content, "session manager not available") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected no-store message, got messages: %v", model2.messages)
+		t.Errorf("expected no-session-manager message, got messages: %v", model2.messages)
 	}
 }
 

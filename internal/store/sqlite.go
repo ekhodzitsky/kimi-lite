@@ -469,6 +469,34 @@ func (s *SQLite) ListSessions(ctx context.Context, path string, limit int) ([]ap
 	return sessions, nil
 }
 
+// ListAllSessions returns sessions across all paths ordered by updated_at desc.
+func (s *SQLite) ListAllSessions(ctx context.Context, limit int) ([]api.Session, error) {
+	if limit <= 0 {
+		limit = 10000
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, path, created_at, updated_at FROM sessions ORDER BY updated_at DESC, id DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list all sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	sessions := make([]api.Session, 0, initialCapacity(limit))
+	for rows.Next() {
+		var sess api.Session
+		if err := rows.Scan(&sess.ID, &sess.Name, &sess.Path, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		sess.Messages = []api.Message{}
+		sessions = append(sessions, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions: %w", err)
+	}
+	return sessions, nil
+}
+
 // UpdateSession updates session metadata.
 func (s *SQLite) UpdateSession(ctx context.Context, session *api.Session) error {
 	if session.ID == "" {
@@ -520,6 +548,10 @@ func (s *SQLite) AppendMessage(ctx context.Context, sessionID string, msg api.Me
 	if err != nil {
 		return fmt.Errorf("marshal tool calls: %w", err)
 	}
+	contentPartsJSON, err := json.Marshal(msg.ContentParts)
+	if err != nil {
+		return fmt.Errorf("marshal content parts: %w", err)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -528,8 +560,8 @@ func (s *SQLite) AppendMessage(ctx context.Context, sessionID string, msg api.Me
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, sessionID, string(msg.Role), msg.Content, msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
+		`INSERT INTO messages (id, session_id, role, content, content_parts, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, sessionID, string(msg.Role), msg.Content, string(contentPartsJSON), msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
 	); err != nil {
 		return fmt.Errorf("insert message: %w", err)
 	}
@@ -554,7 +586,7 @@ func (s *SQLite) GetMessages(ctx context.Context, sessionID string, limit int) (
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, role, content, tool_call_id, tool_calls, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC, id ASC LIMIT ?`, sessionID, limit,
+		`SELECT id, role, content, content_parts, tool_call_id, tool_calls, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC, id ASC LIMIT ?`, sessionID, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get messages: %w", err)
@@ -565,11 +597,17 @@ func (s *SQLite) GetMessages(ctx context.Context, sessionID string, limit int) (
 	for rows.Next() {
 		var msg api.Message
 		var roleStr string
+		var contentPartsJSON string
 		var toolCallsJSON string
-		if err := rows.Scan(&msg.ID, &roleStr, &msg.Content, &msg.ToolCallID, &toolCallsJSON, &msg.CreatedAt); err != nil {
+		if err := rows.Scan(&msg.ID, &roleStr, &msg.Content, &contentPartsJSON, &msg.ToolCallID, &toolCallsJSON, &msg.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		msg.Role = api.Role(roleStr)
+		if contentPartsJSON != "" && contentPartsJSON != "null" {
+			if err := json.Unmarshal([]byte(contentPartsJSON), &msg.ContentParts); err != nil {
+				return nil, fmt.Errorf("unmarshal content parts: %w", err)
+			}
+		}
 		if toolCallsJSON != "" && toolCallsJSON != "null" {
 			if err := json.Unmarshal([]byte(toolCallsJSON), &msg.ToolCalls); err != nil {
 				return nil, fmt.Errorf("unmarshal tool calls: %w", err)
@@ -624,7 +662,7 @@ func (s *SQLite) ReplaceMessages(ctx context.Context, sessionID string, msgs []a
 		return fmt.Errorf("clear messages: %w", err)
 	}
 
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO messages (id, session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO messages (id, session_id, role, content, content_parts, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("prepare insert: %w", err)
 	}
@@ -635,8 +673,12 @@ func (s *SQLite) ReplaceMessages(ctx context.Context, sessionID string, msgs []a
 		if err != nil {
 			return fmt.Errorf("marshal tool calls: %w", err)
 		}
+		contentPartsJSON, err := json.Marshal(msg.ContentParts)
+		if err != nil {
+			return fmt.Errorf("marshal content parts: %w", err)
+		}
 		if _, err := stmt.ExecContext(ctx,
-			msg.ID, sessionID, string(msg.Role), msg.Content, msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
+			msg.ID, sessionID, string(msg.Role), msg.Content, string(contentPartsJSON), msg.ToolCallID, string(toolCallsJSON), msg.CreatedAt.UTC(),
 		); err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}

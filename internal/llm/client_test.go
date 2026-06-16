@@ -751,6 +751,42 @@ func TestClientBuildChatRequest(t *testing.T) {
 	}
 }
 
+func TestBuildChatRequest_ImageContentParts(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(api.LLMConfig{Model: "test-model"}, nil)
+	messages := []api.Message{
+		{Role: api.RoleUser, Content: "describe this"},
+		{Role: api.RoleTool, Content: "[image output]", ToolCallID: "call_1", ContentParts: []api.ContentPart{
+			{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "data:image/png;base64,abcd", Detail: "low"}},
+		}},
+	}
+
+	req := client.buildChatRequest(messages, nil, false)
+	if len(req.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(req.Messages))
+	}
+	parts, ok := req.Messages[1].Content.([]contentPart)
+	if !ok {
+		t.Fatalf("tool message content type = %T, want []contentPart", req.Messages[1].Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("content parts = %d, want 2", len(parts))
+	}
+	if parts[0].Type != "text" || parts[0].Text != "[image output]" {
+		t.Errorf("first part = %v, want text '[image output]'", parts[0])
+	}
+	if parts[1].Type != "image_url" {
+		t.Errorf("part type = %q, want image_url", parts[1].Type)
+	}
+	if parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/png;base64,abcd" {
+		t.Errorf("image url = %v, want data:image/png;base64,abcd", parts[1].ImageURL)
+	}
+	if parts[1].ImageURL == nil || parts[1].ImageURL.Detail != "low" {
+		t.Errorf("image detail = %v, want low", parts[1].ImageURL)
+	}
+}
+
 func TestStreamReader(t *testing.T) {
 	t.Parallel()
 

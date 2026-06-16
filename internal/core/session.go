@@ -159,6 +159,10 @@ func (sm *SessionManager) Resume(ctx context.Context, id string) (*api.Session, 
 	if err != nil {
 		return nil, fmt.Errorf("get messages: %w", err)
 	}
+	msgs, err = sm.recoverMessages(ctx, id, msgs)
+	if err != nil {
+		return nil, fmt.Errorf("recover messages: %w", err)
+	}
 	sess.Messages = msgs
 	sm.setCurrent(sess.ID)
 	sm.getMetrics().IncCounter("session.resumed")
@@ -176,6 +180,10 @@ func (sm *SessionManager) ContinueLast(ctx context.Context, path string) (*api.S
 	msgs, err := sm.store.GetMessages(ctx, sess.ID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("get messages: %w", err)
+	}
+	msgs, err = sm.recoverMessages(ctx, sess.ID, msgs)
+	if err != nil {
+		return nil, fmt.Errorf("recover messages: %w", err)
 	}
 	sess.Messages = msgs
 	sm.setCurrent(sess.ID)
@@ -196,6 +204,21 @@ func (sm *SessionManager) List(ctx context.Context, path string) ([]api.Session,
 	return sessions, nil
 }
 
+// ListAll returns sessions across all paths ordered by updated_at desc.
+func (sm *SessionManager) ListAll(ctx context.Context, limit int) ([]api.Session, error) {
+	if limit <= 0 {
+		limit = 10000
+	}
+	sessions, err := sm.store.ListAllSessions(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list all sessions: %w", err)
+	}
+	for i := range sessions {
+		sessions[i].Path = resolvePortablePath(sessions[i].Path)
+	}
+	return sessions, nil
+}
+
 // Get retrieves a session by ID including its messages.
 func (sm *SessionManager) Get(ctx context.Context, id string) (*api.Session, error) {
 	sess, err := sm.store.GetSession(ctx, id)
@@ -206,6 +229,10 @@ func (sm *SessionManager) Get(ctx context.Context, id string) (*api.Session, err
 	msgs, err := sm.store.GetMessages(ctx, id, 0)
 	if err != nil {
 		return nil, fmt.Errorf("get messages: %w", err)
+	}
+	msgs, err = sm.recoverMessages(ctx, id, msgs)
+	if err != nil {
+		return nil, fmt.Errorf("recover messages: %w", err)
 	}
 	sess.Messages = msgs
 	return sess, nil
@@ -304,4 +331,70 @@ func (sm *SessionManager) runHooks(ctx context.Context, event api.HookEvent, ses
 	}); err != nil {
 		slog.Warn("session hook failed", "event", event, "error", err)
 	}
+}
+
+// recoverMessages detects assistant messages with tool calls that are missing
+// matching tool-result messages (e.g. because the process was interrupted) and
+// appends synthetic tool-result messages so the conversation remains valid for
+// the LLM. The recovered message list is persisted via ReplaceMessages and
+// returned.
+func (sm *SessionManager) recoverMessages(ctx context.Context, sessionID string, msgs []api.Message) ([]api.Message, error) {
+	var out []api.Message
+	used := make(map[int]bool)
+	added := false
+
+	for i, msg := range msgs {
+		if used[i] {
+			continue
+		}
+		out = append(out, msg)
+
+		if msg.Role != api.RoleAssistant || len(msg.ToolCalls) == 0 {
+			continue
+		}
+
+		callIDs := make(map[string]struct{}, len(msg.ToolCalls))
+		for _, c := range msg.ToolCalls {
+			callIDs[c.ID] = struct{}{}
+		}
+
+		// Consume tool-result messages that immediately follow this assistant
+		// message and belong to one of its tool calls.
+		results := make(map[string]api.Message)
+		for j := i + 1; j < len(msgs) && msgs[j].Role == api.RoleTool; j++ {
+			tcid := msgs[j].ToolCallID
+			if _, wanted := callIDs[tcid]; !wanted {
+				continue
+			}
+			if _, seen := results[tcid]; seen {
+				continue
+			}
+			results[tcid] = msgs[j]
+			used[j] = true
+			out = append(out, msgs[j])
+		}
+
+		// Synthesize results for any tool calls that were not recovered.
+		for _, c := range msg.ToolCalls {
+			if _, ok := results[c.ID]; ok {
+				continue
+			}
+			added = true
+			out = append(out, api.Message{
+				ID:         idgen.GenerateID(),
+				Role:       api.RoleTool,
+				Content:    "Tool call was interrupted before a result was recorded.",
+				ToolCallID: c.ID,
+				CreatedAt:  msg.CreatedAt,
+			})
+		}
+	}
+
+	if !added {
+		return msgs, nil
+	}
+	if err := sm.store.ReplaceMessages(ctx, sessionID, out); err != nil {
+		return nil, fmt.Errorf("replace recovered messages: %w", err)
+	}
+	return out, nil
 }

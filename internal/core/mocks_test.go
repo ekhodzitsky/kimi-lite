@@ -105,6 +105,29 @@ func (m *mockStore) ListSessions(ctx context.Context, path string, limit int) ([
 	return list, nil
 }
 
+func (m *mockStore) ListAllSessions(ctx context.Context, limit int) ([]api.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var list []api.Session
+	for _, sess := range m.sessions {
+		copy := *sess
+		copy.Messages = []api.Message{}
+		list = append(list, copy)
+	}
+	for i := 0; i < len(list); i++ {
+		for j := i + 1; j < len(list); j++ {
+			if list[j].UpdatedAt.After(list[i].UpdatedAt) ||
+				(list[j].UpdatedAt.Equal(list[i].UpdatedAt) && list[j].CreatedAt.After(list[i].CreatedAt)) {
+				list[i], list[j] = list[j], list[i]
+			}
+		}
+	}
+	if limit > 0 && len(list) > limit {
+		list = list[:limit]
+	}
+	return list, nil
+}
+
 func (m *mockStore) UpdateSession(ctx context.Context, session *api.Session) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

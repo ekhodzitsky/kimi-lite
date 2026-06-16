@@ -562,6 +562,9 @@ var newMCPClientForServer = func(cfg api.MCPServerConfig) (api.MCPClient, error)
 	case api.MCPTransportHTTP:
 		tr := mcp.NewHTTPTransport(cfg.URL, cfg.Headers, cfg.BearerTokenEnvVar, netutil.SecureHTTPClient())
 		return mcp.NewClient(tr), nil
+	case api.MCPTransportSSE:
+		tr := mcp.NewSSETransport(cfg.URL, cfg.Headers, cfg.BearerTokenEnvVar, netutil.SecureHTTPClient())
+		return mcp.NewClient(tr), nil
 	default:
 		return nil, fmt.Errorf("unsupported mcp transport %q", cfg.Transport)
 	}

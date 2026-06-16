@@ -145,17 +145,17 @@ func validateMCPServer(name string, c api.MCPServerConfig) error {
 		return nil
 	}
 	switch c.Transport {
-	case api.MCPTransportStdio, api.MCPTransportHTTP:
+	case api.MCPTransportStdio, api.MCPTransportHTTP, api.MCPTransportSSE:
 		// ok
 	default:
-		return fmt.Errorf("mcp_servers.%s.transport must be %q or %q, got %q", name, api.MCPTransportStdio, api.MCPTransportHTTP, c.Transport)
+		return fmt.Errorf("mcp_servers.%s.transport must be %q, %q or %q, got %q", name, api.MCPTransportStdio, api.MCPTransportHTTP, api.MCPTransportSSE, c.Transport)
 	}
 	if c.Transport == api.MCPTransportStdio && c.Command == "" {
 		return fmt.Errorf("mcp_servers.%s.command must not be empty for stdio transport", name)
 	}
-	if c.Transport == api.MCPTransportHTTP {
+	if c.Transport == api.MCPTransportHTTP || c.Transport == api.MCPTransportSSE {
 		if c.URL == "" {
-			return fmt.Errorf("mcp_servers.%s.url must not be empty for http transport", name)
+			return fmt.Errorf("mcp_servers.%s.url must not be empty for %s transport", name, c.Transport)
 		}
 		if err := validateURL(fmt.Sprintf("mcp_servers.%s.url", name), c.URL, false); err != nil {
 			return err

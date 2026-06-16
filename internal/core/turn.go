@@ -495,12 +495,16 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 					toolContent = fmt.Sprintf("Error: %s", result.Error)
 				}
 			}
+			if toolContent == "" && len(result.ContentParts) > 0 {
+				toolContent = "[tool output contains non-text content]"
+			}
 			toolMsg := api.Message{
-				ID:         idgen.GenerateID(),
-				Role:       api.RoleTool,
-				Content:    toolContent,
-				ToolCallID: result.CallID,
-				CreatedAt:  time.Now().UTC(),
+				ID:           idgen.GenerateID(),
+				Role:         api.RoleTool,
+				Content:      toolContent,
+				ContentParts: result.ContentParts,
+				ToolCallID:   result.CallID,
+				CreatedAt:    time.Now().UTC(),
 			}
 			if err := tm.store.AppendMessage(ctx, sessionID, toolMsg); err != nil {
 				tm.setError(ctx, sessionID, turn, fmt.Errorf("append message: %w", err), eventCh)

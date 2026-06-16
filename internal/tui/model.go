@@ -17,6 +17,7 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/sessions"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/sidebar"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/viewport"
@@ -115,6 +116,9 @@ type turnManager interface {
 // sessionManager is the interface needed from core.SessionManager.
 type sessionManager interface {
 	CurrentSessionID() string
+	Resume(ctx context.Context, id string) (*api.Session, error)
+	List(ctx context.Context, path string) ([]api.Session, error)
+	ListAll(ctx context.Context, limit int) ([]api.Session, error)
 	ClearMessages(ctx context.Context, id string) error
 	Rename(ctx context.Context, id string, name string) error
 	Fork(ctx context.Context, sourceID string, name string) (*api.Session, error)
@@ -147,6 +151,9 @@ type Model struct {
 
 	// approvalController owns the pending tool-call approval state machine.
 	approval *approvalController
+
+	// sessionPicker is the modal session-selection overlay.
+	sessionPicker *sessions.Picker
 
 	// Service references (optional, wired by app layer)
 	turnManager    turnManager
@@ -313,6 +320,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
+		if m.sessionPicker != nil {
+			done, selected := m.sessionPicker.Update(msg)
+			if selected {
+				id := m.sessionPicker.Selected().ID
+				m.sessionPicker = nil
+				if id != "" {
+					cmds = append(cmds, m.resumeSessionCmd(id))
+				}
+				return m, tea.Batch(cmds...)
+			}
+			if done {
+				m.sessionPicker = nil
+			}
+			return m, nil
+		}
 		// Let the input component consume completion keys while a popup is open.
 		if !m.input.Completing() {
 			cmds = append(cmds, m.handleKeyMsg(msg)...)
@@ -322,6 +344,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.sessionPicker != nil {
+			m.sessionPicker.SetSize(m.width, m.height)
+		}
 		l := m.layout()
 		m.applyLayoutSizes(l)
 		if !m.pendingResize && !l.eq(m.lastLayout) {
@@ -401,12 +426,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if len(msg.Sessions) == 0 {
 			m.addMessage(msgcomp.NewUserMessage("No sessions found.", m.styles))
 		} else {
-			for _, s := range msg.Sessions {
-				m.addMessage(msgcomp.NewUserMessage(
-					fmt.Sprintf("Session: %s (%s) — updated %s", s.ID, s.Path, s.UpdatedAt.Format("2006-01-02 15:04")),
-					m.styles,
-				))
+			var path string
+			if m.session != nil {
+				path = m.session.Path
 			}
+			m.sessionPicker = sessions.NewPicker(msg.Sessions, path, m.width, m.height)
+		}
+
+	case SessionSelectedMsg:
+		if msg.Err != nil {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("resume session: %w", msg.Err), m.styles))
+		} else if msg.Session != nil {
+			m.mu.Lock()
+			m.session = msg.Session
+			m.messages = nil
+			m.rb = newRenderBuffer()
+			m.mu.Unlock()
+			_ = m.sidebar.SetRoot(msg.Session.Path)
+			for _, msg := range msg.Session.Messages {
+				m.appendSessionMessage(msg)
+			}
+			m.updateLayout()
+			m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Resumed session %s (%s)", msg.Session.ID, msg.Session.Path), m.styles))
 		}
 		m.setState(api.TurnIdle)
 
@@ -518,6 +559,10 @@ func (m *Model) View() tea.View {
 
 	if m.state == api.TurnWaitingApproval && m.approvalIsActive() {
 		view = m.renderApprovalDialog(view)
+	}
+
+	if m.sessionPicker != nil {
+		view = overlayDialog(view, m.sessionPicker.View(), m.width, m.height)
 	}
 
 	v := tea.NewView(view)
@@ -781,23 +826,38 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 // listSessionsCmd returns a command that lists sessions asynchronously.
 func (m *Model) listSessionsCmd() tea.Cmd {
 	m.mu.RLock()
-	store := m.store
-	var path string
-	if m.session != nil {
-		path = m.session.Path
-	}
+	sm := m.sessionManager
 	appCtx := m.appCtx
 	m.mu.RUnlock()
 
 	timeout := sessionsTimeout
 	return func() tea.Msg {
-		if store == nil || path == "" {
-			return SessionsResultMsg{Err: fmt.Errorf("no sessions available")}
+		if sm == nil {
+			return SessionsResultMsg{Err: fmt.Errorf("session manager not available")}
 		}
 		ctx, cancel := context.WithTimeout(appCtx, timeout)
 		defer cancel()
-		sessions, err := store.ListSessions(ctx, path, 0)
+		sessions, err := sm.ListAll(ctx, 0)
 		return SessionsResultMsg{Sessions: sessions, Err: err}
+	}
+}
+
+// resumeSessionCmd returns a command that resumes the selected session.
+func (m *Model) resumeSessionCmd(id string) tea.Cmd {
+	m.mu.RLock()
+	sm := m.sessionManager
+	appCtx := m.appCtx
+	m.mu.RUnlock()
+
+	timeout := sessionsTimeout
+	return func() tea.Msg {
+		if sm == nil {
+			return SessionSelectedMsg{Err: fmt.Errorf("session manager not available")}
+		}
+		ctx, cancel := context.WithTimeout(appCtx, timeout)
+		defer cancel()
+		sess, err := sm.Resume(ctx, id)
+		return SessionSelectedMsg{Session: sess, Err: err}
 	}
 }
 
@@ -1066,6 +1126,25 @@ func (m *Model) addMessage(msg *msgcomp.Message) {
 	msg.SetWidth(m.vpWidth())
 	m.messages = append(m.messages, msg)
 	m.rb.appendBlock(msg.View().Content)
+}
+
+// appendSessionMessage adds an existing api.Message to the transcript for
+// display. Tool-result messages are skipped because the TUI renders tool calls
+// and their results as dedicated tool-call messages.
+func (m *Model) appendSessionMessage(msg api.Message) {
+	switch msg.Role {
+	case api.RoleUser:
+		m.addMessage(msgcomp.NewUserMessage(msg.Content, m.styles))
+	case api.RoleAssistant:
+		if msg.Content != "" {
+			m.addMessage(msgcomp.NewAssistantMessage(msg.Content, m.styles))
+		}
+		for _, tc := range msg.ToolCalls {
+			m.addMessage(msgcomp.NewToolCallMessage(tc, m.styles))
+		}
+	case api.RoleSystem:
+		m.addMessage(msgcomp.NewUserMessage("[system]\n"+msg.Content, m.styles))
+	}
 }
 
 func (m *Model) clearMessages() {

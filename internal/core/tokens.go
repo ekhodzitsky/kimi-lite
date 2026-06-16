@@ -40,6 +40,9 @@ func (e *HeuristicTokenEstimator) Estimate(messages []api.Message) int {
 	for _, m := range messages {
 		tokens += e.perMessageOverhead
 		tokens += e.estimateString(m.Content)
+		for _, p := range m.ContentParts {
+			tokens += e.estimateContentPart(p)
+		}
 		for _, tc := range m.ToolCalls {
 			tokens += e.toolCallOverhead
 			tokens += e.estimateString(tc.Name)
@@ -51,6 +54,22 @@ func (e *HeuristicTokenEstimator) Estimate(messages []api.Message) int {
 		}
 	}
 	return tokens
+}
+
+// estimateContentPart returns a rough token budget for a content part.
+// Text is estimated like any other string; images use a fixed heuristic.
+func (e *HeuristicTokenEstimator) estimateContentPart(p api.ContentPart) int {
+	switch p.Type {
+	case api.ContentPartImageURL:
+		// OpenAI charges 85 base tokens plus 170 per 512x512 tile for low-res,
+		// and ~1105 tokens for high-res auto detail. Use a middle estimate.
+		if p.ImageURL != nil && p.ImageURL.Detail == "low" {
+			return 85
+		}
+		return 255
+	default:
+		return e.estimateString(p.Text)
+	}
 }
 
 // estimateString returns a token estimate for a single string.

@@ -99,6 +99,107 @@ func TestSessionManager_Resume_NotFound(t *testing.T) {
 	}
 }
 
+func TestSessionManager_ListAll(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	s1, _ := sm.Start(ctx, "/tmp/a")
+	s2, _ := sm.Start(ctx, "/tmp/b")
+	s1.Name = "first"
+	_ = sm.Rename(ctx, s1.ID, s1.Name)
+
+	all, err := sm.ListAll(ctx, 10)
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(all))
+	}
+	ids := make(map[string]struct{})
+	for _, s := range all {
+		ids[s.ID] = struct{}{}
+	}
+	if _, ok := ids[s1.ID]; !ok {
+		t.Errorf("expected session %s in list", s1.ID)
+	}
+	if _, ok := ids[s2.ID]; !ok {
+		t.Errorf("expected session %s in list", s2.ID)
+	}
+}
+
+func TestSessionManager_Resume_RecoversInterruptedToolCalls(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	sess, _ := sm.Start(ctx, "/tmp/proj")
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m1", Role: api.RoleUser, Content: "hello", CreatedAt: sess.CreatedAt})
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{
+		ID:      "m2",
+		Role:    api.RoleAssistant,
+		Content: "I'll help",
+		ToolCalls: []api.ToolCall{
+			{ID: "call-1", Name: "read_file", Arguments: `{"path": "/tmp/foo"}`},
+		},
+		CreatedAt: sess.CreatedAt,
+	})
+
+	resumed, err := sm.Resume(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("resume session: %v", err)
+	}
+	if len(resumed.Messages) != 3 {
+		t.Fatalf("expected 3 messages after recovery, got %d", len(resumed.Messages))
+	}
+	toolMsg := resumed.Messages[2]
+	if toolMsg.Role != api.RoleTool {
+		t.Errorf("expected synthetic role tool, got %q", toolMsg.Role)
+	}
+	if toolMsg.ToolCallID != "call-1" {
+		t.Errorf("tool call id = %q, want %q", toolMsg.ToolCallID, "call-1")
+	}
+
+	// Recovery must persist the synthetic message so subsequent loads see it.
+	storedMsgs, err := store.GetMessages(ctx, sess.ID, 0)
+	if err != nil {
+		t.Fatalf("get messages: %v", err)
+	}
+	if len(storedMsgs) != 3 {
+		t.Errorf("expected 3 stored messages, got %d", len(storedMsgs))
+	}
+}
+
+func TestSessionManager_Get_DoesNotRecoverCompleteToolCalls(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sm := NewSessionManager(store)
+
+	sess, _ := sm.Start(ctx, "/tmp/proj")
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m1", Role: api.RoleUser, Content: "hello", CreatedAt: sess.CreatedAt})
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{
+		ID:      "m2",
+		Role:    api.RoleAssistant,
+		Content: "I'll help",
+		ToolCalls: []api.ToolCall{
+			{ID: "call-1", Name: "read_file", Arguments: `{"path": "/tmp/foo"}`},
+		},
+		CreatedAt: sess.CreatedAt,
+	})
+	_ = store.AppendMessage(ctx, sess.ID, api.Message{ID: "m3", Role: api.RoleTool, Content: "data", ToolCallID: "call-1", CreatedAt: sess.CreatedAt})
+
+	got, err := sm.Get(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(got.Messages))
+	}
+}
+
 func TestSessionManager_ContinueLast(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -34,7 +34,7 @@ Key interfaces and types:
 - `ToolExecutor` — Execute, Definitions
 - `ApprovalGate` — ShouldAutoApprove
 - `MCPClient` — Connect, ListTools, CallTool
-- `MCPServerConfig` — direct MCP server configuration (stdio and http transports)
+- `MCPServerConfig` — direct MCP server configuration (stdio, http, and sse transports)
 - `GitProvider` — Status, Diff, IsRepo
 - `WebSearcher` — Search
 
@@ -54,6 +54,8 @@ SQLite persistence with embedded migrations.
 - Implements `api.Store` interface
 - Uses `database/sql` + `modernc.org/sqlite` (pure-Go, no CGO)
 - Pagination (`LIMIT`) on `GetMessages`, `GetTurns`, `ListSessions`
+- `ListAllSessions` for the cross-directory sessions picker
+- Persists multi-modal `Message.ContentParts` via a dedicated `content_parts` JSON column
 - Transactional `ReplaceMessages` for atomic compaction
 
 ### `internal/llm`
@@ -69,8 +71,8 @@ OpenAI-compatible LLM client with SSE streaming.
 ### `internal/core`
 Business logic layer.
 
-- `SessionManager` — create, resume, list sessions
-- `TurnManager` — orchestrates input → LLM → tools → output
+- `SessionManager` — create, resume, list sessions; recovers interrupted tool calls by synthesizing missing tool-result messages on resume
+- `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages
 - `BuiltInToolExecutor` — 12 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `TodoList`) with sandboxed file access; `web_search` is only registered when an `api.WebSearcher` provider is injected
   - Uses `os.OpenRoot` when `SandboxRoot` is configured; falls back to `O_NOFOLLOW` (`openFileNoFollow`) when no sandbox root is set
   - Blocks protected paths and sensitive system/secret trees
@@ -90,16 +92,18 @@ Bubble Tea terminal UI.
 - `viewport` — scrollable output
 - `sidebar` — file browser
 - `messages` — message rendering (Markdown via Glamour)
+- `sessions` — modal session picker with search, pagination, and current/all-directory toggle
 - `styles` — Lipgloss themes
 
 ### `internal/mcp`
-MCP client implementation supporting both the legacy `mcp-guard` stdio path and
- direct per-server configuration.
+MCP client implementation supporting the legacy `mcp-guard` stdio path, direct
+ per-server configuration, and the legacy SSE transport.
 
 - `NewClient(transport)` — creates a client from any `Transport`
 - `NewClientFromConfig(cfg)` — legacy stdio client connected to `mcp-guard`
-- `NewClientFromServerConfig(cfg, httpClient)` — direct stdio or http client from `api.MCPServerConfig`
+- `NewClientFromServerConfig(cfg, httpClient)` — direct stdio, http, or sse client from `api.MCPServerConfig`
 - `NewHTTPTransport(url, headers, bearerEnv, httpClient)` — JSON-RPC over HTTP POST
+- `NewSSETransport(url, headers, bearerEnv, httpClient)` — JSON-RPC over Server-Sent Events
 - `NewMultiClient(clients, configs)` — aggregates multiple MCP clients, disambiguates duplicate tool names by server key, and routes tool calls
 - `Connect()` — performs MCP initialize handshake
 - `ListTools()` / `CallTool()` — tool operations
@@ -181,7 +185,7 @@ make fmt vet
 
 ## MCP Integration
 
-kimi-lite supports two MCP integration modes:
+kimi-lite supports three MCP integration modes:
 
 1. **Legacy mcp-guard path** (used when `cfg.MCPServers` is empty):
    - Attempts to find `mcp-guard` in PATH
@@ -191,9 +195,9 @@ kimi-lite supports two MCP integration modes:
 
 2. **Direct MCP server configuration** (used when `cfg.MCPServers` is populated):
    - Each server is configured via `[mcp_servers.<name>]` tables in `config.toml`
-   - Supported transports: `stdio` (`command`, `args`, `env`, `cwd`) and `http` (`url`, `headers`, `bearer_token_env_var`)
+   - Supported transports: `stdio` (`command`, `args`, `env`, `cwd`), `http` (`url`, `headers`, `bearer_token_env_var`), and `sse` (`url`, `headers`, `bearer_token_env_var`)
    - Per-server `enabled`, `startup_timeout_ms`, `tool_timeout_ms`, `enabled_tools`, and `disabled_tools`
-   - HTTP transports use `netutil.SecureHTTPClient()` for SSRF-hardened outbound requests
+   - HTTP and SSE transports use `netutil.SecureHTTPClient()` for SSRF-hardened outbound requests
    - Multiple servers are aggregated by `mcp.MultiClient`; duplicate tool names are prefixed with the server key
    - Unavailable servers are logged and skipped; the app continues with the remaining servers
 

@@ -56,6 +56,24 @@ func TestHeuristicTokenEstimator_ToolCall(t *testing.T) {
 	}
 }
 
+func TestHeuristicTokenEstimator_ImageContentPart(t *testing.T) {
+	t.Parallel()
+	e := NewHeuristicTokenEstimator()
+	msgs := []api.Message{{
+		Role:    api.RoleTool,
+		Content: "[image output]",
+		ContentParts: []api.ContentPart{
+			{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "data:image/png;base64,abcd", Detail: "low"}},
+			{Type: api.ContentPartText, Text: "image"},
+		},
+	}}
+	got := e.Estimate(msgs)
+	want := 3 + len("[image output]")/4 + 85 + 5/4
+	if got != want {
+		t.Errorf("image estimate = %d, want %d", got, want)
+	}
+}
+
 func BenchmarkHeuristicTokenEstimator(b *testing.B) {
 	e := NewHeuristicTokenEstimator()
 	msgs := []api.Message{{

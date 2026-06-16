@@ -525,6 +525,39 @@ func isRetryableError(err error) bool {
 	return false
 }
 
+// messageContent returns the OpenAI content value for a message: a plain
+// string when no content parts are present, otherwise an array of text/image
+// parts. The message's plain-text Content is always included as the first text
+// part so it is not lost when images are attached.
+func messageContent(msg api.Message) any {
+	if len(msg.ContentParts) == 0 {
+		return msg.Content
+	}
+	parts := make([]contentPart, 0, len(msg.ContentParts)+1)
+	if msg.Content != "" {
+		parts = append(parts, contentPart{Type: "text", Text: msg.Content})
+	}
+	for _, p := range msg.ContentParts {
+		switch p.Type {
+		case api.ContentPartText:
+			parts = append(parts, contentPart{Type: "text", Text: p.Text})
+		case api.ContentPartImageURL:
+			detail := "auto"
+			if p.ImageURL != nil && p.ImageURL.Detail != "" {
+				detail = p.ImageURL.Detail
+			}
+			url := ""
+			if p.ImageURL != nil {
+				url = p.ImageURL.URL
+			}
+			parts = append(parts, contentPart{Type: "image_url", ImageURL: &imageURLPart{URL: url, Detail: detail}})
+		default:
+			parts = append(parts, contentPart{Type: "text", Text: p.Text})
+		}
+	}
+	return parts
+}
+
 // buildChatRequest constructs the API request payload from api types.
 func (c *Client) buildChatRequest(messages []api.Message, tools []api.ToolDefinition, stream bool) chatCompletionRequest {
 	req := chatCompletionRequest{
@@ -537,7 +570,7 @@ func (c *Client) buildChatRequest(messages []api.Message, tools []api.ToolDefini
 	for _, msg := range messages {
 		cm := chatMessage{
 			Role:    string(msg.Role),
-			Content: msg.Content,
+			Content: messageContent(msg),
 		}
 		if msg.Role == api.RoleTool {
 			cm.ToolCallID = msg.ToolCallID
@@ -589,9 +622,20 @@ type chatCompletionRequest struct {
 
 type chatMessage struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content"`
+	Content    any        `json:"content"`
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+type contentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *imageURLPart `json:"image_url,omitempty"`
+}
+
+type imageURLPart struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type toolDef struct {

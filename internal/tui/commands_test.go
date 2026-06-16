@@ -28,10 +28,8 @@ type fakeSessionManager struct {
 	forkErr      error
 }
 
-func (f *fakeSessionManager) CurrentSessionID() string { return f.currentID }
-func (f *fakeSessionManager) ClearMessages(ctx context.Context, id string) error {
-	return nil
-}
+func (f *fakeSessionManager) CurrentSessionID() string                           { return f.currentID }
+func (f *fakeSessionManager) ClearMessages(ctx context.Context, id string) error { return nil }
 func (f *fakeSessionManager) Rename(ctx context.Context, id string, name string) error {
 	f.renameCalled = true
 	f.renameID = id
@@ -43,6 +41,15 @@ func (f *fakeSessionManager) Fork(ctx context.Context, sourceID string, name str
 	f.forkSourceID = sourceID
 	f.forkName = name
 	return f.forkResult, f.forkErr
+}
+func (f *fakeSessionManager) Resume(ctx context.Context, id string) (*api.Session, error) {
+	return &api.Session{ID: id, Path: "/tmp/proj"}, nil
+}
+func (f *fakeSessionManager) List(ctx context.Context, path string) ([]api.Session, error) {
+	return nil, nil
+}
+func (f *fakeSessionManager) ListAll(ctx context.Context, limit int) ([]api.Session, error) {
+	return nil, nil
 }
 
 func TestCommandTitle(t *testing.T) {

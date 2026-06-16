@@ -25,15 +25,39 @@ const (
 	RoleTool Role = "tool"
 )
 
+// ContentPartType identifies the kind of content in a multi-modal message.
+type ContentPartType string
+
+const (
+	// ContentPartText is plain text content.
+	ContentPartText ContentPartType = "text"
+	// ContentPartImageURL is an image referenced by URL or data URL.
+	ContentPartImageURL ContentPartType = "image_url"
+)
+
+// ImageURL describes an image for a content part.
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// ContentPart represents a single part of a multi-modal message.
+type ContentPart struct {
+	Type     ContentPartType `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *ImageURL       `json:"image_url,omitempty"`
+}
+
 // Message represents a single message in a conversation.
 type Message struct {
-	ID           string     `json:"id"`
-	Role         Role       `json:"role"`
-	Content      string     `json:"content"`
-	ToolCallID   string     `json:"tool_call_id,omitempty"`
-	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
-	FinishReason string     `json:"finish_reason,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID           string        `json:"id"`
+	Role         Role          `json:"role"`
+	Content      string        `json:"content"`
+	ContentParts []ContentPart `json:"content_parts,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	FinishReason string        `json:"finish_reason,omitempty"`
+	CreatedAt    time.Time     `json:"created_at"`
 }
 
 // ToolCall represents a single tool invocation requested by the LLM.
@@ -45,10 +69,11 @@ type ToolCall struct {
 
 // ToolResult represents the result of executing a tool call.
 type ToolResult struct {
-	CallID string `json:"call_id"`
-	Name   string `json:"name"`
-	Output string `json:"output"`
-	Error  string `json:"error,omitempty"`
+	CallID       string        `json:"call_id"`
+	Name         string        `json:"name"`
+	Output       string        `json:"output"`
+	Error        string        `json:"error,omitempty"`
+	ContentParts []ContentPart `json:"content_parts,omitempty"`
 }
 
 // ToolAnnotations carries optional behavioral metadata about a tool.
@@ -266,6 +291,7 @@ type SessionStore interface {
 	GetSession(ctx context.Context, id string) (*Session, error)
 	GetLastSession(ctx context.Context, path string) (*Session, error)
 	ListSessions(ctx context.Context, path string, limit int) ([]Session, error)
+	ListAllSessions(ctx context.Context, limit int) ([]Session, error)
 	UpdateSession(ctx context.Context, session *Session) error
 	DeleteSession(ctx context.Context, id string) error
 }
@@ -531,6 +557,8 @@ const (
 	MCPTransportStdio MCPTransport = "stdio"
 	// MCPTransportHTTP uses JSON-RPC over HTTP POST.
 	MCPTransportHTTP MCPTransport = "http"
+	// MCPTransportSSE uses JSON-RPC over Server-Sent Events.
+	MCPTransportSSE MCPTransport = "sse"
 )
 
 // MCPServerConfig holds direct configuration for a single MCP server.
