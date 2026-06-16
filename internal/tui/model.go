@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/activity"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/footer"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/mentions"
@@ -69,6 +70,12 @@ func (m *Model) welcomeHeight() int {
 	return lipgloss.Height(m.welcome.View())
 }
 
+// activityHeight returns the rendered height of the activity panel, or 0 when
+// the turn is not actively thinking, streaming, or running tools.
+func (m *Model) activityHeight() int {
+	return m.activity.Height()
+}
+
 // layoutRect holds computed geometry for a single frame.
 type layoutRect struct {
 	contentWidth int
@@ -95,13 +102,16 @@ func (m *Model) layout() layoutRect {
 	}
 	m.welcome.SetSize(contentWidth)
 	m.updateWelcomeData()
+	m.activity.SetSize(contentWidth)
+	m.updateActivity()
 	welcomeHeight := m.welcomeHeight()
 	inputHeight := m.inputHeight()
-	vpHeight := m.height - statusHeight - inputHeight - welcomeHeight
+	activityHeight := m.activityHeight()
+	vpHeight := m.height - statusHeight - inputHeight - welcomeHeight - activityHeight
 	if vpHeight < minViewportHeight {
 		vpHeight = minViewportHeight
 	}
-	statusY := welcomeHeight + vpHeight + inputHeight
+	statusY := welcomeHeight + vpHeight + inputHeight + activityHeight
 	if statusY > m.height {
 		statusY = m.height
 	}
@@ -147,6 +157,7 @@ type Model struct {
 	messages []*msgcomp.Message
 	footer   *footer.Model
 	welcome  *welcome.Model
+	activity *activity.Model
 
 	mentionProvider mentions.Provider
 
@@ -230,6 +241,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 	vp := viewport.New(st)
 	ft := footer.New(st)
 	wc := welcome.New(st)
+	ac := activity.New(st)
 
 	mp := &mentions.FileWalker{MaxDepth: 3}
 	m := &Model{
@@ -239,6 +251,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 		vp:              vp,
 		footer:          ft,
 		welcome:         wc,
+		activity:        ac,
 		messages:        make([]*msgcomp.Message, 0),
 		state:           api.TurnIdle,
 		session:         session,
@@ -346,6 +359,7 @@ func (m *Model) Init() tea.Cmd {
 		m.input.Init(),
 		m.vp.Init(),
 		m.footer.Init(),
+		m.activity.Init(),
 		m.scheduleGitRefreshCmd(),
 	)
 }
@@ -567,6 +581,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	cmds = append(cmds, m.footer.UpdateMsg(msg))
+	cmds = append(cmds, m.activity.UpdateMsg(msg))
 
 	m.mu.Lock()
 	if m.rb.isDirty() {
@@ -589,6 +604,7 @@ func (m *Model) View() tea.View {
 
 	m.updateFooter()
 	m.updateWelcomeData()
+	m.updateActivity()
 
 	var mainContent strings.Builder
 	if len(m.messages) == 0 {
@@ -597,6 +613,10 @@ func (m *Model) View() tea.View {
 	}
 	mainContent.WriteString(m.vp.View().Content)
 	mainContent.WriteString("\n")
+	if act := m.activity.View(); act != "" {
+		mainContent.WriteString(act)
+		mainContent.WriteString("\n")
+	}
 	mainContent.WriteString(m.input.View().Content)
 	mainContent.WriteString("\n")
 	mainContent.WriteString(m.footer.View())
@@ -1456,6 +1476,32 @@ func (m *Model) updateWelcomeData() {
 	})
 }
 
+// updateActivity builds the activity panel data from the current turn state and
+// pending tool calls. It is safe to call from the Bubble Tea main goroutine.
+func (m *Model) updateActivity() {
+	m.activity.SetData(activity.Data{
+		State:      m.state,
+		StatusText: m.statusText,
+		ToolCalls:  m.pendingToolCalls(),
+	})
+}
+
+// pendingToolCalls returns the tool calls that should be shown in the activity
+// panel. During TurnToolCalls this is the most recent batch of tool-call
+// messages that have not yet received a result.
+func (m *Model) pendingToolCalls() []api.ToolCall {
+	if m.state != api.TurnToolCalls {
+		return nil
+	}
+	var calls []api.ToolCall
+	for _, msg := range m.messages {
+		if msg.Type == msgcomp.TypeToolCall && msg.ToolResult == nil {
+			calls = append(calls, msg.ToolCall)
+		}
+	}
+	return calls
+}
+
 func (m *Model) updateLayout() {
 	l := m.layout()
 	m.applyLayoutSizes(l)
@@ -1480,6 +1526,7 @@ func (m *Model) applyLayoutSizes(l layoutRect) {
 	m.input.SetWidth(l.contentWidth)
 	m.footer.SetSize(l.contentWidth)
 	m.welcome.SetSize(l.contentWidth)
+	m.activity.SetSize(l.contentWidth)
 }
 
 func (m *Model) refreshFileCandidates() {

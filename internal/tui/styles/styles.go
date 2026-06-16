@@ -92,6 +92,8 @@ type Styles struct {
 	WelcomeBox       lipgloss.Style
 	WelcomeTitle     lipgloss.Style
 	WelcomeText      lipgloss.Style
+	Activity         lipgloss.Style
+	ActivityTool     lipgloss.Style
 }
 
 // New creates a new Styles instance for the given theme name.
@@ -210,4 +212,15 @@ func (s *Styles) init() {
 		MarginBottom(1)
 	s.WelcomeTitle = lipgloss.NewStyle().Bold(true).Foreground(t.Primary).Background(t.Background)
 	s.WelcomeText = lipgloss.NewStyle().Foreground(t.Foreground).Background(t.Background)
+
+	s.Activity = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Primary).
+		Padding(0, 1).
+		MarginLeft(1).
+		MarginBottom(1)
+	s.ActivityTool = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Muted).
+		MarginLeft(2)
 }
