@@ -3,7 +3,7 @@
 [![CI](https://github.com/ekhodzitsky/kimi-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/ekhodzitsky/kimi-lite/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Go port of the [original Python AI coding client](https://github.com/MoonshotAI/kimi-code).
+Go port of the [original TypeScript AI coding client](https://github.com/MoonshotAI/kimi-code).
 
 A single-terminal AI assistant with no Node, Python runtime, or Electron dependencies.
 
@@ -17,7 +17,11 @@ A single-terminal AI assistant with no Node, Python runtime, or Electron depende
 - **Risk-aware approvals** — every tool call is scored `low`/`medium`/`high`; destructive or sandbox-escaping operations require approval.
 - **Context compression** — `/compact` summarizes older history using a language-aware token estimator.
 - **Observability** — `--pprof` runtime profiling and internal metrics collection.
-- **MCP support** — connect to Model Context Protocol servers via stdio or HTTP.
+- **MCP support** — connect to Model Context Protocol servers via stdio, HTTP, or legacy SSE.
+- **All-sessions picker** — `/sessions` lists and resumes sessions across all directories, with search and pagination.
+- **Multi-modal messages** — image content parts are persisted and forwarded to vision-capable models.
+- **Language-aware UI** — transient status messages before long-running tools match the user's language; reasoning is instructed to stay in the same language.
+- **Workspace prompt** — the system prompt includes a compact workspace tree with hidden directories collapsed.
 
 ## Installation
 
