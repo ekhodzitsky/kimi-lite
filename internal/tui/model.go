@@ -22,6 +22,7 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/sessions"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/viewport"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/welcome"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -58,6 +59,15 @@ func (m *Model) inputHeight() int {
 	return h
 }
 
+// welcomeHeight returns the rendered height of the welcome panel, or 0 when
+// the transcript already contains messages.
+func (m *Model) welcomeHeight() int {
+	if len(m.messages) > 0 {
+		return 0
+	}
+	return lipgloss.Height(m.welcome.View())
+}
+
 // layoutRect holds computed geometry for a single frame.
 type layoutRect struct {
 	contentWidth int
@@ -82,12 +92,15 @@ func (m *Model) layout() layoutRect {
 	if contentWidth < minContentWidth {
 		contentWidth = minContentWidth
 	}
+	m.welcome.SetSize(contentWidth)
+	m.updateWelcomeData()
+	welcomeHeight := m.welcomeHeight()
 	inputHeight := m.inputHeight()
-	vpHeight := m.height - statusHeight - inputHeight
+	vpHeight := m.height - statusHeight - inputHeight - welcomeHeight
 	if vpHeight < minViewportHeight {
 		vpHeight = minViewportHeight
 	}
-	statusY := vpHeight + inputHeight
+	statusY := welcomeHeight + vpHeight + inputHeight
 	if statusY > m.height {
 		statusY = m.height
 	}
@@ -132,6 +145,7 @@ type Model struct {
 	vp       *viewport.Model
 	messages []*msgcomp.Message
 	footer   *footer.Model
+	welcome  *welcome.Model
 
 	mentionProvider mentions.Provider
 
@@ -210,6 +224,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 	inp.SetContext(appCtx)
 	vp := viewport.New(st)
 	ft := footer.New(st)
+	wc := welcome.New(st)
 
 	mp := &mentions.FileWalker{MaxDepth: 3}
 	m := &Model{
@@ -218,6 +233,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 		input:           inp,
 		vp:              vp,
 		footer:          ft,
+		welcome:         wc,
 		messages:        make([]*msgcomp.Message, 0),
 		state:           api.TurnIdle,
 		session:         session,
@@ -567,8 +583,13 @@ func (m *Model) View() tea.View {
 	}
 
 	m.updateFooter()
+	m.updateWelcomeData()
 
 	var mainContent strings.Builder
+	if len(m.messages) == 0 {
+		mainContent.WriteString(m.welcome.View())
+		mainContent.WriteString("\n")
+	}
 	mainContent.WriteString(m.vp.View().Content)
 	mainContent.WriteString("\n")
 	mainContent.WriteString(m.input.View().Content)
@@ -761,10 +782,12 @@ func (m *Model) handleMouseMsg(msg tea.MouseReleaseMsg) {
 	}
 
 	l := m.layout()
+	welcomeHeight := m.welcomeHeight()
+	vpEnd := welcomeHeight + l.vpHeight
 
-	if msg.Y >= l.vpHeight && msg.Y < l.statusY {
+	if msg.Y >= vpEnd && msg.Y < l.statusY {
 		m.focused = focusInput
-	} else if msg.Y < l.vpHeight {
+	} else if msg.Y >= welcomeHeight && msg.Y < vpEnd {
 		m.focused = focusViewport
 	}
 }
@@ -1410,6 +1433,24 @@ func (m *Model) updateFooter() {
 	})
 }
 
+func (m *Model) updateWelcomeData() {
+	// This method is called from layout() and View(), both of which run on the
+	// Bubble Tea main goroutine, so direct field access is safe without locking.
+	sessionID := ""
+	directory := ""
+	if m.session != nil {
+		sessionID = m.session.ID
+		directory = m.session.Path
+	}
+
+	m.welcome.SetData(welcome.Data{
+		Directory: directory,
+		SessionID: sessionID,
+		ModelName: m.modelName,
+		Version:   welcome.Version,
+	})
+}
+
 func (m *Model) updateLayout() {
 	l := m.layout()
 	m.applyLayoutSizes(l)
@@ -1433,6 +1474,7 @@ func (m *Model) applyLayoutSizes(l layoutRect) {
 	m.vp.SetSize(l.contentWidth, l.vpHeight)
 	m.input.SetWidth(l.contentWidth)
 	m.footer.SetSize(l.contentWidth)
+	m.welcome.SetSize(l.contentWidth)
 }
 
 func (m *Model) refreshFileCandidates() {

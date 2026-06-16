@@ -97,6 +97,9 @@ type Styles struct {
 	FooterContext    lipgloss.Style
 	ModeBadgeYolo    lipgloss.Style
 	ModeBadgeAuto    lipgloss.Style
+	WelcomeBox       lipgloss.Style
+	WelcomeTitle     lipgloss.Style
+	WelcomeText      lipgloss.Style
 }
 
 // New creates a new Styles instance for the given theme name.
@@ -232,4 +235,18 @@ func (s *Styles) init() {
 	s.FooterContext = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Secondary)
 	s.ModeBadgeYolo = lipgloss.NewStyle().Background(t.Error).Foreground(t.Foreground).Bold(true)
 	s.ModeBadgeAuto = lipgloss.NewStyle().Background(t.Primary).Foreground(t.Background).Bold(true)
+
+	borderColor := t.Border
+	if t.Name == "light" {
+		borderColor = lipgloss.Color("#bcc0cc")
+	}
+	s.WelcomeBox = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Background(t.Background).
+		Foreground(t.Foreground).
+		Padding(1, 2).
+		MarginBottom(1)
+	s.WelcomeTitle = lipgloss.NewStyle().Bold(true).Foreground(t.Primary).Background(t.Background)
+	s.WelcomeText = lipgloss.NewStyle().Foreground(t.Foreground).Background(t.Background)
 }

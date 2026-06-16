@@ -211,6 +211,11 @@ func TestHandleMouseMsg_ViewportClick(t *testing.T) {
 	m.height = 40
 	m.updateLayout()
 
+	// Add a message to hide the welcome panel so the viewport occupies its
+	// usual full-height region.
+	m.addMessage(msgcomp.NewUserMessage("hello", m.styles))
+	m.updateLayout()
+
 	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft, X: 5, Y: 5})
 	model := updated.(*Model)
 	if model.focused != focusViewport {
@@ -226,6 +231,11 @@ func TestHandleMouseMsg_InputClick(t *testing.T) {
 	m, _ := New(cfg, session, context.Background())
 	m.width = 120
 	m.height = 40
+	m.updateLayout()
+
+	// Add a message to hide the welcome panel so the viewport/input geometry
+	// matches the assumptions of this test.
+	m.addMessage(msgcomp.NewUserMessage("hello", m.styles))
 	m.updateLayout()
 
 	l := m.layout()

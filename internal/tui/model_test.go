@@ -837,6 +837,67 @@ func TestState(t *testing.T) {
 	}
 }
 
+func TestWelcomeVisibleWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp/golden"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	view := m.View().Content
+	if !strings.Contains(view, "Welcome to Kimi Code!") {
+		t.Errorf("empty transcript should show welcome title, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Directory:") {
+		t.Errorf("welcome should show directory label, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Session:") {
+		t.Errorf("welcome should show session label, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Model:") {
+		t.Errorf("welcome should show model label, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Version:") {
+		t.Errorf("welcome should show version label, got:\n%s", view)
+	}
+
+	// The viewport should be shorter than the full available height because the
+	// welcome panel occupies the top rows.
+	if m.welcomeHeight() == 0 {
+		t.Error("welcomeHeight should be non-zero when there are no messages")
+	}
+}
+
+func TestWelcomeHiddenWhenMessages(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	emptyHeight := m.layout().vpHeight
+
+	m.addMessage(msgcomp.NewUserMessage("hello", m.styles))
+	m.updateLayout()
+
+	view := m.View().Content
+	if strings.Contains(view, "Welcome to Kimi Code!") {
+		t.Errorf("welcome panel should be hidden when messages exist, got:\n%s", view)
+	}
+	if m.welcomeHeight() != 0 {
+		t.Errorf("welcomeHeight should be 0 with messages, got %d", m.welcomeHeight())
+	}
+	if m.layout().vpHeight <= emptyHeight {
+		t.Errorf("viewport should grow when welcome is hidden: got %d, want > %d", m.layout().vpHeight, emptyHeight)
+	}
+}
+
 func TestFooterStates(t *testing.T) {
 	t.Parallel()
 
@@ -1184,6 +1245,11 @@ func TestLayoutGeometryConsistency(t *testing.T) {
 	m, _ := New(cfg, session, context.Background())
 	m.width = 120
 	m.height = 40
+	m.updateLayout()
+
+	// Add a message to hide the welcome panel so viewport geometry matches the
+	// classic full-height layout.
+	m.addMessage(msgcomp.NewUserMessage("hello", m.styles))
 	m.updateLayout()
 
 	// Compute expected layout values
