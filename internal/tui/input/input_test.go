@@ -581,3 +581,144 @@ func TestMentionMultiByte(t *testing.T) {
 		t.Errorf("value = %q, want %q", inp.Value(), want)
 	}
 }
+
+func TestSlashCompletion(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+	m.SetSlashCommands(DefaultSlashCommands)
+	m.SetValue("/com")
+	m.detectSlash()
+
+	if m.slash == nil {
+		t.Fatal("expected slash completion state")
+	}
+	if !strings.Contains(m.slashCompletionView(), "/compact") {
+		t.Errorf("missing /compact in popup: %q", m.slashCompletionView())
+	}
+}
+
+func TestSlashCompletionNoSlash(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+	m.SetSlashCommands(DefaultSlashCommands)
+	m.SetValue("com")
+	m.detectSlash()
+
+	if m.Completing() {
+		t.Error("expected no slash completion without / prefix")
+	}
+}
+
+func TestSlashInsertCandidate(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+	m.SetSlashCommands(DefaultSlashCommands)
+	m.SetValue("/com")
+	m.detectSlash()
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	inp := updated.(*Model)
+	want := "/compact "
+	if inp.Value() != want {
+		t.Errorf("value = %q, want %q", inp.Value(), want)
+	}
+	if inp.Completing() {
+		t.Error("completion should close after insertion")
+	}
+}
+
+func TestSlashNavigateAndInsert(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+	m.SetSlashCommands(DefaultSlashCommands)
+	m.SetValue("/c")
+	m.detectSlash()
+
+	m.UpdateMsg(tea.KeyPressMsg{Code: tea.KeyTab})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	inp := updated.(*Model)
+
+	want := "/clear "
+	if inp.Value() != want {
+		t.Errorf("value = %q, want %q", inp.Value(), want)
+	}
+}
+
+func TestSlashCloseWithEsc(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+	m.SetSlashCommands(DefaultSlashCommands)
+	m.SetValue("/com")
+	m.detectSlash()
+	if !m.Completing() {
+		t.Fatal("expected slash completion active")
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	inp := updated.(*Model)
+
+	if inp.Completing() {
+		t.Error("expected slash completion to close on Esc")
+	}
+}
+
+func TestSlashViewContainsPopup(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(100)
+	m.SetSlashCommands(DefaultSlashCommands)
+	m.SetValue("/com")
+	m.detectSlash()
+
+	view := m.View()
+	if !strings.Contains(view.Content, "/compact") {
+		t.Error("expected View() to contain the slash command candidate")
+	}
+}
+
+func TestSlashClearsMention(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+	m.SetFileCandidates([]string{"cmd/kimi-lite/main.go"})
+	m.SetSlashCommands(DefaultSlashCommands)
+
+	m.SetValue("@cmd")
+	m.detectMention()
+	if !m.mentionActive() {
+		t.Fatal("expected mention completion active")
+	}
+
+	m.SetValue("/com")
+	m.detectMention()
+	m.detectSlash()
+	if m.mentionActive() {
+		t.Error("expected mention completion to clear when switching to slash")
+	}
+	if m.slash == nil {
+		t.Fatal("expected slash completion active after switching from mention")
+	}
+}
+
+func (m *Model) mentionActive() bool {
+	return m.mention != nil
+}

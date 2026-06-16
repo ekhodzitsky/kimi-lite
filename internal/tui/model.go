@@ -238,6 +238,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 	inp := input.New(st, input.ConfigurableKeyMap(cfg.Keybindings), cfg.Session.MaxHistory)
 	inp.SetEditor(cfg.UI.Editor)
 	inp.SetContext(appCtx)
+	inp.SetSlashCommands(input.DefaultSlashCommands)
 	vp := viewport.New(st)
 	ft := footer.New(st)
 	wc := welcome.New(st)

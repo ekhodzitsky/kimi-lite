@@ -81,6 +81,9 @@ type Styles struct {
 	ErrorMessage        lipgloss.Style
 	InputBox            lipgloss.Style
 	MentionPopup        lipgloss.Style
+	SlashPopup          lipgloss.Style
+	SlashCommandName    lipgloss.Style
+	SlashCommandDesc    lipgloss.Style
 	ScrollIndicator     lipgloss.Style
 	ApprovalDialog      lipgloss.Style
 	Footer              lipgloss.Style
@@ -184,6 +187,15 @@ func (s *Styles) init() {
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(t.Primary).
 		Padding(0, 1)
+
+	s.SlashPopup = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Foreground).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Primary).
+		Padding(0, 1)
+	s.SlashCommandName = lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
+	s.SlashCommandDesc = lipgloss.NewStyle().Foreground(t.Muted)
 
 	s.ScrollIndicator = lipgloss.NewStyle().
 		Foreground(t.Muted).
