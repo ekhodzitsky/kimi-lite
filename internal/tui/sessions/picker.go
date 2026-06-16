@@ -190,7 +190,11 @@ func (p *Picker) View() string {
 	b.WriteString(p.style.header.Render(searchLine) + "\n\n")
 
 	if len(p.filtered) == 0 {
-		b.WriteString(p.style.placeholder.Render("No sessions match."))
+		placeholder := "No sessions match."
+		if !p.allMode && p.path != "" && p.query == "" {
+			placeholder = "No sessions in this directory. Press 'a' to show all sessions."
+		}
+		b.WriteString(p.style.placeholder.Render(placeholder))
 	} else {
 		start, end := p.visibleRange()
 		for i := start; i < end && i < len(p.filtered); i++ {

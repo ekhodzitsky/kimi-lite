@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,6 +196,40 @@ func (v *VideoExtractor) extractFrames(ctx context.Context, path string, duratio
 		return nil, fmt.Errorf("ffmpeg produced no frames")
 	}
 	return frames, nil
+}
+
+// detectMediaType returns a MIME type for the file at path by reading its
+// header. If header detection is inconclusive, it falls back to the file
+// extension. This avoids trusting extensions alone for media files.
+func detectMediaType(path string) string {
+	// detectMediaType is called with paths that have already been validated by
+	// the tool executor (copied to a temp file inside the sandbox).
+	//nolint:gosec
+	f, err := os.Open(path)
+	if err != nil {
+		return fallbackMediaType(path)
+	}
+	defer func() { _ = f.Close() }()
+
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	if n == 0 {
+		return fallbackMediaType(path)
+	}
+	typ := http.DetectContentType(buf[:n])
+	if typ != "" && typ != "application/octet-stream" {
+		return typ
+	}
+	return fallbackMediaType(path)
+}
+
+func fallbackMediaType(path string) string {
+	if ext := strings.ToLower(filepath.Ext(path)); ext != "" {
+		if typ := mime.TypeByExtension(ext); typ != "" {
+			return typ
+		}
+	}
+	return "application/octet-stream"
 }
 
 // videoResultJSON returns a JSON string for a VideoInfo, capped in length.

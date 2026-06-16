@@ -130,6 +130,7 @@ type compressor interface {
 }
 
 // Model is the root Bubble Tea model composing all child models.
+// It displays transient status messages for long-running tools.
 type Model struct {
 	styles *styles.Styles
 	config *api.Config
@@ -145,6 +146,7 @@ type Model struct {
 	contextUsed int
 	contextMax  int
 	toolCount   int
+	statusText  string
 
 	width  int
 	height int
@@ -376,6 +378,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ErrorMsg:
 		m.addMessage(msgcomp.NewErrorMessage(msg.Err, m.styles))
 		m.setState(api.TurnError)
+		m.statusText = ""
+
+	case StatusMsg:
+		m.statusText = msg.Text
 
 	case StateChangeMsg:
 		m.setState(msg.State)
@@ -383,6 +389,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case CompactResultMsg:
 		if msg.Count == 0 {
 			m.addMessage(msgcomp.NewUserMessage("Nothing to compact", m.styles))
+		} else if msg.Summary != "" {
+			m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Compacted %d messages. Summary:\n%s", msg.Count, msg.Summary), m.styles))
 		} else {
 			m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Compacted %d messages into a summary", msg.Count), m.styles))
 		}
@@ -669,6 +677,12 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	case m.config.Keybindings.Quit:
 		cmds = append(cmds, tea.Quit)
 	case m.config.Keybindings.Cancel:
+		// If the user has typed a draft, clear it first instead of cancelling
+		// the active stream. A second Cancel then stops the stream.
+		if m.input.Value() != "" {
+			m.input.SetValue("")
+			break
+		}
 		m.mu.Lock()
 		state := m.state
 		cancel := m.streamCancel
@@ -786,6 +800,7 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 	}
 
 	m.toolCount = 0
+	m.statusText = ""
 	m.addMessage(msgcomp.NewUserMessage(content, m.styles))
 	m.setState(api.TurnThinking)
 
@@ -914,6 +929,8 @@ func (m *Model) readStreamChunk() tea.Cmd {
 			return ToolResultMsg{Result: event.Result}
 		case api.TurnEventApprovalDiff:
 			return ApprovalDiffMsg{CallID: event.DiffCallID, Diff: event.DiffContent}
+		case api.TurnEventStatus:
+			return StatusMsg{Text: event.Content}
 		default:
 			slog.Warn("unknown turn event type", "type", event.Type)
 			return nil
@@ -952,6 +969,7 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 		if m.state != api.TurnError {
 			m.setState(api.TurnIdle)
 		}
+		m.statusText = ""
 		if lastMsg := m.lastAssistantMessage(); lastMsg != nil {
 			lastMsg.SetStreaming(false)
 		}
@@ -1030,6 +1048,7 @@ func (m *Model) handleToolCalls(calls []api.ToolCall) []tea.Cmd {
 
 func (m *Model) handleToolResult(result api.ToolResult) []tea.Cmd {
 	cmds := make([]tea.Cmd, 0, 1)
+	m.statusText = ""
 	m.mu.Lock()
 	for _, msg := range m.messages {
 		if msg.Type == msgcomp.TypeToolCall && msg.ToolCall.ID == result.CallID {
@@ -1350,26 +1369,51 @@ func (m *Model) statusBar() string {
 	m.mu.RUnlock()
 
 	stateStr := state.ShortString()
+	width := m.contentWidth()
 
-	parts := make([]string, 0, 5)
-	parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf(" %s ", modelName)))
-	parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf("[%s]", stateStr)))
-
+	// Build fixed-width parts first so the status area can be truncated to fit
+	// on narrow terminals.
+	fixedParts := make([]string, 0, 4)
+	fixedParts = append(fixedParts, m.styles.StatusBar.Render(fmt.Sprintf(" %s ", modelName)))
 	if approvalMode == approvalModeYolo {
-		parts = append(parts, m.styles.StatusBar.Render(" YOLO "))
+		fixedParts = append(fixedParts, m.styles.StatusBar.Render(" YOLO "))
 	}
-
 	if m.config.UI.ShowTokenCount && contextMax > 0 {
 		pct := float64(contextUsed) / float64(contextMax) * 100
-		parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf("ctx: %.0f%%", pct)))
+		fixedParts = append(fixedParts, m.styles.StatusBar.Render(fmt.Sprintf("ctx: %.0f%%", pct)))
+	}
+	if toolCount > 0 {
+		fixedParts = append(fixedParts, m.styles.StatusBar.Render(fmt.Sprintf("tools: %d", toolCount)))
 	}
 
-	if toolCount > 0 {
-		parts = append(parts, m.styles.StatusBar.Render(fmt.Sprintf("tools: %d", toolCount)))
+	fixedWidth := 0
+	for _, p := range fixedParts {
+		fixedWidth += lipgloss.Width(p)
 	}
+
+	available := width - fixedWidth - 1
+	if available < 4 {
+		available = 4
+	}
+
+	var statusPart string
+	if m.statusText != "" {
+		text := m.statusText
+		if ansi.StringWidth(text) > available {
+			text = ansi.Cut(text, 0, available-1) + "…"
+		}
+		statusPart = m.styles.StatusBar.Render(fmt.Sprintf(" %s ", text))
+	} else {
+		statusPart = m.styles.StatusBar.Render(fmt.Sprintf("[%s]", stateStr))
+	}
+
+	parts := make([]string, 0, 5)
+	parts = append(parts, fixedParts[0]) // model name
+	parts = append(parts, statusPart)
+	parts = append(parts, fixedParts[1:]...)
 
 	bar := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
-	return m.styles.StatusBar.Width(m.contentWidth()).Render(bar)
+	return m.styles.StatusBar.Width(width).Render(bar)
 }
 
 func (m *Model) updateLayout() {

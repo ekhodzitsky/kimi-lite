@@ -35,11 +35,19 @@ func TestDiscoverSkills(t *testing.T) {
 	}
 
 	names := make(map[string]bool)
+	dirs := make(map[string]string)
 	for _, s := range skills {
 		names[s.Name] = true
+		dirs[s.Name] = s.Dir
 	}
 	if !names["python"] || !names["golang"] {
 		t.Errorf("expected python and golang skills, got %v", names)
+	}
+	if dirs["python"] != tmpDir {
+		t.Errorf("python dir = %q, want %q", dirs["python"], tmpDir)
+	}
+	if dirs["golang"] != nested {
+		t.Errorf("golang dir = %q, want %q", dirs["golang"], nested)
 	}
 }
 
@@ -76,8 +84,8 @@ func TestFilterSkills(t *testing.T) {
 func TestLoadSkillContent(t *testing.T) {
 	t.Parallel()
 	skills := []Skill{
-		{Name: "python", Content: "Use black."},
-		{Name: "go", Content: "Use gofmt."},
+		{Name: "python", Dir: "/skills/python", Content: "Use black."},
+		{Name: "go", Dir: "/skills/go", Content: "Use gofmt."},
 	}
 	content := LoadSkillContent(skills)
 	if content == "" {
@@ -85,6 +93,9 @@ func TestLoadSkillContent(t *testing.T) {
 	}
 	if !contains(content, "Use black.") || !contains(content, "Use gofmt.") {
 		t.Errorf("content missing skill text: %q", content)
+	}
+	if !contains(content, "Directory: /skills/python") || !contains(content, "Directory: /skills/go") {
+		t.Errorf("content missing skill directories: %q", content)
 	}
 }
 

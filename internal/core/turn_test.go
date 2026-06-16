@@ -1097,7 +1097,7 @@ func TestTurnManager_executeToolCalls_ContextCancellation(t *testing.T) {
 		{ID: "tc3", Name: "read_file", Arguments: `{}`},
 	}
 
-	results, pending, _ := tm.executeToolCalls(ctx, sess.ID, turn, calls)
+	results, pending, _ := tm.executeToolCalls(ctx, sess.ID, turn, calls, nil)
 
 	if len(pending) != 0 {
 		t.Fatalf("expected no pending calls, got %d", len(pending))
@@ -1141,7 +1141,7 @@ func TestTurnManager_executeToolCall_RecoversPanic(t *testing.T) {
 
 	results, _, _ := tm.executeToolCalls(ctx, sess.ID, turn, []api.ToolCall{
 		{ID: "tc1", Name: "shell", Arguments: `{}`},
-	})
+	}, nil)
 
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))

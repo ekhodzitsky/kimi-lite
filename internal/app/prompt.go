@@ -2,6 +2,9 @@ package app
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -22,8 +25,8 @@ const systemPromptVersion = "v1"
 // systemPrompt returns the agentic system prompt for the given working directory.
 // It includes tool-usage guidance, a plan-then-act loop, edit-verification
 // expectations, and sandbox/approval safety rules. skillsContent is appended
-// verbatim when non-empty.
-func systemPrompt(workingDir, skillsContent string) string {
+// verbatim when non-empty, and workspaceTree is shown when non-empty.
+func systemPrompt(workingDir, skillsContent, workspaceTree string) string {
 	prompt := strings.TrimSpace(stripLeadingTabs(fmt.Sprintf(`You are kimi-lite, a helpful AI coding assistant (prompt %s).
 
 Your goal is to help the user write, read, debug, and understand code.
@@ -68,6 +71,8 @@ Guidelines:
    changes.
 4. Keep responses concise and focused on the task.
 5. If a tool is not needed, answer directly.
+6. Match the user's language in both answers and any internal reasoning or
+   thinking steps.
 
 Safety & sandbox rules:
 
@@ -78,8 +83,79 @@ Safety & sandbox rules:
   approval before execution, depending on the current approval mode.
 - Do not attempt to bypass the sandbox or approval mechanism.
 `, systemPromptVersion, workingDir)))
+	if workspaceTree != "" {
+		prompt += "\n\n" + workspaceTree
+	}
 	if skillsContent != "" {
 		prompt += "\n\nAdditional skills context:\n\n" + skillsContent
 	}
 	return prompt
+}
+
+// workspaceTreeMaxDepth and workspaceTreeMaxEntries keep the workspace prompt
+// concise. Hidden directories are collapsed regardless of depth.
+const (
+	workspaceTreeMaxDepth   = 2
+	workspaceTreeMaxEntries = 50
+)
+
+// buildWorkspaceTree returns a compact, sorted tree of the workspace root.
+// Hidden directories (names starting with '.') are collapsed to avoid flooding
+// the prompt with build artifacts, dependencies, and version-control metadata.
+func buildWorkspaceTree(root string) string {
+	var b strings.Builder
+	b.WriteString("Workspace tree (hidden directories collapsed; use list_directory to expand them):\n\n")
+	tree := buildWorkspaceTreeDir(root, 0)
+	if tree == "" {
+		b.WriteString("  (empty workspace)\n")
+	} else {
+		b.WriteString(tree)
+	}
+	return b.String()
+}
+
+func buildWorkspaceTreeDir(dir string, depth int) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].IsDir() != entries[j].IsDir() {
+			return entries[i].IsDir()
+		}
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	var b strings.Builder
+	extra := 0
+	for i, entry := range entries {
+		if i >= workspaceTreeMaxEntries {
+			extra = len(entries) - i
+			break
+		}
+		name := entry.Name()
+		isHidden := strings.HasPrefix(name, ".")
+		indent := strings.Repeat("  ", depth)
+		if entry.IsDir() {
+			if isHidden {
+				fmt.Fprintf(&b, "%s%s/  [hidden, collapsed]\n", indent, name)
+				continue
+			}
+			fmt.Fprintf(&b, "%s%s/\n", indent, name)
+			if depth < workspaceTreeMaxDepth {
+				sub := buildWorkspaceTreeDir(filepath.Join(dir, name), depth+1)
+				if sub != "" {
+					b.WriteString(sub)
+				}
+			}
+			continue
+		}
+		fmt.Fprintf(&b, "%s%s\n", indent, name)
+	}
+	if extra > 0 {
+		indent := strings.Repeat("  ", depth)
+		fmt.Fprintf(&b, "%s... and %d more\n", indent, extra)
+	}
+	return b.String()
 }

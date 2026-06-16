@@ -1413,6 +1413,11 @@ func (e *BuiltInToolExecutor) execReadVideo(ctx context.Context, args readVideoA
 	if err != nil {
 		return "", fmt.Errorf("read video: %w", err)
 	}
+	// Use header-detected media type when possible; fall back to ffprobe's
+	// format name only when detection is inconclusive.
+	if mediaType := detectMediaType(tmp.Name()); mediaType != "application/octet-stream" {
+		info.Format = mediaType
+	}
 	return videoResultJSON(info, maxFileReadSize), nil
 }
 
