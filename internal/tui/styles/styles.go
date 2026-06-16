@@ -23,7 +23,6 @@ type Theme struct {
 	AssistantBubble color.Color
 	ToolBubble      color.Color
 	StatusBarBg     color.Color
-	SidebarBg       color.Color
 	InputBg         color.Color
 	Highlight       color.Color
 }
@@ -44,7 +43,6 @@ var darkTheme = Theme{
 	AssistantBubble: lipgloss.Color("#1a1a1a"),
 	ToolBubble:      lipgloss.Color("#333333"),
 	StatusBarBg:     lipgloss.Color("#111111"),
-	SidebarBg:       lipgloss.Color("#111111"),
 	InputBg:         lipgloss.Color("#262626"),
 	Highlight:       lipgloss.Color("#4FA8FF"),
 }
@@ -65,7 +63,6 @@ var lightTheme = Theme{
 	AssistantBubble: lipgloss.Color("#eff1f5"),
 	ToolBubble:      lipgloss.Color("#bcc0cc"),
 	StatusBarBg:     lipgloss.Color("#e6e9ef"),
-	SidebarBg:       lipgloss.Color("#e6e9ef"),
 	InputBg:         lipgloss.Color("#ccd0da"),
 	Highlight:       lipgloss.Color("#1e66f5"),
 }
@@ -79,11 +76,6 @@ type Styles struct {
 	ToolCall         lipgloss.Style
 	ToolCallExpanded lipgloss.Style
 	ErrorMessage     lipgloss.Style
-	StatusBar        lipgloss.Style
-	Sidebar          lipgloss.Style
-	SidebarTitle     lipgloss.Style
-	SidebarItem      lipgloss.Style
-	SidebarSelected  lipgloss.Style
 	InputBox         lipgloss.Style
 	MentionPopup     lipgloss.Style
 	ScrollIndicator  lipgloss.Style
@@ -169,37 +161,6 @@ func (s *Styles) init() {
 		MarginBottom(1).
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(t.Error)
-
-	s.StatusBar = lipgloss.NewStyle().
-		Background(t.StatusBarBg).
-		Foreground(t.Foreground).
-		Padding(0, 1).
-		Height(1)
-
-	s.Sidebar = lipgloss.NewStyle().
-		Background(t.SidebarBg).
-		Foreground(t.Foreground).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(t.Border).
-		BorderRight(true).
-		Padding(0, 1)
-
-	s.SidebarTitle = lipgloss.NewStyle().
-		Background(t.SidebarBg).
-		Foreground(t.Primary).
-		Bold(true).
-		Padding(0, 1)
-
-	s.SidebarItem = lipgloss.NewStyle().
-		Background(t.SidebarBg).
-		Foreground(t.Muted).
-		Padding(0, 1)
-
-	s.SidebarSelected = lipgloss.NewStyle().
-		Background(t.SidebarBg).
-		Foreground(t.Highlight).
-		Bold(true).
-		Padding(0, 1)
 
 	s.InputBox = lipgloss.NewStyle().
 		Background(t.InputBg).

@@ -226,7 +226,6 @@ func DefaultConfig() *api.Config {
 			Cancel:         "esc",
 			Quit:           "ctrl+c",
 			Yolo:           "ctrl+y",
-			ToggleSidebar:  "ctrl+b",
 			FocusNext:      "tab",
 			FocusPrev:      "shift+tab",
 			ApproveYes:     "y",

@@ -98,11 +98,11 @@ Bubble Tea terminal UI.
 - `Model` — root model composing child components
 - `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`)
 - `viewport` — scrollable output
-- `sidebar` — file browser
 - `messages` — message rendering (Markdown via Glamour)
 - `sessions` — modal session picker with search, pagination, current/all-directory toggle, and a hint to press `a` when the current directory has no sessions
+- `mentions` — file-path candidate provider for `@`-mention completion
 - `styles` — Lipgloss themes
-- Status bar displays transient localized status messages before non-trivial tool calls and truncates them on narrow terminals
+- Layout: welcome panel, scrollable viewport, input box, and a two-line footer; the footer shows model info, working directory, git branch/status, token count, context size, and transient localized status messages (truncated on narrow terminals)
 
 ### `internal/mcp`
 MCP client implementation supporting the legacy `mcp-guard` stdio path, direct
@@ -125,6 +125,7 @@ Git integration via shelling out to `git`.
 - `NewProvider(dir)` — creates provider for directory
 - `Status()` — `git status` output
 - `Diff(path)` — file diff
+- `Branch()` — current branch name
 - `IsRepo()` — checks for `.git`
 - `Commit(ctx, message)` — creates a checkpoint commit with `--no-verify` and a local identity
 

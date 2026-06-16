@@ -108,9 +108,6 @@ linters:
       - path: 'internal/tui/messages/messages\.go'
         linters:
           - revive
-      - path: 'internal/tui/sidebar/sidebar\.go'
-        linters:
-          - wrapcheck
       - path: 'internal/tui/viewport/viewport\.go'
         linters:
           - prealloc

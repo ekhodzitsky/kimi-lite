@@ -69,7 +69,6 @@ func NewLoader() *Loader {
 	v.SetDefault("keybindings.cancel", defaults.Keybindings.Cancel)
 	v.SetDefault("keybindings.quit", defaults.Keybindings.Quit)
 	v.SetDefault("keybindings.yolo", defaults.Keybindings.Yolo)
-	v.SetDefault("keybindings.toggle_sidebar", defaults.Keybindings.ToggleSidebar)
 	v.SetDefault("keybindings.focus_next", defaults.Keybindings.FocusNext)
 	v.SetDefault("keybindings.focus_prev", defaults.Keybindings.FocusPrev)
 	v.SetDefault("keybindings.approve_yes", defaults.Keybindings.ApproveYes)
@@ -428,7 +427,6 @@ newline = "alt+enter"
 cancel = "esc"
 quit = "ctrl+c"
 yolo = "ctrl+y"
-toggle_sidebar = "ctrl+b"
 focus_next = "tab"
 focus_prev = "shift+tab"
 approve_yes = "y"

@@ -205,7 +205,6 @@ approve_diff = "d"
 	assertNotEmpty("keybindings.cancel", cfg.Keybindings.Cancel)
 	assertNotEmpty("keybindings.quit", cfg.Keybindings.Quit)
 	assertNotEmpty("keybindings.yolo", cfg.Keybindings.Yolo)
-	assertNotEmpty("keybindings.toggle_sidebar", cfg.Keybindings.ToggleSidebar)
 	assertNotEmpty("keybindings.focus_next", cfg.Keybindings.FocusNext)
 	assertNotEmpty("keybindings.focus_prev", cfg.Keybindings.FocusPrev)
 	assertNotEmpty("keybindings.approve_yes", cfg.Keybindings.ApproveYes)
@@ -226,9 +225,6 @@ approve_diff = "d"
 	// RawConfig mirror.
 	if cfg.Behavior.CompactKeepRecent != 7 {
 		t.Errorf("expected behavior.compact_keep_recent = 7, got %d", cfg.Behavior.CompactKeepRecent)
-	}
-	if cfg.Keybindings.ToggleSidebar != "ctrl+b" {
-		t.Errorf("expected keybindings.toggle_sidebar = ctrl+b, got %q", cfg.Keybindings.ToggleSidebar)
 	}
 	if cfg.Keybindings.ApproveYes != "y" {
 		t.Errorf("expected keybindings.approve_yes = y, got %q", cfg.Keybindings.ApproveYes)

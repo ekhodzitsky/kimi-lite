@@ -740,11 +740,13 @@ type TokenEstimator interface {
 
 // KeybindingConfig holds keybinding settings.
 type KeybindingConfig struct {
-	Send           string `mapstructure:"send"`
-	Newline        string `mapstructure:"newline"`
-	Cancel         string `mapstructure:"cancel"`
-	Quit           string `mapstructure:"quit"`
-	Yolo           string `mapstructure:"yolo"`
+	Send    string `mapstructure:"send"`
+	Newline string `mapstructure:"newline"`
+	Cancel  string `mapstructure:"cancel"`
+	Quit    string `mapstructure:"quit"`
+	Yolo    string `mapstructure:"yolo"`
+	// ToggleSidebar is unused: the sidebar was removed from the TUI.
+	// The field is retained for backward compatibility with existing configs.
 	ToggleSidebar  string `mapstructure:"toggle_sidebar"`
 	FocusNext      string `mapstructure:"focus_next"`
 	FocusPrev      string `mapstructure:"focus_prev"`

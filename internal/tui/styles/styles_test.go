@@ -47,12 +47,6 @@ func TestStylesInit(t *testing.T) {
 	if _, ok := s.ErrorMessage.GetForeground().(lipgloss.NoColor); ok {
 		t.Error("ErrorMessage foreground not set")
 	}
-	if _, ok := s.StatusBar.GetBackground().(lipgloss.NoColor); ok {
-		t.Error("StatusBar background not set")
-	}
-	if _, ok := s.Sidebar.GetBackground().(lipgloss.NoColor); ok {
-		t.Error("Sidebar background not set")
-	}
 	if _, ok := s.InputBox.GetBackground().(lipgloss.NoColor); ok {
 		t.Error("InputBox background not set")
 	}
