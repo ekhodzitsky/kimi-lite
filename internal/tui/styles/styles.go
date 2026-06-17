@@ -2,69 +2,98 @@
 package styles
 
 import (
-	"image/color"
+	"encoding/json"
+	"fmt"
 
 	"charm.land/lipgloss/v2"
 )
 
+// Color is a lipgloss-compatible color represented as a string (hex or ANSI).
+// It implements the image/color.Color interface by delegating to lipgloss.Color.
+type Color string
+
+// RGBA satisfies the image/color.Color interface.
+func (c Color) RGBA() (r, g, b, a uint32) {
+	return lipgloss.Color(string(c)).RGBA()
+}
+
+// MarshalJSON encodes the color as its string representation.
+func (c Color) MarshalJSON() ([]byte, error) {
+	b, err := json.Marshal(string(c))
+	if err != nil {
+		return nil, fmt.Errorf("marshal color: %w", err)
+	}
+	return b, nil
+}
+
+// UnmarshalJSON decodes the color from a JSON string.
+func (c *Color) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("unmarshal color: %w", err)
+	}
+	*c = Color(s)
+	return nil
+}
+
 // Theme represents a UI theme with color definitions.
 type Theme struct {
-	Name            string
-	Background      color.Color
-	Foreground      color.Color
-	Primary         color.Color
-	Secondary       color.Color
-	Success         color.Color
-	Warning         color.Color
-	Error           color.Color
-	Muted           color.Color
-	Border          color.Color
-	UserBubble      color.Color
-	AssistantBubble color.Color
-	ToolBubble      color.Color
-	StatusBarBg     color.Color
-	InputBg         color.Color
-	Highlight       color.Color
+	Name            string `json:"name"`
+	Background      Color  `json:"background"`
+	Foreground      Color  `json:"foreground"`
+	Primary         Color  `json:"primary"`
+	Secondary       Color  `json:"secondary"`
+	Success         Color  `json:"success"`
+	Warning         Color  `json:"warning"`
+	Error           Color  `json:"error"`
+	Muted           Color  `json:"muted"`
+	Border          Color  `json:"border"`
+	UserBubble      Color  `json:"user_bubble"`
+	AssistantBubble Color  `json:"assistant_bubble"`
+	ToolBubble      Color  `json:"tool_bubble"`
+	StatusBarBg     Color  `json:"status_bar_bg"`
+	InputBg         Color  `json:"input_bg"`
+	Highlight       Color  `json:"highlight"`
 }
 
 // darkTheme is the default dark theme.
 var darkTheme = Theme{
 	Name:            "dark",
-	Background:      lipgloss.Color("#1a1a1a"),
-	Foreground:      lipgloss.Color("#E0E0E0"),
-	Primary:         lipgloss.Color("#4FA8FF"),
-	Secondary:       lipgloss.Color("#5BC0BE"),
-	Success:         lipgloss.Color("#4EC87E"),
-	Warning:         lipgloss.Color("#E8A838"),
-	Error:           lipgloss.Color("#E85454"),
-	Muted:           lipgloss.Color("#6B6B6B"),
-	Border:          lipgloss.Color("#5A5A5A"),
-	UserBubble:      lipgloss.Color("#2a2a2a"),
-	AssistantBubble: lipgloss.Color("#1a1a1a"),
-	ToolBubble:      lipgloss.Color("#333333"),
-	StatusBarBg:     lipgloss.Color("#111111"),
-	InputBg:         lipgloss.Color("#262626"),
-	Highlight:       lipgloss.Color("#4FA8FF"),
+	Background:      Color("#1a1a1a"),
+	Foreground:      Color("#E0E0E0"),
+	Primary:         Color("#4FA8FF"),
+	Secondary:       Color("#5BC0BE"),
+	Success:         Color("#4EC87E"),
+	Warning:         Color("#E8A838"),
+	Error:           Color("#E85454"),
+	Muted:           Color("#6B6B6B"),
+	Border:          Color("#5A5A5A"),
+	UserBubble:      Color("#2a2a2a"),
+	AssistantBubble: Color("#1a1a1a"),
+	ToolBubble:      Color("#333333"),
+	StatusBarBg:     Color("#111111"),
+	InputBg:         Color("#262626"),
+	Highlight:       Color("#4FA8FF"),
 }
 
 // lightTheme is the light theme.
 var lightTheme = Theme{
 	Name:            "light",
-	Background:      lipgloss.Color("#eff1f5"),
-	Foreground:      lipgloss.Color("#4c4f69"),
-	Primary:         lipgloss.Color("#1e66f5"),
-	Secondary:       lipgloss.Color("#8839ef"),
-	Success:         lipgloss.Color("#40a02b"),
-	Warning:         lipgloss.Color("#df8e1d"),
-	Error:           lipgloss.Color("#d20f39"),
-	Muted:           lipgloss.Color("#8c8fa1"),
-	Border:          lipgloss.Color("#bcc0cc"),
-	UserBubble:      lipgloss.Color("#ccd0da"),
-	AssistantBubble: lipgloss.Color("#eff1f5"),
-	ToolBubble:      lipgloss.Color("#bcc0cc"),
-	StatusBarBg:     lipgloss.Color("#e6e9ef"),
-	InputBg:         lipgloss.Color("#ccd0da"),
-	Highlight:       lipgloss.Color("#1e66f5"),
+	Background:      Color("#eff1f5"),
+	Foreground:      Color("#4c4f69"),
+	Primary:         Color("#1e66f5"),
+	Secondary:       Color("#8839ef"),
+	Success:         Color("#40a02b"),
+	Warning:         Color("#df8e1d"),
+	Error:           Color("#d20f39"),
+	Muted:           Color("#8c8fa1"),
+	Border:          Color("#bcc0cc"),
+	UserBubble:      Color("#ccd0da"),
+	AssistantBubble: Color("#eff1f5"),
+	ToolBubble:      Color("#bcc0cc"),
+	StatusBarBg:     Color("#e6e9ef"),
+	InputBg:         Color("#ccd0da"),
+	Highlight:       Color("#1e66f5"),
 }
 
 // Styles holds all Lipgloss styles for the application.
@@ -117,7 +146,12 @@ func New(themeName string) *Styles {
 		theme = darkTheme
 	}
 
-	s := &Styles{Theme: theme}
+	return NewFromTheme(&theme)
+}
+
+// NewFromTheme creates a Styles instance from an arbitrary Theme.
+func NewFromTheme(t *Theme) *Styles {
+	s := &Styles{Theme: *t}
 	s.init()
 	return s
 }
@@ -236,7 +270,7 @@ func (s *Styles) init() {
 
 	borderColor := t.Border
 	if t.Name == "light" {
-		borderColor = lipgloss.Color("#bcc0cc")
+		borderColor = Color("#bcc0cc")
 	}
 	s.WelcomeBox = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

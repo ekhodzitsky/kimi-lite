@@ -237,13 +237,18 @@ type Model struct {
 	mu sync.RWMutex
 }
 
-// New creates the root TUI model.
-func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model, error) {
+// New creates the root TUI model. themeConfigDir is the directory that
+// contains user-defined themes under a "themes" subdirectory.
+func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeConfigDir string) (*Model, error) {
 	if _, err := os.Stat(session.Path); err != nil {
 		return nil, fmt.Errorf("session path %q: %w", session.Path, err)
 	}
 
-	st := styles.New(cfg.UI.Theme)
+	theme, err := styles.LoadTheme(cfg.UI.Theme, themeConfigDir)
+	if err != nil {
+		return nil, fmt.Errorf("load theme: %w", err)
+	}
+	st := styles.NewFromTheme(theme)
 
 	inp := input.New(st, input.ConfigurableKeyMap(cfg.Keybindings), cfg.Session.MaxHistory)
 	inp.SetEditor(cfg.UI.Editor)

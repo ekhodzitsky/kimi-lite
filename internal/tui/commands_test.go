@@ -57,7 +57,7 @@ func TestCommandTitle(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "s1", Path: "/tmp", Name: "Old"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -109,7 +109,7 @@ func TestCommandTitle_MissingName(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "s1", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -138,7 +138,7 @@ func TestCommandTitle_Error(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "s1", Path: "/tmp", Name: "Old"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -164,7 +164,7 @@ func TestCommandFork(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "s1", Path: "/tmp", Name: "Original"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -217,7 +217,7 @@ func TestCommandFork_DefaultName(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "s1", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -250,7 +250,7 @@ func TestCommandFork_Error(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "s1", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()

@@ -383,8 +383,13 @@ func (a *App) RunTurn(ctx context.Context, sessionID string, input string) (<-ch
 
 // Run initializes the TUI and starts the Bubble Tea program.
 func (a *App) Run(ctx context.Context, session *api.Session) error {
+	configDir, err := config.EnsureConfigDir()
+	if err != nil {
+		return fmt.Errorf("ensure config dir: %w", err)
+	}
+
 	// Create TUI model
-	model, err := tui.New(a.cfg, session, ctx)
+	model, err := tui.New(a.cfg, session, ctx, configDir)
 	if err != nil {
 		return fmt.Errorf("create tui model: %w", err)
 	}

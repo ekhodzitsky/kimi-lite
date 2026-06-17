@@ -23,7 +23,7 @@ func TestNew(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, err := New(cfg, session, context.Background())
+	m, err := New(cfg, session, context.Background(), "")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -43,7 +43,7 @@ func TestInit(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	cmd := m.Init()
 	if cmd == nil {
 		t.Error("Init() should return a non-nil command")
@@ -55,7 +55,7 @@ func TestWindowResize(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	model := updated.(*Model)
@@ -73,7 +73,7 @@ func TestSendMessage(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -105,7 +105,7 @@ func TestCommandCompact(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -140,7 +140,7 @@ func TestCommandCompact_KeepRecentFromConfig(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Behavior.CompactKeepRecent = 7
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -172,7 +172,7 @@ func TestCommandClear(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -199,7 +199,7 @@ func TestCommandSessions(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -224,7 +224,7 @@ func TestCommandCheckpoint(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -246,7 +246,7 @@ func TestCommandUnknown(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -270,7 +270,7 @@ func TestStreamChunk(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -298,7 +298,7 @@ func TestStreamChunkDone(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -322,7 +322,7 @@ func TestStreamChunkError(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -346,7 +346,7 @@ func TestToolCall(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -376,7 +376,7 @@ func TestToolResult(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -405,7 +405,7 @@ func TestApprovalRequest(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -429,7 +429,7 @@ func TestApprovalResponse(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -455,7 +455,7 @@ func TestApprovalResponse_DiffDoesNotFinalize(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -503,7 +503,7 @@ func TestApprovalResponse_DiffForwardsToTurnManager(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -563,7 +563,7 @@ func TestApprovalDiffMsg_AddsMessageAndKeepsWaiting(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -599,7 +599,7 @@ func TestApprovalDialog_WideRunes(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: t.TempDir()}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -634,7 +634,7 @@ func TestApprovalDialog_NarrowTerminal(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: t.TempDir()}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 30
 	m.height = 10
 	m.updateLayout()
@@ -665,7 +665,7 @@ func TestStateChange(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	updated, _ := m.Update(StateChangeMsg{State: api.TurnThinking})
 	model := updated.(*Model)
@@ -680,7 +680,7 @@ func TestErrorMsg(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -704,7 +704,7 @@ func TestQuitKey(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if cmd == nil {
@@ -723,7 +723,7 @@ func TestCancelKey(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.setState(api.TurnThinking)
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
@@ -739,7 +739,7 @@ func TestSetters(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	m.SetModelName("gpt-4")
 	if m.modelName != "gpt-4" {
@@ -801,7 +801,7 @@ func TestView(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	// Before resize, should show loading
 	view := m.View().Content
@@ -827,7 +827,7 @@ func TestState(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	if m.State() != api.TurnIdle {
 		t.Errorf("State() = %d, want TurnIdle", m.State())
@@ -844,7 +844,7 @@ func TestWelcomeVisibleWhenEmpty(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -878,7 +878,7 @@ func TestWelcomeHiddenWhenMessages(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -905,7 +905,7 @@ func TestFooterStates(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -935,7 +935,7 @@ func TestFooter_ShowsContextUsageAfterTurn(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.UI.ShowTokenCount = true
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -966,7 +966,7 @@ func TestFooter_ShowsContextUsageRegardlessOfTokenCountSetting(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.UI.ShowTokenCount = false
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -984,7 +984,7 @@ func TestFooter_TruncatesLongStatusOnNarrowTerminal(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 50
 	m.height = 10
 	m.updateLayout()
@@ -1004,7 +1004,7 @@ func TestStreamChunkWithToolCalls(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1035,7 +1035,7 @@ func TestTurnWithToolCallRendersToolCallAndResult(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1122,7 +1122,7 @@ func TestErrorMsg_DoesNotOverrideTurnErrorOnDone(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1156,7 +1156,7 @@ func TestYoloToggle(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	var modes []int
 	m.SetApprovalModeSetter(func(mode int) {
@@ -1187,7 +1187,7 @@ func TestYoloToggle_Footer(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1213,7 +1213,7 @@ func TestDirtyFlag_NavigationDoesNotRefreshViewport(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1244,7 +1244,7 @@ func TestLayoutGeometryConsistency(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1277,7 +1277,7 @@ func TestRawModeToggle_FocusedMessagePath(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1307,7 +1307,7 @@ func TestRawModeToggle_InputFocusIgnored(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1335,7 +1335,7 @@ func TestDirtyFlag_StreamChunkSetsDirty(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1365,7 +1365,7 @@ func TestStreamChunk_StaleAfterCancellation(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1546,7 +1546,7 @@ func TestCheckpointMsg_Success(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1590,7 +1590,7 @@ func TestCheckpointMsg_Error(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1628,7 +1628,7 @@ func TestCheckpointMsg_NoGitProvider(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1660,7 +1660,7 @@ func TestSessionsMsg_WithSessions(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1700,7 +1700,7 @@ func TestSessionsMsg_Error(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1735,7 +1735,7 @@ func TestSessionsMsg_Empty(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1770,7 +1770,7 @@ func TestSessionsMsg_NoSessionManager(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1802,7 +1802,7 @@ func TestCompactTimeout(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1838,7 +1838,7 @@ func TestClearMessagesTimeout(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1873,7 +1873,7 @@ func TestWindowSizeMsg_DebouncesRebuild(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1927,7 +1927,7 @@ func TestWindowSizeMsg_UnchangedDimensions_NoRebuild(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1949,7 +1949,7 @@ func TestDiffCommand_RendersGitDiffOutput(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1978,7 +1978,7 @@ func TestDiffCommand_NoGitProviderShowsError(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2005,7 +2005,7 @@ func TestDiffCommand_EmptyDiffShowsError(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2034,7 +2034,7 @@ func TestStreamChunk_IncrementalRenderMatchesRebuild(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2078,7 +2078,7 @@ func TestMCPCommand_ListsTools(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2113,7 +2113,7 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2139,7 +2139,7 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 func TestGoldenViewIdle(t *testing.T) {
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, err := New(cfg, session, context.Background())
+	m, err := New(cfg, session, context.Background(), "")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -2154,7 +2154,7 @@ func TestGoldenViewIdle(t *testing.T) {
 func newGoldenModel(t *testing.T) *Model {
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, err := New(cfg, session, context.Background())
+	m, err := New(cfg, session, context.Background(), "")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -2217,7 +2217,7 @@ func TestRunTurnError_CancelsContext(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2253,7 +2253,7 @@ func TestApprovalResponse_ResumeWithApprovalErrorReturnsErrorMsg(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2311,7 +2311,7 @@ func TestReadStreamChunk_IgnoresStaleEventsAfterCancel(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	ch := make(chan api.TurnEvent, 1)
 	ch <- api.TurnEvent{Type: api.TurnEventContent, Content: "stale"}
@@ -2336,7 +2336,7 @@ func TestRenderApprovalDialog_NilSession(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: t.TempDir()}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -2359,7 +2359,7 @@ func TestApprovalResponse_DedupesAlwaysAllNames(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2390,7 +2390,7 @@ func TestHelpCommand_OpensOverlay(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2424,7 +2424,7 @@ func TestHelpOverlay_CloseKeys(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2459,7 +2459,7 @@ func TestHelpOverlay_ScrollKeys(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2503,7 +2503,7 @@ func TestApprovalNumericKeys(t *testing.T) {
 
 			cfg := config.DefaultConfig()
 			session := &api.Session{ID: "test", Path: "/tmp"}
-			m, _ := New(cfg, session, context.Background())
+			m, _ := New(cfg, session, context.Background(), "")
 			m.width = 120
 			m.height = 40
 			m.updateLayout()
@@ -2536,7 +2536,7 @@ func TestApprovalFullscreenDiff(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: tmp}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2598,7 +2598,7 @@ func TestApprovalFullscreenResetsOnNewRequest(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: tmp}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()

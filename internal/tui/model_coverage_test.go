@@ -19,7 +19,7 @@ func TestCycleFocus_Forward(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -47,7 +47,7 @@ func TestCycleFocus_Backward(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -71,7 +71,7 @@ func TestHandleKeyMsg_ApprovalKeys(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -142,7 +142,7 @@ func TestHandleKeyMsg_ApprovalKeyNoActiveCall(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -165,7 +165,7 @@ func TestHandleKeyMsg_UnknownKey(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -188,7 +188,7 @@ func TestHandleMouseMsg_RightButtonIgnored(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -206,7 +206,7 @@ func TestHandleMouseMsg_ViewportClick(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -228,7 +228,7 @@ func TestHandleMouseMsg_InputClick(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -251,7 +251,7 @@ func TestUpdateLayout_EqualLayout_NoRebuild(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -268,7 +268,7 @@ func TestReadStreamChunk_NilChannel(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.streamCh = nil
 
 	cmd := m.readStreamChunk()
@@ -290,7 +290,7 @@ func TestReadStreamChunk_UnknownEventType(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	ch := make(chan api.TurnEvent, 1)
 	ch <- api.TurnEvent{Type: api.TurnEventType(255)}
@@ -312,7 +312,7 @@ func TestReadStreamChunk_ApprovalDiffEvent(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	ch := make(chan api.TurnEvent, 1)
 	ch <- api.TurnEvent{Type: api.TurnEventApprovalDiff, DiffCallID: "call-1", DiffContent: "diff"}
@@ -340,7 +340,7 @@ func TestReadStreamChunk_ToolResultEvent(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	ch := make(chan api.TurnEvent, 1)
 	ch <- api.TurnEvent{Type: api.TurnEventToolResult, Result: api.ToolResult{CallID: "call-1", Output: "out"}}
@@ -365,7 +365,7 @@ func TestHandleStreamChunk_LastBlockStartZeroAfterRebuild(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -395,7 +395,7 @@ func TestHandleStreamChunk_FallbackRebuild(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -480,7 +480,7 @@ func TestRenderApprovalDialog_NonEditTool(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -499,7 +499,7 @@ func TestHandleCommand_MCPToolsError(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -527,7 +527,7 @@ func TestHandleCommand_TitleNoSessionManager(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -554,7 +554,7 @@ func TestHandleCommand_ClearDuringActiveTurn(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -579,7 +579,7 @@ func TestHandleCommand_CompactContextMaxAdjustsKeepRecent(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Behavior.CompactKeepRecent = 2
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -676,7 +676,7 @@ func TestHandleApprovalResponse_NotDone(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -703,7 +703,7 @@ func TestCompactResultMsg_ZeroCount(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -731,7 +731,7 @@ func TestMCPListMsg_EmptyTools(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -759,7 +759,7 @@ func TestSetApprovalModeSetter(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	var called bool
 	m.SetApprovalModeSetter(func(int) { called = true })
@@ -777,7 +777,7 @@ func TestAddMessage_SetsWidth(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -794,7 +794,7 @@ func TestHandleSend_BlockedDuringActiveTurn(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -815,7 +815,7 @@ func TestHandleSend_WithTurnManagerError(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
