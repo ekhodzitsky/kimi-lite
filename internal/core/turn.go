@@ -736,6 +736,8 @@ func (tm *TurnManager) executeToolCall(ctx context.Context, call api.ToolCall, e
 			select {
 			case eventCh <- api.TurnEvent{Type: api.TurnEventToolProgress, CallID: callID, Content: chunk}:
 			case <-ctx.Done():
+			default:
+				// drop chunk if TUI cannot keep up
 			}
 		}
 		progressCtx = WithToolProgress(ctx, cb)
