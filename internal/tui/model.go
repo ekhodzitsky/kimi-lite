@@ -3,19 +3,14 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
 	"maps"
 	"os"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/activity"
@@ -65,69 +60,6 @@ func (m *Model) inputHeight() int {
 		return minInputHeight
 	}
 	return h
-}
-
-// welcomeHeight returns the rendered height of the welcome panel, or 0 when
-// the transcript already contains messages.
-func (m *Model) welcomeHeight() int {
-	if len(m.messages) > 0 {
-		return 0
-	}
-	return lipgloss.Height(m.welcome.View())
-}
-
-// activityHeight returns the rendered height of the activity panel, or 0 when
-// the turn is not actively thinking, streaming, or running tools.
-func (m *Model) activityHeight() int {
-	return m.activity.Height()
-}
-
-// layoutRect holds computed geometry for a single frame.
-type layoutRect struct {
-	contentWidth int
-	vpWidth      int
-	vpHeight     int
-	inputHeight  int
-	statusY      int
-}
-
-// eq reports whether two layouts have identical geometry.
-func (r layoutRect) eq(o layoutRect) bool {
-	return r.contentWidth == o.contentWidth &&
-		r.vpWidth == o.vpWidth &&
-		r.vpHeight == o.vpHeight &&
-		r.inputHeight == o.inputHeight &&
-		r.statusY == o.statusY
-}
-
-// layout computes all geometry once, folding in min-content/min-viewport clamps.
-func (m *Model) layout() layoutRect {
-	contentWidth := m.width
-	if contentWidth < minContentWidth {
-		contentWidth = minContentWidth
-	}
-	m.welcome.SetSize(contentWidth)
-	m.updateWelcomeData()
-	m.activity.SetSize(contentWidth)
-	m.updateActivity()
-	welcomeHeight := m.welcomeHeight()
-	inputHeight := m.inputHeight()
-	activityHeight := m.activityHeight()
-	vpHeight := m.height - statusHeight - inputHeight - welcomeHeight - activityHeight
-	if vpHeight < minViewportHeight {
-		vpHeight = minViewportHeight
-	}
-	statusY := welcomeHeight + vpHeight + inputHeight + activityHeight
-	if statusY > m.height {
-		statusY = m.height
-	}
-	return layoutRect{
-		contentWidth: contentWidth,
-		vpWidth:      contentWidth - viewportWidthPadding,
-		vpHeight:     vpHeight,
-		inputHeight:  inputHeight,
-		statusY:      statusY,
-	}
 }
 
 // turnManager is the interface needed from core.TurnManager.
@@ -182,8 +114,6 @@ type Model struct {
 
 	gitBranch string
 	gitDirty  bool
-	gitAhead  int
-	gitBehind int
 
 	width  int
 	height int
@@ -237,6 +167,7 @@ type Model struct {
 	streamCh       <-chan api.TurnEvent
 	streamCancel   context.CancelFunc
 	streamCanceled bool // true after cancel/error until a new stream starts
+	streamGen      int  // increments for each new send to identify stale results
 
 	// Live output from running tools, keyed by call ID.
 	toolProgress map[string]string
@@ -325,7 +256,6 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeCon
 		return cands
 	})
 	m.updateLayout()
-	m.refreshFileCandidates()
 	return m, nil
 }
 
@@ -434,6 +364,7 @@ func (m *Model) Init() tea.Cmd {
 		m.vp.Init(),
 		m.footer.Init(),
 		m.activity.Init(),
+		m.input.RefreshCandidatesCmd(),
 		m.scheduleGitRefreshCmd(),
 	)
 }
@@ -471,9 +402,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.input.Completing() {
 			cmds = append(cmds, m.handleKeyMsg(msg)...)
 		}
-		// Plan panel owns the keyboard while open; do not dispatch the key to
+		// Overlays own the keyboard while open; do not dispatch the key to
 		// child components.
-		if m.planPending {
+		if m.planPending || m.showHelp || m.approvalFullscreen || m.steerOpen {
 			return m, tea.Batch(cmds...)
 		}
 	case tea.MouseReleaseMsg:
@@ -525,6 +456,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StatusMsg:
 		m.statusText = msg.Text
+
+	case input.PasteErrorMsg:
+		m.statusText = msg.Err.Error()
 
 	case StateChangeMsg:
 		m.setState(msg.State)
@@ -635,7 +569,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = nil
 			m.rb = newRenderBuffer()
 			m.mu.Unlock()
-			m.refreshFileCandidates()
+			cmds = append(cmds, m.input.RefreshCandidatesCmd())
 			for _, msg := range msg.Session.Messages {
 				m.appendSessionMessage(msg)
 			}
@@ -678,6 +612,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case input.SendMsg:
 		cmds = append(cmds, m.handleSend(msg.Content, msg.ContentParts)...)
 
+	case RunTurnResultMsg:
+		cmds = append(cmds, m.handleRunTurnResult(msg)...)
+
 	case footerGitRefreshMsg:
 		cmds = append(cmds, m.gitRefreshCmd(), m.scheduleGitRefreshCmd())
 
@@ -685,8 +622,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mu.Lock()
 		m.gitBranch = msg.Branch
 		m.gitDirty = msg.Dirty
-		m.gitAhead = msg.Ahead
-		m.gitBehind = msg.Behind
 		m.mu.Unlock()
 		m.updateFooter()
 	}
@@ -854,215 +789,6 @@ func (m *Model) setState(s api.TurnState) {
 	m.state = s
 }
 
-func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
-	var cmds []tea.Cmd
-
-	// Help overlay takes precedence while it is open.
-	if m.showHelp {
-		if help.CloseKeys(msg.String()) {
-			m.showHelp = false
-			return nil
-		}
-		cmd := m.helpPanel.UpdateMsg(msg)
-		if cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-		return cmds
-	}
-
-	// Fullscreen diff preview closes on Esc or Ctrl+E.
-	if m.approvalFullscreen {
-		if msg.String() == "esc" || msg.String() == "ctrl+e" {
-			m.approvalFullscreen = false
-			m.approvalDiffContent = ""
-		}
-		return cmds
-	}
-
-	// Steering overlay takes precedence while it is open.
-	if m.steerOpen {
-		return m.handleSteerKeyMsg(msg)
-	}
-
-	// Shift+Tab toggles input plan mode when the input is focused.
-	if msg.String() == "shift+tab" && m.focused == focusInput {
-		m.input.TogglePlanMode()
-		return cmds
-	}
-
-	// Plan approval panel takes precedence while it is open.
-	if m.planPending {
-		switch msg.String() {
-		case "y":
-			return append(cmds, func() tea.Msg { return PlanApprovalMsg{Approved: true} })
-		case "n":
-			return append(cmds, func() tea.Msg { return PlanApprovalMsg{Approved: false} })
-		}
-		return cmds
-	}
-
-	// Approval dialog takes precedence when waiting for approval.
-	if m.state == api.TurnWaitingApproval {
-		switch msg.String() {
-		case "1":
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalYes); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case "2":
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalNo); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case "3":
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case "4", m.config.Keybindings.ApproveDiff:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalDiff); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case m.config.Keybindings.ApproveYes:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalYes); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case m.config.Keybindings.ApproveNo:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalNo); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case m.config.Keybindings.ApproveAlways:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case "ctrl+e":
-			m.mu.RLock()
-			call, ok := m.approval.currentCall()
-			session := m.session
-			protectedPaths := append([]string(nil), m.protectedPaths...)
-			m.mu.RUnlock()
-			if !ok || session == nil {
-				return cmds
-			}
-			diff, err := toolCallDiff(call, session.Path, protectedPaths)
-			if err == nil && diff != "" {
-				m.approvalFullscreen = true
-				m.approvalDiffContent = diff
-			}
-			return cmds
-		}
-	}
-
-	switch msg.String() {
-	case m.config.Keybindings.Quit:
-		cmds = append(cmds, tea.Quit)
-	case m.config.Keybindings.Cancel:
-		// If the user has typed a draft, clear it first instead of cancelling
-		// the active stream. A second Cancel then stops the stream.
-		if m.input.Value() != "" {
-			m.input.SetValue("")
-			break
-		}
-		m.mu.Lock()
-		state := m.state
-		cancel := m.streamCancel
-		m.mu.Unlock()
-		if state == api.TurnThinking || state == api.TurnStreaming {
-			if cancel != nil {
-				cancel()
-			}
-			m.mu.Lock()
-			m.streamCh = nil
-			m.streamCancel = nil
-			m.streamCanceled = true
-			m.mu.Unlock()
-			m.setState(api.TurnIdle)
-		}
-	case m.config.Keybindings.FocusNext:
-		if cmd := m.cycleFocus(1); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-	case m.config.Keybindings.FocusPrev:
-		if cmd := m.cycleFocus(-1); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-	case m.config.Keybindings.Yolo:
-		if m.approvalModeSetter != nil {
-			m.mu.Lock()
-			if m.approvalMode == approvalModeAuto {
-				m.approvalMode = approvalModeYolo
-			} else {
-				m.approvalMode = approvalModeAuto
-			}
-			mode := m.approvalMode
-			m.mu.Unlock()
-			m.approvalModeSetter(mode)
-		}
-	}
-
-	if steerKey(msg, m.config.Keybindings.Steer) {
-		if m.state == api.TurnStreaming || m.state == api.TurnThinking {
-			m.steerOpen = true
-		}
-	}
-
-	return cmds
-}
-
-// steerKey reports whether msg is the configured steering key. An empty config
-// value defaults to ctrl+s for backward compatibility.
-func steerKey(msg tea.KeyPressMsg, configured string) bool {
-	key := configured
-	if key == "" {
-		key = "ctrl+s"
-	}
-	return msg.String() == key
-}
-
-func (m *Model) handleSteerKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
-	switch msg.String() {
-	case "esc", "ctrl+c":
-		m.steerOpen = false
-		m.steerInput = ""
-		return nil
-	case "enter":
-		content := strings.TrimSpace(m.steerInput)
-		if content == "" {
-			return nil
-		}
-		m.steerOpen = false
-		m.steerInput = ""
-		return []tea.Cmd{func() tea.Msg { return SteerMsg{Content: content} }}
-	case "backspace", "ctrl+h":
-		if m.steerInput != "" {
-			runes := []rune(m.steerInput)
-			m.steerInput = string(runes[:len(runes)-1])
-		}
-		return nil
-	}
-
-	if text := appendableKeyText(msg); text != "" {
-		m.steerInput += text
-	}
-	return nil
-}
-
-func appendableKeyText(msg tea.KeyPressMsg) string {
-	if msg.Text == "" {
-		return ""
-	}
-	for _, r := range msg.Text {
-		if unicode.IsControl(r) {
-			return ""
-		}
-	}
-	return msg.Text
-}
-
 func (m *Model) cycleFocus(delta int) tea.Cmd {
 	components := []focusedComponent{focusInput, focusViewport}
 
@@ -1087,95 +813,6 @@ func (m *Model) cycleFocus(delta int) tea.Cmd {
 	}
 	m.input.Blur()
 	return nil
-}
-
-func (m *Model) handleMouseMsg(msg tea.MouseReleaseMsg) {
-	if msg.Button != tea.MouseLeft {
-		return
-	}
-
-	l := m.layout()
-	welcomeHeight := m.welcomeHeight()
-	vpEnd := welcomeHeight + l.vpHeight
-
-	if msg.Y >= vpEnd && msg.Y < l.statusY {
-		m.focused = focusInput
-	} else if msg.Y >= welcomeHeight && msg.Y < vpEnd {
-		m.focused = focusViewport
-	}
-}
-
-func (m *Model) handleSend(content string, parts []api.ContentPart) []tea.Cmd {
-	var cmds []tea.Cmd
-
-	if strings.HasPrefix(content, "/") {
-		cmd := m.handleCommand(content)
-		if cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-		return cmds
-	}
-
-	// Allow sending from Idle or Error state; block only during active turns.
-	if m.state == api.TurnThinking || m.state == api.TurnStreaming || m.state == api.TurnToolCalls || m.state == api.TurnWaitingApproval || m.state == api.TurnWaitingPlan {
-		return nil
-	}
-
-	m.toolCount = 0
-	m.statusText = ""
-	m.addMessage(msgcomp.NewUserMessage(content, m.styles))
-	m.setState(api.TurnThinking)
-
-	// If turn manager and session are wired, execute a real LLM turn.
-	if m.turnManager != nil && m.session != nil {
-		planMode := m.input.PlanMode()
-		m.input.SetPlanMode(false)
-
-		ctx, cancel := context.WithCancel(m.appCtx)
-		m.mu.Lock()
-		m.streamCancel = cancel
-		m.streamCh = nil
-		m.streamCanceled = false
-		m.mu.Unlock()
-
-		var streamCh <-chan api.TurnEvent
-		var err error
-		if planMode {
-			if len(parts) > 0 {
-				streamCh, err = m.turnManager.RunTurnWithPlanWithContentParts(ctx, m.session.ID, content, parts)
-			} else {
-				streamCh, err = m.turnManager.RunTurnWithPlan(ctx, m.session.ID, content)
-			}
-		} else {
-			if len(parts) > 0 {
-				streamCh, err = m.turnManager.RunTurnWithContentParts(ctx, m.session.ID, content, parts)
-			} else {
-				streamCh, err = m.turnManager.RunTurn(ctx, m.session.ID, content)
-			}
-		}
-		if err != nil {
-			cancel()
-			m.mu.Lock()
-			m.streamCancel = nil
-			m.streamCh = nil
-			m.streamCanceled = true
-			m.mu.Unlock()
-			m.addMessage(msgcomp.NewErrorMessage(err, m.styles))
-			m.setState(api.TurnError)
-			return cmds
-		}
-		m.mu.Lock()
-		m.streamCh = streamCh
-		m.mu.Unlock()
-		cmds = append(cmds, m.readStreamChunk())
-		return cmds
-	}
-
-	// Fallback for tests or when no services are wired.
-	cmds = append(cmds, func() tea.Msg {
-		return SendMessageMsg{Content: content, ContentParts: parts}
-	})
-	return cmds
 }
 
 // listSessionsCmd returns a command that lists sessions asynchronously.
@@ -1268,182 +905,6 @@ func (m *Model) gitRefreshCmd() tea.Cmd {
 }
 
 // readStreamChunk returns a command that reads the next event from the stream.
-func (m *Model) readStreamChunk() tea.Cmd {
-	ch := m.streamCh // capture at command creation time
-	return func() tea.Msg {
-		if ch == nil {
-			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true}}
-		}
-		// Guard against stale events after cancellation or a new stream starting.
-		m.mu.RLock()
-		currentCh := m.streamCh
-		canceled := m.streamCanceled
-		m.mu.RUnlock()
-		if ch != currentCh || canceled {
-			return nil
-		}
-		event, ok := <-ch
-		if !ok {
-			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true}}
-		}
-		switch event.Type {
-		case api.TurnEventContent:
-			return StreamChunkMsg{Chunk: api.StreamChunk{Content: event.Content}}
-		case api.TurnEventDone:
-			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true, ToolCalls: event.ToolCalls}}
-		case api.TurnEventError:
-			return ErrorMsg{Err: event.Error}
-		case api.TurnEventApprovalRequest:
-			return ApprovalRequestMsg{Calls: event.ToolCalls, RequestID: event.RequestID}
-		case api.TurnEventToolResult:
-			return ToolResultMsg{Result: event.Result}
-		case api.TurnEventToolProgress:
-			return ToolProgressMsg{CallID: event.CallID, Content: event.Content}
-		case api.TurnEventApprovalDiff:
-			return ApprovalDiffMsg{CallID: event.DiffCallID, Diff: event.DiffContent}
-		case api.TurnEventPlanRequest:
-			return PlanRequestMsg{Plan: event.Content}
-		case api.TurnEventSteered:
-			return SteeredMsg{Content: event.Content}
-		case api.TurnEventStatus:
-			return StatusMsg{Text: event.Content}
-		default:
-			slog.Warn("unknown turn event type", "type", event.Type)
-			return nil
-		}
-	}
-}
-
-func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
-	var cmds []tea.Cmd
-
-	// Guard against stale buffered chunks after stream cancellation.
-	m.mu.RLock()
-	streamCh := m.streamCh
-	streamCanceled := m.streamCanceled
-	m.mu.RUnlock()
-	if !chunk.Done && streamCh == nil && streamCanceled {
-		return cmds
-	}
-
-	if chunk.Error != nil {
-		m.addMessage(msgcomp.NewErrorMessage(chunk.Error, m.styles))
-		m.setState(api.TurnError)
-		m.mu.Lock()
-		if m.streamCancel != nil {
-			m.streamCancel()
-		}
-		m.streamCancel = nil
-		m.streamCh = nil
-		m.streamCanceled = true
-		m.rb.setLastBlockStart(0)
-		m.mu.Unlock()
-		return cmds
-	}
-
-	if chunk.Done {
-		if m.state != api.TurnError {
-			m.setState(api.TurnIdle)
-		}
-		m.statusText = ""
-		if lastMsg := m.lastAssistantMessage(); lastMsg != nil {
-			lastMsg.SetStreaming(false)
-		}
-		// Rebuild renderedContent since the last assistant message may now be glamour-rendered
-		m.rebuildRenderedContent()
-		// Estimate token usage after turn completes.
-		m.updateContextStats()
-		if len(chunk.ToolCalls) > 0 {
-			// Do not clear streamCh yet; more events may come from the turn manager.
-			cmds = append(cmds, func() tea.Msg {
-				return ToolCallMsg{Calls: chunk.ToolCalls}
-			})
-			return cmds
-		}
-		m.mu.Lock()
-		if m.streamCancel != nil {
-			m.streamCancel()
-		}
-		m.streamCancel = nil
-		m.streamCh = nil
-		m.streamCanceled = false
-		m.mu.Unlock()
-		return cmds
-	}
-
-	if m.state != api.TurnStreaming {
-		m.setState(api.TurnStreaming)
-	}
-
-	// Find or create the last assistant message. After a steer event the prior
-	// assistant message is finalized and a new one is started.
-	lastMsg := m.lastAssistantMessage()
-	if lastMsg == nil || m.steeredPending {
-		if lastMsg != nil {
-			lastMsg.SetStreaming(false)
-		}
-		m.steeredPending = false
-		lastMsg = msgcomp.NewAssistantMessage("", m.styles)
-		lastMsg.SetStreaming(true)
-		m.mu.Lock()
-		m.messages = append(m.messages, lastMsg)
-		m.rb.setLastBlockStart(m.rb.len())
-		m.rb.updateLastBlock(lastMsg.View().Content)
-		m.mu.Unlock()
-	} else {
-		m.mu.Lock()
-		if m.rb.lastBlockStart() == 0 {
-			// After a full rebuild (e.g., resize), recompute the assistant's start position
-			m.rb.setLastBlockStart(m.rb.len() - len(lastMsg.View().Content))
-			if m.rb.lastBlockStart() < 0 {
-				m.rb.setLastBlockStart(0)
-			}
-		}
-		m.mu.Unlock()
-	}
-
-	lastMsg.AppendContent(chunk.Content)
-	lastMsg.SetWidth(m.vpWidth())
-
-	// Incremental update: truncate back to lastBlockStart and re-render just the last message
-	m.mu.Lock()
-	m.rb.updateLastBlock(lastMsg.View().Content)
-	m.mu.Unlock()
-
-	// Continue polling for the next chunk
-	cmds = append(cmds, m.readStreamChunk())
-
-	return cmds
-}
-
-func (m *Model) handleToolCalls(calls []api.ToolCall) []tea.Cmd {
-	cmds := make([]tea.Cmd, 0, 1)
-	for _, call := range calls {
-		m.addMessage(msgcomp.NewToolCallMessage(call, m.styles))
-	}
-	m.toolCount += len(calls)
-	m.setState(api.TurnToolCalls)
-	cmds = append(cmds, m.readStreamChunk())
-	return cmds
-}
-
-func (m *Model) handleToolResult(result api.ToolResult) []tea.Cmd {
-	cmds := make([]tea.Cmd, 0, 1)
-	m.statusText = ""
-	m.mu.Lock()
-	for _, msg := range m.messages {
-		if msg.Type == msgcomp.TypeToolCall && msg.ToolCall.ID == result.CallID {
-			msg.SetToolResult(result)
-			break
-		}
-	}
-	m.mu.Unlock()
-	// Re-render the tool call message so the result is visible in the viewport.
-	m.rebuildRenderedContent()
-	cmds = append(cmds, m.readStreamChunk())
-	return cmds
-}
-
 func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 
@@ -1522,33 +983,6 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	return cmds
 }
 
-func (m *Model) handleSteer(content string) []tea.Cmd {
-	cmds := make([]tea.Cmd, 0, 1)
-
-	m.mu.RLock()
-	tm := m.turnManager
-	var sessionID string
-	if m.session != nil {
-		sessionID = m.session.ID
-	}
-	appCtx := m.appCtx
-	m.mu.RUnlock()
-
-	timeout := commandTimeout
-	cmds = append(cmds, func() tea.Msg {
-		if tm == nil || sessionID == "" {
-			return ErrorMsg{Err: fmt.Errorf("no turn manager")}
-		}
-		ctx, cancel := context.WithTimeout(appCtx, timeout)
-		defer cancel()
-		if err := tm.Steer(ctx, sessionID, content); err != nil {
-			return ErrorMsg{Err: fmt.Errorf("steer: %w", err)}
-		}
-		return StateChangeMsg{State: api.TurnThinking}
-	})
-	return cmds
-}
-
 func (m *Model) addMessage(msg *msgcomp.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1606,231 +1040,6 @@ func (m *Model) lastAssistantMessage() *msgcomp.Message {
 	return nil
 }
 
-func (m *Model) renderApprovalDialog(background string) string {
-	m.mu.RLock()
-	call, ok := m.approval.currentCall()
-	session := m.session
-	protectedPaths := append([]string(nil), m.protectedPaths...)
-	m.mu.RUnlock()
-	if !ok || session == nil {
-		return background
-	}
-	var b strings.Builder
-	b.WriteString("Tool call requires approval\n\n")
-	fmt.Fprintf(&b, "Tool: %s\n", call.Name)
-	diff, err := toolCallDiff(call, session.Path, protectedPaths)
-	switch {
-	case err == nil && diff != "":
-		fmt.Fprintf(&b, "\n%s\n", diff)
-	case err == nil:
-		fmt.Fprintf(&b, "Arguments: %s\n", call.Arguments)
-	case errors.Is(err, core.ErrDiffFileTooLarge):
-		fmt.Fprintf(&b, "Arguments: %s\n(diff preview disabled: file too large)\n", call.Arguments)
-	case errors.Is(err, core.ErrDiffPathBlocked):
-		fmt.Fprintf(&b, "Arguments: %s\n(diff preview blocked)\n", call.Arguments)
-	default:
-		fmt.Fprintf(&b, "Arguments: %s\n(diff preview unavailable)\n", call.Arguments)
-	}
-	fmt.Fprintf(&b, "\n 1. yes  2. no  3. always  4. diff")
-	fmt.Fprintf(&b, "\nkeys: 1/2/3/4 | y/n/a/d | ctrl+e fullscreen")
-
-	dialog := m.styles.ApprovalDialog.Render(b.String())
-	return overlayDialog(background, dialog, m.width, m.height)
-}
-
-// renderApprovalFullscreen renders a fullscreen diff preview overlay.
-func (m *Model) renderApprovalFullscreen(background string) string {
-	var b strings.Builder
-	b.WriteString("Diff preview (Esc or Ctrl+E to close)\n\n")
-	b.WriteString(m.approvalDiffContent)
-	dialog := m.styles.ApprovalDialog.Render(b.String())
-	return overlayDialog(background, dialog, m.width, m.height)
-}
-
-// renderPlanPanel renders the plan approval overlay.
-func (m *Model) renderPlanPanel(background string) string {
-	var b strings.Builder
-	b.WriteString("Plan requires approval\n\n")
-	innerW := m.width - 8
-	if innerW < minContentWidth {
-		innerW = minContentWidth
-	}
-	b.WriteString(wordWrap(m.planRequest, innerW))
-	b.WriteString("\n\n[y] yes  [n] no")
-	dialog := m.styles.PlanPanel.Render(b.String())
-	return overlayDialog(background, dialog, m.width, m.height)
-}
-
-func (m *Model) renderSteerOverlay(background string) string {
-	var b strings.Builder
-	b.WriteString("Steer the response\n\n")
-	innerW := m.width - 8
-	if innerW < minContentWidth {
-		innerW = minContentWidth
-	}
-	if m.steerInput == "" {
-		b.WriteString(wordWrap("(type a follow-up instruction)", innerW))
-	} else {
-		b.WriteString(wordWrap(m.steerInput, innerW))
-	}
-	b.WriteString("\n\n[Enter] send  [Esc] cancel")
-	dialog := m.styles.SteerOverlay.Render(b.String())
-	return overlayDialog(background, dialog, m.width, m.height)
-}
-
-// overlayDialog composites a dialog box over a background, centering it both
-// horizontally and vertically. The background is normalized to exactly width x
-// height cells before the dialog is painted on top, so the rendered output is
-// stable even on narrow terminals or when the dialog is larger than the
-// background. Wide runes (CJK/emoji) are handled via ansi.Cut.
-//
-// The overlay is implemented with lipgloss v2's Canvas and Layer compositor
-// instead of hand-rolled ANSI string splicing.
-func overlayDialog(background string, dialog string, width int, height int) string {
-	bgLines := strings.Split(background, "\n")
-
-	// Normalize the background to exactly height lines.
-	if len(bgLines) < height {
-		bgLines = append(bgLines, make([]string, height-len(bgLines))...)
-	}
-	bgLines = bgLines[:height]
-
-	// Normalize each line to exactly width cells.
-	for i, line := range bgLines {
-		lineWidth := ansi.StringWidth(line)
-		switch {
-		case lineWidth > width:
-			bgLines[i] = ansi.Cut(line, 0, width)
-		case lineWidth < width:
-			bgLines[i] = line + strings.Repeat(" ", width-lineWidth)
-		}
-	}
-
-	dialogHeight := lipgloss.Height(dialog)
-	dialogWidth := lipgloss.Width(dialog)
-
-	startY := (height - dialogHeight) / 2
-	if startY < 0 {
-		startY = 0
-	}
-	startX := (width - dialogWidth) / 2
-	if startX < 0 {
-		startX = 0
-	}
-
-	// Clamp the dialog line so the rendered output never exceeds the
-	// requested width, even on very narrow terminals.
-	maxDialogWidth := width - startX
-	dialogLines := strings.Split(dialog, "\n")
-	for i, dLine := range dialogLines {
-		if ansi.StringWidth(dLine) > maxDialogWidth {
-			dialogLines[i] = ansi.Cut(dLine, 0, maxDialogWidth)
-		}
-	}
-	dialog = strings.Join(dialogLines, "\n")
-
-	comp := lipgloss.NewCompositor(
-		lipgloss.NewLayer(strings.Join(bgLines, "\n")),
-		lipgloss.NewLayer(dialog).X(startX).Y(startY).Z(1),
-	)
-	rendered := lipgloss.NewCanvas(width, height).Compose(comp).Render()
-
-	// Canvas.Render trims trailing whitespace. Re-normalize each line to the
-	// requested width x height so callers get a stable, predictable rectangle.
-	return normalizeRect(rendered, width, height)
-}
-
-// normalizeRect pads or truncates a rendered string so that every line has
-// exactly width cells and the output contains exactly height lines.
-func normalizeRect(s string, width, height int) string {
-	lines := strings.Split(s, "\n")
-	if len(lines) < height {
-		lines = append(lines, make([]string, height-len(lines))...)
-	}
-	lines = lines[:height]
-	for i, line := range lines {
-		lineWidth := ansi.StringWidth(line)
-		switch {
-		case lineWidth > width:
-			lines[i] = ansi.Cut(line, 0, width)
-		case lineWidth < width:
-			lines[i] = line + strings.Repeat(" ", width-lineWidth)
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-// wordWrap wraps s to the given display width, preserving existing newlines.
-// It is copied from internal/tui/messages/messages.go for use by the plan
-// panel so long plan lines are not truncated by the dialog overlay.
-func wordWrap(s string, width int) string {
-	if width <= 0 {
-		return s
-	}
-	lines := strings.Split(s, "\n")
-	var out []string
-	for _, line := range lines {
-		for ansi.StringWidth(line) > width {
-			out = append(out, ansi.Cut(line, 0, width))
-			line = ansi.Cut(line, width, ansi.StringWidth(line))
-		}
-		out = append(out, line)
-	}
-	return strings.Join(out, "\n")
-}
-
-// approvalStartRequest starts a new approval request under m.mu and clears any
-// stale fullscreen diff state from a previous request.
-func (m *Model) approvalStartRequest(calls []api.ToolCall, requestID int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.approvalFullscreen = false
-	m.approvalDiffContent = ""
-	m.approval.startRequest(calls, requestID)
-}
-
-// approvalHandleResponse records one approval decision under m.mu.
-func (m *Model) approvalHandleResponse(resp ApprovalResponseMsg) (done bool, approvals map[string]api.ApprovalDecision, alwaysAll bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.approval.handleResponse(resp)
-}
-
-// approvalRequestID returns the active approval request ID under m.mu.
-func (m *Model) approvalRequestID() int64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.approval.requestID()
-}
-
-// approvalPending returns the current pending calls under m.mu.
-func (m *Model) approvalPending() []api.ToolCall {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.approval.pending()
-}
-
-// approvalClear resets the approval controller under m.mu.
-func (m *Model) approvalClear() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.approval.clear()
-}
-
-// approvalIsActive reports whether there is an active approval request under m.mu.
-func (m *Model) approvalIsActive() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.approval.isActive()
-}
-
-// approvalApproveCurrent produces a response for the current call under m.mu.
-func (m *Model) approvalApproveCurrent(decision api.ApprovalDecision) (ApprovalResponseMsg, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.approval.approveCurrent(decision)
-}
-
 func (m *Model) updateFooter() {
 	m.mu.RLock()
 	state := m.state
@@ -1846,8 +1055,6 @@ func (m *Model) updateFooter() {
 	}
 	gitBranch := m.gitBranch
 	gitDirty := m.gitDirty
-	gitAhead := m.gitAhead
-	gitBehind := m.gitBehind
 	m.mu.RUnlock()
 
 	m.footer.SetSize(m.contentWidth())
@@ -1862,8 +1069,6 @@ func (m *Model) updateFooter() {
 		ToolCount:   toolCount,
 		GitBranch:   gitBranch,
 		GitDirty:    gitDirty,
-		GitAhead:    gitAhead,
-		GitBehind:   gitBehind,
 	})
 }
 
@@ -1926,52 +1131,6 @@ func (m *Model) pendingToolCalls() []api.ToolCall {
 		}
 	}
 	return calls
-}
-
-func (m *Model) updateLayout() {
-	l := m.layout()
-	m.applyLayoutSizes(l)
-
-	// If the layout geometry has not changed, the transcript is still valid.
-	if l.eq(m.lastLayout) {
-		return
-	}
-
-	m.mu.Lock()
-	for _, msg := range m.messages {
-		msg.SetWidth(l.vpWidth)
-	}
-	m.mu.Unlock()
-	m.rebuildRenderedContent()
-	m.lastLayout = l
-}
-
-// applyLayoutSizes updates child component sizes without rebuilding the transcript.
-func (m *Model) applyLayoutSizes(l layoutRect) {
-	m.vp.SetSize(l.contentWidth, l.vpHeight)
-	m.input.SetWidth(l.contentWidth)
-	m.footer.SetSize(l.contentWidth)
-	m.welcome.SetSize(l.contentWidth)
-	m.activity.SetSize(l.contentWidth)
-}
-
-func (m *Model) refreshFileCandidates() {
-	m.mu.RLock()
-	provider := m.mentionProvider
-	path := ""
-	if m.session != nil {
-		path = m.session.Path
-	}
-	m.mu.RUnlock()
-	if provider == nil {
-		return
-	}
-	cands, _ := provider.Candidates(path)
-	m.input.SetFileCandidates(cands)
-}
-
-func (m *Model) contentWidth() int {
-	return m.layout().contentWidth
 }
 
 func (m *Model) vpWidth() int {

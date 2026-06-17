@@ -826,11 +826,23 @@ func TestHandleSend_WithTurnManagerError(t *testing.T) {
 
 	updated, cmd := m.Update(input.SendMsg{Content: "hello"})
 	model := updated.(*Model)
-	if model.state != api.TurnError {
-		t.Errorf("state = %d, want TurnError", model.state)
+	if model.state != api.TurnThinking {
+		t.Errorf("state = %d, want TurnThinking while async call is in flight", model.state)
 	}
-	if cmd != nil {
-		t.Error("expected no command after RunTurn error")
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	msg := cmd()
+	runResult, ok := msg.(RunTurnResultMsg)
+	if !ok {
+		t.Fatalf("expected RunTurnResultMsg, got %T", msg)
+	}
+
+	updated2, _ := model.Update(runResult)
+	model2 := updated2.(*Model)
+	if model2.state != api.TurnError {
+		t.Errorf("state = %d, want TurnError after RunTurn error", model2.state)
 	}
 }
 

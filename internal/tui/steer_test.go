@@ -21,7 +21,15 @@ func (r *recordingSteerTurnManager) RunTurn(ctx context.Context, sessionID strin
 	return nil, nil
 }
 
+func (r *recordingSteerTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
 func (r *recordingSteerTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingSteerTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
 	return nil, nil
 }
 

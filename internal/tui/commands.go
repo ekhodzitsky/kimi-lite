@@ -163,8 +163,6 @@ type debouncedResizeMsg struct {
 type FooterGitMsg struct {
 	Branch string
 	Dirty  bool
-	Ahead  int
-	Behind int
 }
 
 // ShowHelpMsg opens the help overlay.

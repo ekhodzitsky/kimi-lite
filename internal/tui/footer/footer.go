@@ -36,8 +36,6 @@ type Data struct {
 	ToolCount   int
 	GitBranch   string
 	GitDirty    bool
-	GitAhead    int
-	GitBehind   int
 }
 
 // Model is the footer component.
@@ -165,9 +163,6 @@ func (m *Model) gitBadge() string {
 	badge := m.data.GitBranch
 	if m.data.GitDirty {
 		badge += "*"
-	}
-	if m.data.GitAhead > 0 || m.data.GitBehind > 0 {
-		badge += fmt.Sprintf(" %d/%d", m.data.GitAhead, m.data.GitBehind)
 	}
 	return badge
 }

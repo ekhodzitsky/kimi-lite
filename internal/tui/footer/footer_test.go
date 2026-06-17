@@ -80,3 +80,15 @@ func TestFooterState(t *testing.T) {
 		t.Errorf("expected thinking state, got %q", view)
 	}
 }
+
+func TestFooterGitBadge_NoAheadBehind(t *testing.T) {
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80)
+	m.SetData(Data{ModelName: "m", GitBranch: "main", ContextMax: 1})
+	view := m.View()
+	// Ahead/behind counters would render as " 0/0" after the branch name.
+	if strings.Contains(view, " 0/0") || strings.Contains(view, " 1/1") {
+		t.Errorf("footer should not render ahead/behind counters, got %q", view)
+	}
+}

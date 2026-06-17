@@ -2319,7 +2319,18 @@ func TestRunTurnError_CancelsContext(t *testing.T) {
 	tm := &capturingErrorTurnManager{}
 	m.SetTurnManager(tm)
 
-	m.Update(input.SendMsg{Content: "hello"})
+	_, cmd := m.Update(input.SendMsg{Content: "hello"})
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	msg := cmd()
+	runResult, ok := msg.(RunTurnResultMsg)
+	if !ok {
+		t.Fatalf("expected RunTurnResultMsg, got %T", msg)
+	}
+
+	m.Update(runResult)
 
 	if tm.capturedCtx == nil {
 		t.Fatal("RunTurn was not called")
@@ -2885,20 +2896,31 @@ func TestSend_WithPlanMode_CallsRunTurnWithPlan(t *testing.T) {
 	m.SetTurnManager(tm)
 	m.input.SetPlanMode(true)
 
-	updated, _ := m.Update(input.SendMsg{Content: "hello"})
+	updated, cmd := m.Update(input.SendMsg{Content: "hello"})
 	model := updated.(*Model)
 
 	if model.input.PlanMode() {
 		t.Error("plan mode should be disabled after sending")
 	}
+	if model.state != api.TurnThinking {
+		t.Errorf("state = %d, want TurnThinking", model.state)
+	}
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	msg := cmd()
+	runResult, ok := msg.(RunTurnResultMsg)
+	if !ok {
+		t.Fatalf("expected RunTurnResultMsg, got %T", msg)
+	}
+	model.Update(runResult)
+
 	if !tm.runTurnWithPlanCalled {
 		t.Error("expected RunTurnWithPlan to be called")
 	}
 	if tm.runTurnWithPlanInput != "hello" {
 		t.Errorf("RunTurnWithPlan input = %q, want %q", tm.runTurnWithPlanInput, "hello")
-	}
-	if model.state != api.TurnThinking {
-		t.Errorf("state = %d, want TurnThinking", model.state)
 	}
 }
 
@@ -2995,7 +3017,17 @@ func TestSendMessage_ForwardsContentPartsToTurnManager(t *testing.T) {
 	parts := []api.ContentPart{
 		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "https://example.com/img.png"}},
 	}
-	m.Update(input.SendMsg{Content: "describe", ContentParts: parts})
+	_, cmd := m.Update(input.SendMsg{Content: "describe", ContentParts: parts})
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	msg := cmd()
+	runResult, ok := msg.(RunTurnResultMsg)
+	if !ok {
+		t.Fatalf("expected RunTurnResultMsg, got %T", msg)
+	}
+	m.Update(runResult)
 
 	if !tm.runTurnWithContentPartsCalled {
 		t.Error("expected RunTurnWithContentParts to be called")
@@ -3039,6 +3071,228 @@ func (r *recordingPartsTurnManager) ResumeWithPlan(ctx context.Context, sessionI
 	return nil
 }
 
+func (r *recordingPartsTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
+}
+
 func (r *recordingPartsTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	return nil
+}
+
+func TestSend_AsyncRunsTurnManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	tm := &fakeTurnManager{
+		events: []api.TurnEvent{
+			{Type: api.TurnEventContent, Content: "hi"},
+			{Type: api.TurnEventDone},
+		},
+	}
+	m.SetTurnManager(tm)
+
+	updated, cmd := m.Update(input.SendMsg{Content: "hello"})
+	model := updated.(*Model)
+
+	if model.state != api.TurnThinking {
+		t.Fatalf("state = %d, want TurnThinking", model.state)
+	}
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	msg := cmd()
+	runResult, ok := msg.(RunTurnResultMsg)
+	if !ok {
+		t.Fatalf("expected RunTurnResultMsg, got %T", msg)
+	}
+	if runResult.Err != nil {
+		t.Fatalf("unexpected RunTurn error: %v", runResult.Err)
+	}
+
+	updated2, cmd2 := model.Update(runResult)
+	model2 := updated2.(*Model)
+
+	if model2.streamCh == nil {
+		t.Fatal("streamCh should be set after RunTurnResultMsg")
+	}
+	if cmd2 == nil {
+		t.Fatal("expected readStreamChunk command after RunTurnResultMsg")
+	}
+}
+
+func TestSend_AsyncErrorDisplaysError(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.SetTurnManager(&errorRunTurnManager{err: errors.New("run turn failed")})
+
+	_, cmd := m.Update(input.SendMsg{Content: "hello"})
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	runResult := cmd().(RunTurnResultMsg)
+	updated, _ := m.Update(runResult)
+	model := updated.(*Model)
+
+	if model.state != api.TurnError {
+		t.Errorf("state = %d, want TurnError", model.state)
+	}
+	found := false
+	for _, msg := range model.messages {
+		if strings.Contains(msg.Content, "run turn failed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected error message, got %v", model.messages)
+	}
+}
+
+func TestOverlayKeys_ConsumedByHelpOverlay(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	assistant := msgcomp.NewAssistantMessage("**bold**", m.styles)
+	m.addMessage(assistant)
+	m.focused = focusViewport
+
+	// Open help overlay.
+	updated, _ := m.Update(ShowHelpMsg{})
+	model := updated.(*Model)
+	if !model.showHelp {
+		t.Fatal("expected help overlay to be open")
+	}
+
+	// Pressing 'r' while help is open must not toggle raw mode.
+	updated, _ = model.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	model2 := updated.(*Model)
+	if !model2.showHelp {
+		t.Error("help overlay should remain open")
+	}
+	for _, msg := range model2.messages {
+		if msg.RawMode {
+			t.Error("raw mode should not toggle while help overlay is open")
+		}
+	}
+}
+
+func TestOverlayKeys_ConsumedByApprovalFullscreen(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: t.TempDir()}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	path := filepath.Join(session.Path, "file.txt")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	calls := []api.ToolCall{{
+		ID:        "1",
+		Name:      "write_file",
+		Arguments: `{"path":"file.txt","content":"new\n"}`,
+	}}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+	m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	if !m.approvalFullscreen {
+		t.Fatal("expected fullscreen diff to be open")
+	}
+
+	m.focused = focusViewport
+	assistant := msgcomp.NewAssistantMessage("**bold**", m.styles)
+	m.addMessage(assistant)
+
+	// Pressing 'r' while fullscreen diff is open must not toggle raw mode.
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	model := updated.(*Model)
+	if !model.approvalFullscreen {
+		t.Error("fullscreen diff should remain open")
+	}
+	for _, msg := range model.messages {
+		if msg.RawMode {
+			t.Error("raw mode should not toggle while fullscreen diff is open")
+		}
+	}
+}
+
+func TestOverlayKeys_ConsumedBySteerOverlay(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+	m.setState(api.TurnStreaming)
+
+	// Open steer overlay.
+	m.Update(ShowSteerInputMsg{})
+	if !m.steerOpen {
+		t.Fatal("expected steer overlay to be open")
+	}
+
+	inputValueBefore := m.input.Value()
+
+	// Pressing a printable key should go to the steer input, not the main input.
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	model := updated.(*Model)
+	if !model.steerOpen {
+		t.Error("steer overlay should remain open")
+	}
+	if model.input.Value() != inputValueBefore {
+		t.Errorf("main input value changed while steer overlay was open: %q", model.input.Value())
+	}
+	if model.steerInput != "x" {
+		t.Errorf("steerInput = %q, want %q", model.steerInput, "x")
+	}
+}
+
+func TestPlanPending_IgnoresSteerKey(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+	m.setState(api.TurnStreaming)
+	m.planPending = true
+	m.planRequest = "plan"
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl, Text: "ctrl+s"})
+	model := updated.(*Model)
+
+	if model.steerOpen {
+		t.Error("steer overlay should not open while plan approval panel is pending")
+	}
+	if !model.planPending {
+		t.Error("planPending should remain true")
+	}
 }
