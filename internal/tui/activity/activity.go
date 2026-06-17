@@ -14,9 +14,10 @@ import (
 
 // Data is the snapshot needed to render the activity panel.
 type Data struct {
-	State      api.TurnState
-	StatusText string
-	ToolCalls  []api.ToolCall
+	State       api.TurnState
+	StatusText  string
+	ToolCalls   []api.ToolCall
+	ToolOutputs map[string]string // callID -> live output tail
 }
 
 // Model renders transient activity status.
@@ -74,6 +75,17 @@ func (m *Model) View() string {
 		for _, tc := range m.data.ToolCalls {
 			b.WriteString("\n")
 			b.WriteString(m.styles.ActivityTool.Render("  • " + tc.Name))
+			if out := m.data.ToolOutputs[tc.ID]; out != "" {
+				lines := strings.Split(out, "\n")
+				tail := lines
+				if len(tail) > 4 {
+					tail = tail[len(tail)-4:]
+				}
+				for _, line := range tail {
+					b.WriteString("\n")
+					b.WriteString(m.styles.ActivityOutput.Render("    " + line))
+				}
+			}
 		}
 	}
 	return b.String()

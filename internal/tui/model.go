@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -51,6 +52,9 @@ const (
 	// integer representation used by the TUI's approval-mode callback.
 	approvalModeAuto = int(core.ModeAuto)
 	approvalModeYolo = int(core.ModeYolo)
+
+	// maxToolProgressLen caps live tool output stored in the root model.
+	maxToolProgressLen = 2048
 )
 
 // inputHeight returns the current rendered height of the input component.
@@ -215,6 +219,9 @@ type Model struct {
 	streamCancel   context.CancelFunc
 	streamCanceled bool // true after cancel/error until a new stream starts
 
+	// Live output from running tools, keyed by call ID.
+	toolProgress map[string]string
+
 	// Focus management
 	focused focusedComponent
 
@@ -281,6 +288,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeCon
 		approval:        newApprovalController(),
 		approvalMode:    approvalModeAuto,
 		mentionProvider: mp,
+		toolProgress:    make(map[string]string),
 	}
 	inp.SetCandidateFunc(func() []string {
 		m.mu.RLock()
@@ -471,7 +479,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ToolCallMsg:
 		cmds = append(cmds, m.handleToolCalls(msg.Calls)...)
 
+	case ToolProgressMsg:
+		m.appendToolProgress(msg.CallID, msg.Content)
+		m.updateActivity()
+
 	case ToolResultMsg:
+		m.mu.Lock()
+		delete(m.toolProgress, msg.Result.CallID)
+		m.mu.Unlock()
+		m.updateActivity()
 		cmds = append(cmds, m.handleToolResult(msg.Result)...)
 
 	case ErrorMsg:
@@ -1107,6 +1123,8 @@ func (m *Model) readStreamChunk() tea.Cmd {
 			return ApprovalRequestMsg{Calls: event.ToolCalls, RequestID: event.RequestID}
 		case api.TurnEventToolResult:
 			return ToolResultMsg{Result: event.Result}
+		case api.TurnEventToolProgress:
+			return ToolProgressMsg{CallID: event.CallID, Content: event.Content}
 		case api.TurnEventApprovalDiff:
 			return ApprovalDiffMsg{CallID: event.DiffCallID, Diff: event.DiffContent}
 		case api.TurnEventStatus:
@@ -1611,10 +1629,22 @@ func (m *Model) updateWelcomeData() {
 // pending tool calls. It is safe to call from the Bubble Tea main goroutine.
 func (m *Model) updateActivity() {
 	m.activity.SetData(activity.Data{
-		State:      m.state,
-		StatusText: m.statusText,
-		ToolCalls:  m.pendingToolCalls(),
+		State:       m.state,
+		StatusText:  m.statusText,
+		ToolCalls:   m.pendingToolCalls(),
+		ToolOutputs: maps.Clone(m.toolProgress),
 	})
+}
+
+// appendToolProgress appends a chunk to the live output for the given call ID,
+// capping the stored output to maxToolProgressLen bytes.
+func (m *Model) appendToolProgress(callID, chunk string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.toolProgress[callID] += chunk
+	if len(m.toolProgress[callID]) > maxToolProgressLen {
+		m.toolProgress[callID] = "…" + m.toolProgress[callID][len(m.toolProgress[callID])-maxToolProgressLen+1:]
+	}
 }
 
 // pendingToolCalls returns the tool calls that should be shown in the activity

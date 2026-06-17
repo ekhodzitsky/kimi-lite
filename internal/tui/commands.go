@@ -36,6 +36,12 @@ type ToolResultMsg struct {
 	Result api.ToolResult
 }
 
+// ToolProgressMsg carries a live output chunk from a running tool call.
+type ToolProgressMsg struct {
+	CallID  string
+	Content string
+}
+
 // StatusMsg carries a transient status sentence for the status bar.
 type StatusMsg struct {
 	Text string

@@ -45,3 +45,18 @@ func TestActivityToolCalls(t *testing.T) {
 		t.Errorf("missing tool names: %q", view)
 	}
 }
+
+func TestActivityToolOutput(t *testing.T) {
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80)
+	m.SetData(Data{
+		State:       api.TurnToolCalls,
+		ToolCalls:   []api.ToolCall{{ID: "c1", Name: "shell"}},
+		ToolOutputs: map[string]string{"c1": "line1\nline2\nline3"},
+	})
+	view := m.View()
+	if !strings.Contains(view, "line3") {
+		t.Errorf("missing output tail: %q", view)
+	}
+}
