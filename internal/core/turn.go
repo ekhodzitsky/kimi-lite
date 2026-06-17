@@ -416,6 +416,11 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 		tm.activeCancel = nil
 		tm.cancelMu.Unlock()
 	}()
+	defer func() {
+		tm.planMu.Lock()
+		tm.planPending = false
+		tm.planMu.Unlock()
+	}()
 
 	planModeActive := planMode
 	var content string
@@ -441,6 +446,13 @@ streamLoop:
 				}
 				continue streamLoop
 			}
+			tm.persistPartialResponse(ctx, sessionID, turn, content)
+			tm.setError(ctx, sessionID, turn, err, eventCh)
+			return
+		}
+
+		if planModeActive && len(toolCalls) > 0 {
+			err := fmt.Errorf("plan mode produced tool calls")
 			tm.persistPartialResponse(ctx, sessionID, turn, content)
 			tm.setError(ctx, sessionID, turn, err, eventCh)
 			return
@@ -788,9 +800,6 @@ streamLoop:
 	}
 	tm.metrics.IncCounter("turn.completed")
 	tm.runHooks(ctx, api.HookTurnEnd, sessionID, turn.ID, "")
-	tm.planMu.Lock()
-	tm.planPending = false
-	tm.planMu.Unlock()
 	tm.mu.Lock()
 	tm.turn = turn
 	tm.mu.Unlock()
