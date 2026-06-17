@@ -1628,11 +1628,16 @@ func (m *Model) updateWelcomeData() {
 // updateActivity builds the activity panel data from the current turn state and
 // pending tool calls. It is safe to call from the Bubble Tea main goroutine.
 func (m *Model) updateActivity() {
+	m.mu.RLock()
+	state := m.state
+	statusText := m.statusText
+	toolProgress := maps.Clone(m.toolProgress)
+	m.mu.RUnlock()
 	m.activity.SetData(activity.Data{
-		State:       m.state,
-		StatusText:  m.statusText,
+		State:       state,
+		StatusText:  statusText,
 		ToolCalls:   m.pendingToolCalls(),
-		ToolOutputs: maps.Clone(m.toolProgress),
+		ToolOutputs: toolProgress,
 	})
 }
 
@@ -1710,7 +1715,11 @@ func (m *Model) contentWidth() int {
 }
 
 func (m *Model) vpWidth() int {
-	return m.layout().vpWidth
+	contentWidth := m.width
+	if contentWidth < minContentWidth {
+		contentWidth = minContentWidth
+	}
+	return contentWidth - viewportWidthPadding
 }
 
 // shellQuote returns s unchanged if it contains no shell-special characters;
