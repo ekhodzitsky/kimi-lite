@@ -2586,3 +2586,43 @@ func TestApprovalFullscreenDiff(t *testing.T) {
 		t.Error("expected fullscreen diff to close on Ctrl+E")
 	}
 }
+
+func TestApprovalFullscreenResetsOnNewRequest(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "file.txt")
+	if err := os.WriteFile(path, []byte("old content\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: tmp}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	calls := []api.ToolCall{{
+		ID:        "1",
+		Name:      "write_file",
+		Arguments: `{"path":"file.txt","content":"new content\n"}`,
+	}}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model := updated.(*Model)
+	if !model.approvalFullscreen {
+		t.Fatal("expected fullscreen diff to open")
+	}
+
+	// A new approval request must clear the stale fullscreen diff state.
+	updated, _ = model.Update(ApprovalRequestMsg{Calls: calls, RequestID: 2})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Error("expected approvalFullscreen to reset on new ApprovalRequestMsg")
+	}
+	if model.approvalDiffContent != "" {
+		t.Errorf("expected approvalDiffContent to be cleared, got %q", model.approvalDiffContent)
+	}
+}

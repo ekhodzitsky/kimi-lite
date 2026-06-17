@@ -1280,6 +1280,8 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 
 	reqID := m.approvalRequestID()
 	m.approvalClear()
+	m.approvalFullscreen = false
+	m.approvalDiffContent = ""
 	m.setState(api.TurnThinking)
 
 	m.mu.RLock()
@@ -1486,10 +1488,13 @@ func normalizeRect(s string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-// approvalStartRequest starts a new approval request under m.mu.
+// approvalStartRequest starts a new approval request under m.mu and clears any
+// stale fullscreen diff state from a previous request.
 func (m *Model) approvalStartRequest(calls []api.ToolCall, requestID int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.approvalFullscreen = false
+	m.approvalDiffContent = ""
 	m.approval.startRequest(calls, requestID)
 }
 
