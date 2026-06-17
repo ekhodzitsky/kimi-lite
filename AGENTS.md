@@ -72,6 +72,7 @@ OpenAI-compatible LLM client with SSE streaming.
 - `NewClient(cfg, httpClient)` — creates client
 - `Chat()` — non-streaming request
 - `ChatStream()` — returns `<-chan api.StreamChunk`
+- `SetAttachmentRoots([]string)` — restricts local file paths that may be inlined as base64 data URLs to the configured roots and a 10 MB size cap
 - Retry logic with exponential backoff (including 429 rate limits)
 - Context cancellation respected
 - Bare-client fallback when no custom httpClient is provided
@@ -80,9 +81,11 @@ OpenAI-compatible LLM client with SSE streaming.
 Business logic layer.
 
 - `SessionManager` — create, resume, list sessions; recovers interrupted tool calls by synthesizing missing tool-result messages on resume
-- `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages, emits `TurnEventStatus` messages for non-trivial tools, and streams live shell output as `TurnEventToolProgress` events via a context callback
+- `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages, emits `TurnEventStatus` messages for non-trivial tools, streams live shell output as `TurnEventToolProgress` events via a context callback, supports plan mode, and supports mid-stream steering
+  - `RunTurnWithContentParts` / `RunTurnWithPlanWithContentParts` — multimodal turn entry points that carry `api.ContentPart` attachments
   - `RunTurnWithPlan` — executes a turn in plan mode; the assistant emits a plan and waits for user approval before running any tool calls
   - `ResumeWithPlan` — resumes a plan-mode turn after the user approves or rejects the pending plan
+  - `Steer` — injects a follow-up instruction into a streaming turn
 - `BuiltInToolExecutor` — 13 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `dispatch_subagent`, `TodoList`) with sandboxed file access; `web_search` is only registered when an `api.WebSearcher` provider is injected
   - Uses `os.OpenRoot` when `SandboxRoot` is configured; falls back to `O_NOFOLLOW` (`openFileNoFollow`) when no sandbox root is set
   - Blocks protected paths and sensitive system/secret trees
@@ -101,7 +104,7 @@ Business logic layer.
 Bubble Tea terminal UI.
 
 - `Model` — root model composing child components
-- `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`); `Shift+Tab` toggles plan mode, which is shown by a `[PLAN]` indicator above the input box
+- `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`); `Shift+Tab` toggles plan mode, which is shown by a `[PLAN]` indicator above the input box; `ctrl+v`/`alt+v` pastes clipboard images or file paths as attachments, copying them to `<config-dir>/tmp`
 - `viewport` — scrollable output
 - `messages` — message rendering (Markdown via Glamour); tool-call blocks show status icons, `Using`/`Used`/`Error` verbs, and elapsed duration
 - `activity` — transient activity panel between the viewport and input; shows a spinner, pending tool names, and up to four trailing lines of live output per running tool call during `Thinking`, `Streaming`, and `ToolCalls` turns
