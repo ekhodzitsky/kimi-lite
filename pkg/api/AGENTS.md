@@ -17,6 +17,10 @@
 - `TurnManager` was extended with plan-mode and steering methods in v0.5.0.
   This is a breaking change to external implementers; it is documented in
   `CHANGELOG.md` and `docs/adr/2026-06-15-kimi-code-0.15.0-parity.md`.
+- `TurnStore` was extended with `NextTurnSeq` in v0.6.0 (unreleased) to support
+  monotonic turn sequence numbers across session resume. This is a breaking
+  change to external store implementations; it is documented in `CHANGELOG.md`
+  and `docs/adr/2026-06-17-kimi-code-0.17.0-parity-decisions.md`.
 
 ## Deprecation
 

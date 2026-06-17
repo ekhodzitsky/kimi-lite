@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `api.Turn` now carries a monotonic `Seq` number per session.
+- `api.TurnStore` gains `NextTurnSeq` so resumed sessions continue turn
+  numbering from the highest persisted sequence instead of restarting.
+
+### Changed
+
+- **Breaking:** `api.TurnStore` is an exported interface; the new
+  `NextTurnSeq` method breaks existing third-party implementations.
+- `internal/store/sqlite.go` persists and restores turn sequence numbers.
+- `internal/core/turn.go` assigns the next sequence number at the start of
+  each turn.
+
+### Not Ported
+
+- Kimi Code 0.17.0's server-hosted web UI (`kimi server`, `kimi web`),
+  OAuth token refresh error handling, debug TPS skipping, and web-login
+  fixes are intentionally out of scope for `kimi-lite`. See
+  `docs/adr/2026-06-17-kimi-code-0.17.0-parity-decisions.md`.
+
 ## [0.5.0] - 2026-06-17
 
 ### Added
