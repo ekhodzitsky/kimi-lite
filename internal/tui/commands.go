@@ -75,6 +75,16 @@ type ApprovalDiffMsg struct {
 	Diff   string
 }
 
+// PlanRequestMsg carries a generated plan for user approval.
+type PlanRequestMsg struct {
+	Plan string
+}
+
+// PlanApprovalMsg carries the user's plan approval decision.
+type PlanApprovalMsg struct {
+	Approved bool
+}
+
 // SendMessageMsg is emitted by the root model to the app layer.
 type SendMessageMsg struct {
 	Content string

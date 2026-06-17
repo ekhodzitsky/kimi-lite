@@ -132,6 +132,8 @@ func (m *Model) layout() layoutRect {
 // turnManager is the interface needed from core.TurnManager.
 type turnManager interface {
 	RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
+	RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
+	ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error
 	ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error
 }
 
@@ -196,6 +198,11 @@ type Model struct {
 	// pending approval call.
 	approvalFullscreen  bool
 	approvalDiffContent string
+
+	// planRequest holds the generated plan waiting for user approval.
+	planRequest string
+	// planPending is true when the plan approval panel is open.
+	planPending bool
 
 	// Service references (optional, wired by app layer)
 	turnManager    turnManager
@@ -384,7 +391,8 @@ func (m *Model) helpData() help.Data {
 		Shortcuts: []help.Shortcut{
 			{Keys: "enter", Description: "Send message"},
 			{Keys: "alt+enter", Description: "Insert newline"},
-			{Keys: "tab / shift+tab", Description: "Switch focus"},
+			{Keys: "tab", Description: "Switch focus"},
+			{Keys: "shift+tab", Description: "Toggle plan mode"},
 			{Keys: "ctrl+g", Description: "External editor"},
 			{Keys: "ctrl+y", Description: "Toggle yolo mode"},
 			{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
@@ -539,6 +547,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ApprovalDiffMsg:
 		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Diff preview for %s:\n%s", msg.CallID, msg.Diff), m.styles))
 		m.setState(api.TurnWaitingApproval)
+
+	case PlanRequestMsg:
+		m.planRequest = msg.Plan
+		m.planPending = true
+		m.setState(api.TurnWaitingPlan)
+
+	case PlanApprovalMsg:
+		m.planPending = false
+		m.planRequest = ""
+		m.mu.RLock()
+		tm := m.turnManager
+		var sessionID string
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+		cmds = append(cmds, func() tea.Msg {
+			if tm == nil || sessionID == "" {
+				return ErrorMsg{Err: fmt.Errorf("no turn manager")}
+			}
+			ctx, cancel := context.WithTimeout(appCtx, commandTimeout)
+			defer cancel()
+			if err := tm.ResumeWithPlan(ctx, sessionID, msg.Approved); err != nil {
+				return ErrorMsg{Err: fmt.Errorf("resume plan: %w", err)}
+			}
+			return StateChangeMsg{State: api.TurnThinking}
+		})
 
 	case SessionsMsg:
 		cmds = append(cmds, m.listSessionsCmd())
@@ -703,6 +739,10 @@ func (m *Model) View() tea.View {
 		}
 	}
 
+	if m.planPending {
+		view = m.renderPlanPanel(view)
+	}
+
 	if m.sessionPicker != nil {
 		view = overlayDialog(view, m.sessionPicker.View(), m.width, m.height)
 	}
@@ -797,6 +837,23 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 		if msg.String() == "esc" || msg.String() == "ctrl+e" {
 			m.approvalFullscreen = false
 			m.approvalDiffContent = ""
+		}
+		return cmds
+	}
+
+	// Shift+Tab toggles input plan mode when the input is focused.
+	if msg.String() == "shift+tab" && m.focused == focusInput {
+		m.input.TogglePlanMode()
+		return cmds
+	}
+
+	// Plan approval panel takes precedence while it is open.
+	if m.planPending {
+		switch msg.String() {
+		case "y":
+			return append(cmds, func() tea.Msg { return PlanApprovalMsg{Approved: true} })
+		case "n":
+			return append(cmds, func() tea.Msg { return PlanApprovalMsg{Approved: false} })
 		}
 		return cmds
 	}
@@ -961,7 +1018,7 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 	}
 
 	// Allow sending from Idle or Error state; block only during active turns.
-	if m.state == api.TurnThinking || m.state == api.TurnStreaming || m.state == api.TurnToolCalls || m.state == api.TurnWaitingApproval {
+	if m.state == api.TurnThinking || m.state == api.TurnStreaming || m.state == api.TurnToolCalls || m.state == api.TurnWaitingApproval || m.state == api.TurnWaitingPlan {
 		return nil
 	}
 
@@ -972,13 +1029,21 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 
 	// If turn manager and session are wired, execute a real LLM turn.
 	if m.turnManager != nil && m.session != nil {
+		planMode := m.input.PlanMode()
+		m.input.SetPlanMode(false)
+
 		ctx, cancel := context.WithCancel(m.appCtx)
 		m.mu.Lock()
 		m.streamCancel = cancel
 		m.streamCh = nil
 		m.streamCanceled = false
 		m.mu.Unlock()
-		streamCh, err := m.turnManager.RunTurn(ctx, m.session.ID, content)
+
+		run := m.turnManager.RunTurn
+		if planMode {
+			run = m.turnManager.RunTurnWithPlan
+		}
+		streamCh, err := run(ctx, m.session.ID, content)
 		if err != nil {
 			cancel()
 			m.mu.Lock()
@@ -1127,6 +1192,8 @@ func (m *Model) readStreamChunk() tea.Cmd {
 			return ToolProgressMsg{CallID: event.CallID, Content: event.Content}
 		case api.TurnEventApprovalDiff:
 			return ApprovalDiffMsg{CallID: event.DiffCallID, Diff: event.DiffContent}
+		case api.TurnEventPlanRequest:
+			return PlanRequestMsg{Plan: event.Content}
 		case api.TurnEventStatus:
 			return StatusMsg{Text: event.Content}
 		default:
@@ -1434,6 +1501,16 @@ func (m *Model) renderApprovalFullscreen(background string) string {
 	b.WriteString("Diff preview (Esc or Ctrl+E to close)\n\n")
 	b.WriteString(m.approvalDiffContent)
 	dialog := m.styles.ApprovalDialog.Render(b.String())
+	return overlayDialog(background, dialog, m.width, m.height)
+}
+
+// renderPlanPanel renders the plan approval overlay.
+func (m *Model) renderPlanPanel(background string) string {
+	var b strings.Builder
+	b.WriteString("Plan requires approval\n\n")
+	b.WriteString(m.planRequest)
+	fmt.Fprintf(&b, "\n\n[y] yes  [n] no")
+	dialog := m.styles.PlanPanel.Render(b.String())
 	return overlayDialog(background, dialog, m.width, m.height)
 }
 

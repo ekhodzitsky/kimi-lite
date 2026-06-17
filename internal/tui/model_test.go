@@ -490,6 +490,14 @@ func (r *recordingTurnManager) RunTurn(ctx context.Context, sessionID string, in
 	return nil, nil
 }
 
+func (r *recordingTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
+}
+
 func (r *recordingTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	r.resumeCalls = append(r.resumeCalls, struct {
 		requestID int64
@@ -1499,6 +1507,14 @@ func (f *fakeTurnManager) RunTurn(ctx context.Context, sessionID string, input s
 	return ch, nil
 }
 
+func (f *fakeTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return f.RunTurn(ctx, sessionID, input)
+}
+
+func (f *fakeTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
+}
+
 func (f *fakeTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	return nil
 }
@@ -2208,6 +2224,15 @@ func (c *capturingErrorTurnManager) RunTurn(ctx context.Context, sessionID strin
 	return nil, errors.New("run turn failed")
 }
 
+func (c *capturingErrorTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	c.capturedCtx = ctx
+	return nil, errors.New("run turn failed")
+}
+
+func (c *capturingErrorTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
+}
+
 func (c *capturingErrorTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	return nil
 }
@@ -2242,6 +2267,14 @@ type errorResumeTurnManager struct {
 
 func (e *errorResumeTurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	return nil, nil
+}
+
+func (e *errorResumeTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (e *errorResumeTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
 }
 
 func (e *errorResumeTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
@@ -2625,4 +2658,230 @@ func TestApprovalFullscreenResetsOnNewRequest(t *testing.T) {
 	if model.approvalDiffContent != "" {
 		t.Errorf("expected approvalDiffContent to be cleared, got %q", model.approvalDiffContent)
 	}
+}
+
+func TestPlanModeToggle_ShiftTabTogglesIndicator(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	if m.input.PlanMode() {
+		t.Error("plan mode should start disabled")
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	model := updated.(*Model)
+	if !model.input.PlanMode() {
+		t.Error("plan mode should be enabled after shift+tab")
+	}
+	view := model.View().Content
+	if !strings.Contains(view, "[PLAN]") {
+		t.Errorf("view should contain plan indicator, got:\n%s", view)
+	}
+
+	updated, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	model = updated.(*Model)
+	if model.input.PlanMode() {
+		t.Error("plan mode should be disabled after second shift+tab")
+	}
+}
+
+func TestPlanPanel_OpensOnPlanRequestMsg(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	plan := "1. Read file\n2. Edit file"
+	updated, _ := m.Update(PlanRequestMsg{Plan: plan})
+	model := updated.(*Model)
+
+	if !model.planPending {
+		t.Error("expected planPending to be true")
+	}
+	if model.planRequest != plan {
+		t.Errorf("planRequest = %q, want %q", model.planRequest, plan)
+	}
+	if model.state != api.TurnWaitingPlan {
+		t.Errorf("state = %d, want TurnWaitingPlan", model.state)
+	}
+
+	view := model.View().Content
+	if !strings.Contains(view, "Plan requires approval") {
+		t.Errorf("view should contain plan panel header, got:\n%s", view)
+	}
+	if !strings.Contains(view, "1. Read file") || !strings.Contains(view, "2. Edit file") {
+		t.Errorf("view should contain plan text, got:\n%s", view)
+	}
+	if !strings.Contains(view, "[y] yes") || !strings.Contains(view, "[n] no") {
+		t.Errorf("view should contain y/n choices, got:\n%s", view)
+	}
+}
+
+func TestPlanPanel_y_n_EmitsPlanApprovalMsg(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+
+	tests := []struct {
+		key      rune
+		approved bool
+	}{
+		{'y', true},
+		{'n', false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.key), func(t *testing.T) {
+			t.Parallel()
+
+			m, _ := New(cfg, session, context.Background(), "")
+			m.width = 80
+			m.height = 24
+			m.updateLayout()
+			m.Update(PlanRequestMsg{Plan: "plan"})
+
+			updated, cmd := m.Update(tea.KeyPressMsg{Code: tt.key, Text: string(tt.key)})
+			model := updated.(*Model)
+			if cmd == nil {
+				t.Fatal("expected command for plan approval key")
+			}
+			var approval PlanApprovalMsg
+			switch msg := cmd().(type) {
+			case PlanApprovalMsg:
+				approval = msg
+			case tea.BatchMsg:
+				found := false
+				for _, c := range msg {
+					if c == nil {
+						continue
+					}
+					if m, ok := c().(PlanApprovalMsg); ok {
+						approval = m
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("expected PlanApprovalMsg in batch, got %T", cmd())
+				}
+			default:
+				t.Fatalf("expected PlanApprovalMsg, got %T", msg)
+			}
+			if approval.Approved != tt.approved {
+				t.Errorf("approved = %v, want %v", approval.Approved, tt.approved)
+			}
+			updated2, _ := model.Update(approval)
+			model2 := updated2.(*Model)
+			if model2.planPending {
+				t.Error("planPending should be cleared by PlanApprovalMsg")
+			}
+		})
+	}
+}
+
+func TestSend_WithPlanMode_CallsRunTurnWithPlan(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	tm := &recordingPlanTurnManager{}
+	m.SetTurnManager(tm)
+	m.input.SetPlanMode(true)
+
+	updated, _ := m.Update(input.SendMsg{Content: "hello"})
+	model := updated.(*Model)
+
+	if model.input.PlanMode() {
+		t.Error("plan mode should be disabled after sending")
+	}
+	if !tm.runTurnWithPlanCalled {
+		t.Error("expected RunTurnWithPlan to be called")
+	}
+	if tm.runTurnWithPlanInput != "hello" {
+		t.Errorf("RunTurnWithPlan input = %q, want %q", tm.runTurnWithPlanInput, "hello")
+	}
+	if model.state != api.TurnThinking {
+		t.Errorf("state = %d, want TurnThinking", model.state)
+	}
+}
+
+func TestPlanApprovalMsg_CallsResumeWithPlan(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	tm := &recordingPlanTurnManager{}
+	m.SetTurnManager(tm)
+	m.Update(PlanRequestMsg{Plan: "plan"})
+
+	updated, cmd := m.Update(PlanApprovalMsg{Approved: true})
+	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command after PlanApprovalMsg")
+	}
+	msg := cmd()
+	stateChange, ok := msg.(StateChangeMsg)
+	if !ok {
+		t.Fatalf("expected StateChangeMsg, got %T", msg)
+	}
+	if stateChange.State != api.TurnThinking {
+		t.Errorf("state change = %d, want TurnThinking", stateChange.State)
+	}
+	if model.planPending {
+		t.Error("planPending should be false after PlanApprovalMsg")
+	}
+	if !tm.resumeWithPlanCalled || tm.resumeWithPlanApproved != true {
+		t.Errorf("expected ResumeWithPlan(true) to be called, got called=%v approved=%v", tm.resumeWithPlanCalled, tm.resumeWithPlanApproved)
+	}
+}
+
+// recordingPlanTurnManager records plan-mode turn manager calls.
+type recordingPlanTurnManager struct {
+	runTurnWithPlanCalled  bool
+	runTurnWithPlanInput   string
+	resumeWithPlanCalled   bool
+	resumeWithPlanApproved bool
+}
+
+func (r *recordingPlanTurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingPlanTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	r.runTurnWithPlanCalled = true
+	r.runTurnWithPlanInput = input
+	ch := make(chan api.TurnEvent)
+	close(ch)
+	return ch, nil
+}
+
+func (r *recordingPlanTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	r.resumeWithPlanCalled = true
+	r.resumeWithPlanApproved = approved
+	return nil
+}
+
+func (r *recordingPlanTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+	return nil
 }

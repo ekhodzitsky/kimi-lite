@@ -59,10 +59,11 @@ func TestCycleFocus_Backward(t *testing.T) {
 		t.Errorf("shift+tab from viewport = %d, want focusInput", model.focused)
 	}
 
+	// Shift+Tab from input toggles plan mode instead of cycling focus.
 	updated2, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	model2 := updated2.(*Model)
-	if model2.focused != focusViewport {
-		t.Errorf("shift+tab from input = %d, want focusViewport", model2.focused)
+	if !model2.input.PlanMode() {
+		t.Error("shift+tab from input should enable plan mode")
 	}
 }
 
@@ -840,6 +841,14 @@ type errorRunTurnManager struct {
 
 func (e *errorRunTurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	return nil, e.err
+}
+
+func (e *errorRunTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, e.err
+}
+
+func (e *errorRunTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
 }
 
 func (e *errorRunTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {

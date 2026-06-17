@@ -179,6 +179,7 @@ func (m *Model) rotatingTip() string {
 		"enter: expand tool output",
 		"r: toggle raw markdown",
 		"tab/shift+tab: switch focus",
+		"shift+tab: plan mode",
 		"ctrl+g: external editor",
 		"ctrl+y: toggle yolo mode",
 		"@: mention files",
