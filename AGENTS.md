@@ -81,6 +81,8 @@ Business logic layer.
 
 - `SessionManager` — create, resume, list sessions; recovers interrupted tool calls by synthesizing missing tool-result messages on resume
 - `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages, emits `TurnEventStatus` messages for non-trivial tools, and streams live shell output as `TurnEventToolProgress` events via a context callback
+  - `RunTurnWithPlan` — executes a turn in plan mode; the assistant emits a plan and waits for user approval before running any tool calls
+  - `ResumeWithPlan` — resumes a plan-mode turn after the user approves or rejects the pending plan
 - `BuiltInToolExecutor` — 13 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `dispatch_subagent`, `TodoList`) with sandboxed file access; `web_search` is only registered when an `api.WebSearcher` provider is injected
   - Uses `os.OpenRoot` when `SandboxRoot` is configured; falls back to `O_NOFOLLOW` (`openFileNoFollow`) when no sandbox root is set
   - Blocks protected paths and sensitive system/secret trees
@@ -99,7 +101,7 @@ Business logic layer.
 Bubble Tea terminal UI.
 
 - `Model` — root model composing child components
-- `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`)
+- `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`); `Shift+Tab` toggles plan mode, which is shown by a `[PLAN]` indicator above the input box
 - `viewport` — scrollable output
 - `messages` — message rendering (Markdown via Glamour); tool-call blocks show status icons, `Using`/`Used`/`Error` verbs, and elapsed duration
 - `activity` — transient activity panel between the viewport and input; shows a spinner, pending tool names, and up to four trailing lines of live output per running tool call during `Thinking`, `Streaming`, and `ToolCalls` turns
@@ -109,6 +111,7 @@ Bubble Tea terminal UI.
 - `input` — also provides `/`-command autocomplete triggered by typing `/`; navigate with `Tab`/`Shift+Tab` or arrow keys, accept with `Enter`, dismiss with `Esc`/`Ctrl+C`
 - `styles` — Lipgloss themes; built-in `dark` and `light` themes, plus custom JSON themes loaded from `<config-dir>/themes/<name>.json` or an absolute path via `ui.theme`
 - Approval dialog — shows pending tool calls with inline diff previews where available; numeric shortcuts `1` (yes), `2` (no), `3` (always), `4` (diff) plus configurable `y`/`n`/`a`/`d` keys; `Ctrl+E` opens a temporary fullscreen diff overlay that closes on `Esc` or `Ctrl+E`
+- Plan approval panel — appears when a plan-mode turn generates a plan; keyboard is captured by the panel, and pressing `y` approves the plan (resuming execution via `ResumeWithPlan(true)`) while `n` rejects it (`ResumeWithPlan(false)`) and cancels the turn
 - Layout: welcome panel, scrollable viewport, input box, and a two-line footer; the footer shows model info, working directory, git branch/status, token count, context size, and transient localized status messages (truncated on narrow terminals)
 
 ### `internal/mcp`
