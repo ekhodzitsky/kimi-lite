@@ -119,6 +119,7 @@ type Model struct {
 	slashCmds      []SlashCommand
 	slash          *slashState
 	ctx            context.Context
+	planMode       bool
 	mu             sync.RWMutex
 }
 
@@ -220,6 +221,12 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				m.slash = nil
 				return nil
 			}
+		}
+
+		// Shift+Tab toggles plan mode when no completion popup is active.
+		if msg.String() == "shift+tab" || (msg.Mod == tea.ModShift && msg.Code == tea.KeyTab) {
+			m.planMode = !m.planMode
+			return nil
 		}
 
 		if key.Matches(msg, km.Send) {
@@ -332,22 +339,30 @@ func (m *Model) openExternalEditorCmd() tea.Cmd {
 func (m *Model) View() tea.View {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	view := m.styles.InputBox.Render(m.textarea.View())
-	if comp := m.completionView(); comp != "" {
-		view += "\n" + comp
+	var b strings.Builder
+	if m.planMode {
+		b.WriteString(m.styles.PlanModeIndicator.Render("[PLAN] Press Shift+Tab to disable plan mode") + "\n")
 	}
-	return tea.NewView(view)
+	b.WriteString(m.styles.InputBox.Render(m.textarea.View()))
+	if comp := m.completionView(); comp != "" {
+		b.WriteString("\n" + comp)
+	}
+	return tea.NewView(b.String())
 }
 
 // Height returns the rendered height of the input component.
 func (m *Model) Height() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	view := m.styles.InputBox.Render(m.textarea.View())
-	if comp := m.completionView(); comp != "" {
-		view += "\n" + comp
+	var b strings.Builder
+	if m.planMode {
+		b.WriteString(m.styles.PlanModeIndicator.Render("[PLAN] Press Shift+Tab to disable plan mode") + "\n")
 	}
-	return lipgloss.Height(view)
+	b.WriteString(m.styles.InputBox.Render(m.textarea.View()))
+	if comp := m.completionView(); comp != "" {
+		b.WriteString("\n" + comp)
+	}
+	return lipgloss.Height(b.String())
 }
 
 // SetWidth sets the component width.
@@ -443,6 +458,27 @@ func (m *Model) CloseCompletion() {
 	defer m.mu.Unlock()
 	m.mention = nil
 	m.slash = nil
+}
+
+// TogglePlanMode toggles plan mode on/off.
+func (m *Model) TogglePlanMode() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.planMode = !m.planMode
+}
+
+// PlanMode reports whether plan mode is active.
+func (m *Model) PlanMode() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.planMode
+}
+
+// SetPlanMode sets plan mode explicitly.
+func (m *Model) SetPlanMode(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.planMode = v
 }
 
 // cursorPosition returns the absolute byte position of the cursor in the

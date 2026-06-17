@@ -722,3 +722,71 @@ func TestSlashClearsMention(t *testing.T) {
 func (m *Model) mentionActive() bool {
 	return m.mention != nil
 }
+
+func TestPlanModeToggle(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	if m.PlanMode() {
+		t.Error("plan mode should start disabled")
+	}
+
+	m.TogglePlanMode()
+	if !m.PlanMode() {
+		t.Error("plan mode should be enabled after toggle")
+	}
+
+	view := m.View()
+	if !strings.Contains(view.Content, "[PLAN]") {
+		t.Errorf("missing plan indicator: %q", view.Content)
+	}
+
+	m.SetPlanMode(false)
+	if m.PlanMode() {
+		t.Error("SetPlanMode(false) should disable plan mode")
+	}
+}
+
+func TestPlanModeShiftTab(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if cmd != nil {
+		t.Error("shift+tab should not produce a command")
+	}
+
+	inp := updated.(*Model)
+	if !inp.PlanMode() {
+		t.Error("shift+tab should enable plan mode")
+	}
+
+	updated, cmd = inp.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if cmd != nil {
+		t.Error("second shift+tab should not produce a command")
+	}
+	inp = updated.(*Model)
+	if inp.PlanMode() {
+		t.Error("second shift+tab should disable plan mode")
+	}
+}
+
+func TestPlanModeHeightAccountsForIndicator(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+
+	heightWithout := m.Height()
+	m.TogglePlanMode()
+	heightWith := m.Height()
+
+	if heightWith <= heightWithout {
+		t.Errorf("plan mode height = %d should be greater than non-plan height = %d", heightWith, heightWithout)
+	}
+}

@@ -120,6 +120,7 @@ type Styles struct {
 	HelpCommand         lipgloss.Style
 	HelpDesc            lipgloss.Style
 	ApprovalDialog      lipgloss.Style
+	PlanModeIndicator   lipgloss.Style
 	Footer              lipgloss.Style
 	FooterModel         lipgloss.Style
 	FooterCWD           lipgloss.Style
@@ -258,6 +259,13 @@ func (s *Styles) init() {
 		BorderStyle(lipgloss.DoubleBorder()).
 		BorderForeground(t.Warning).
 		Padding(1, 2)
+
+	s.PlanModeIndicator = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Primary).
+		Bold(true).
+		Padding(0, 1).
+		MarginBottom(1)
 
 	s.Footer = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Foreground)
 	s.FooterModel = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Primary).Bold(true)
