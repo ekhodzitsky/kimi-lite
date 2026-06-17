@@ -1679,10 +1679,11 @@ func (m *Model) vpWidth() int {
 }
 
 // shellQuote returns s unchanged if it contains no shell-special characters;
-// otherwise it returns a Go-quoted string suitable for pasting into a shell.
+// otherwise it returns the string wrapped in single quotes with embedded
+// single quotes escaped for POSIX shells.
 func shellQuote(s string) string {
 	if strings.ContainsAny(s, " \"'`)&|;<>{}[]*?#!$\\") {
-		return fmt.Sprintf("%q", s)
+		return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 	}
 	return s
 }

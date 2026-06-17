@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -295,6 +296,11 @@ func (p *Picker) filter() {
 }
 
 func (p *Picker) formatCard(s api.Session, width int, selected bool) string {
+	if width < 5 {
+		width = 5
+	}
+	maxContent := width - 4
+
 	var b strings.Builder
 	marker := "  "
 	if s.Path == p.path {
@@ -305,13 +311,13 @@ func (p *Picker) formatCard(s api.Session, width int, selected bool) string {
 		title = s.ID
 	}
 	top := fmt.Sprintf("%s%s • %s", marker, title, humanizeTime(s.UpdatedAt))
+	top = truncateRunes(top, maxContent)
 	b.WriteString(top + "\n")
-	fmt.Fprintf(&b, "   %s\n", s.Path)
+	pathLine := fmt.Sprintf("   %s", s.Path)
+	pathLine = truncateRunes(pathLine, maxContent)
+	b.WriteString(pathLine + "\n")
 	if s.LastPrompt != "" {
-		prompt := s.LastPrompt
-		if len(prompt) > width-4 {
-			prompt = prompt[:width-5] + "…"
-		}
+		prompt := truncateRunes(s.LastPrompt, maxContent)
 		fmt.Fprintf(&b, "   %s\n", prompt)
 	}
 	card := b.String()
@@ -319,6 +325,28 @@ func (p *Picker) formatCard(s api.Session, width int, selected bool) string {
 		return p.style.selected.Render(card)
 	}
 	return p.style.item.Render(card)
+}
+
+// truncateRunes truncates s to at most maxRunes runes, appending an ellipsis
+// when truncated. It avoids splitting multi-byte runes.
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	var b strings.Builder
+	count := 0
+	for _, r := range s {
+		if count >= maxRunes-1 {
+			b.WriteRune('…')
+			break
+		}
+		b.WriteRune(r)
+		count++
+	}
+	return b.String()
 }
 
 // humanizeTime returns a short relative timestamp such as "2m ago" or the
