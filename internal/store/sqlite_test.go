@@ -158,6 +158,34 @@ func TestSQLite_ListSessions(t *testing.T) {
 	}
 }
 
+func TestSQLite_ListSessions_LastPrompt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, err := s.CreateSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.AppendMessage(ctx, sess.ID, api.Message{ID: "m1", Role: api.RoleAssistant, Content: "hi", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("append assistant message: %v", err)
+	}
+	if err := s.AppendMessage(ctx, sess.ID, api.Message{ID: "m2", Role: api.RoleUser, Content: "last question", CreatedAt: time.Now().UTC().Add(time.Second)}); err != nil {
+		t.Fatalf("append user message: %v", err)
+	}
+
+	list, err := s.ListSessions(ctx, "/tmp/proj", 0)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(list))
+	}
+	if list[0].LastPrompt != "last question" {
+		t.Errorf("last prompt = %q, want %q", list[0].LastPrompt, "last question")
+	}
+}
+
 func TestSQLite_ListSessions_Empty(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

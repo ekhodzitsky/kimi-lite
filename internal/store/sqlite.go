@@ -27,6 +27,9 @@ import (
 // ErrSessionNotFound is returned when a session does not exist.
 var ErrSessionNotFound = errors.New("session not found")
 
+// defaultTimeout is the default context timeout for individual store queries.
+const defaultTimeout = 5 * time.Second
+
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
@@ -461,6 +464,7 @@ func (s *SQLite) ListSessions(ctx context.Context, path string, limit int) ([]ap
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
 		sess.Messages = []api.Message{}
+		sess.LastPrompt, _ = s.lastUserPrompt(ctx, sess.ID)
 		sessions = append(sessions, sess)
 	}
 	if err := rows.Err(); err != nil {
@@ -489,12 +493,48 @@ func (s *SQLite) ListAllSessions(ctx context.Context, limit int) ([]api.Session,
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
 		sess.Messages = []api.Message{}
+		sess.LastPrompt, _ = s.lastUserPrompt(ctx, sess.ID)
 		sessions = append(sessions, sess)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate sessions: %w", err)
 	}
 	return sessions, nil
+}
+
+// lastUserPrompt returns the most recent user message content for a session,
+// truncated for display. An empty string is returned when there is no user
+// message or on lookup error so that listing remains best-effort.
+func (s *SQLite) lastUserPrompt(ctx context.Context, sessionID string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+
+	row := s.db.QueryRowContext(ctx, `
+		SELECT content FROM messages
+		WHERE session_id = ? AND role = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, sessionID, api.RoleUser)
+	var content string
+	if err := row.Scan(&content); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("last user prompt: %w", err)
+	}
+	return truncatePrompt(content), nil
+}
+
+// truncatePrompt returns the first line of s trimmed to at most 120 characters.
+func truncatePrompt(s string) string {
+	const max = 120
+	s = strings.TrimSpace(s)
+	lines := strings.Split(s, "\n")
+	first := lines[0]
+	if len(first) > max {
+		return first[:max-1] + "…"
+	}
+	return first
 }
 
 // UpdateSession updates session metadata.

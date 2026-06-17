@@ -91,12 +91,13 @@ type ToolDefinition struct {
 
 // Session represents a conversation session.
 type Session struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Path      string    `json:"path"` // working directory
-	Messages  []Message `json:"messages,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Path       string    `json:"path"` // working directory
+	Messages   []Message `json:"messages,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	LastPrompt string    `json:"last_prompt,omitempty"`
 }
 
 // TurnState represents the current state of a single turn.

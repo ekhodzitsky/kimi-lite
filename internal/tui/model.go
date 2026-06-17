@@ -413,6 +413,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if selected {
 				id := m.sessionPicker.Selected().ID
 				m.sessionPicker = nil
+				m.statusText = ""
 				if id != "" {
 					cmds = append(cmds, m.resumeSessionCmd(id))
 				}
@@ -420,6 +421,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if done {
 				m.sessionPicker = nil
+				m.statusText = ""
+				return m, nil
+			}
+			if sel := m.sessionPicker.Selected(); sel.Path != "" && m.session != nil && sel.Path != m.session.Path {
+				m.statusText = fmt.Sprintf("cd %s && kimi-lite --resume %s", shellQuote(sel.Path), sel.ID)
+			} else {
+				m.statusText = ""
 			}
 			return m, nil
 		}
@@ -1668,4 +1676,13 @@ func (m *Model) contentWidth() int {
 
 func (m *Model) vpWidth() int {
 	return m.layout().vpWidth
+}
+
+// shellQuote returns s unchanged if it contains no shell-special characters;
+// otherwise it returns a Go-quoted string suitable for pasting into a shell.
+func shellQuote(s string) string {
+	if strings.ContainsAny(s, " \"'`)&|;<>{}[]*?#!$\\") {
+		return fmt.Sprintf("%q", s)
+	}
+	return s
 }

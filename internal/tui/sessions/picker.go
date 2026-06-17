@@ -4,6 +4,7 @@ package sessions
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -199,8 +200,8 @@ func (p *Picker) View() string {
 		start, end := p.visibleRange()
 		for i := start; i < end && i < len(p.filtered); i++ {
 			s := p.filtered[i]
-			line := p.formatItem(s, innerW, i == p.cursor)
-			b.WriteString(line + "\n")
+			card := p.formatCard(s, innerW, i == p.cursor)
+			b.WriteString(card + "\n")
 		}
 	}
 
@@ -259,12 +260,12 @@ func (p *Picker) visibleRange() (int, int) {
 }
 
 func (p *Picker) computePageSize() int {
-	// Reserve header + footer + borders.
+	// Reserve header + footer + borders; each card can span up to 4 lines.
 	available := p.height - 8
-	if available < 3 {
-		available = 3
+	if available < 4 {
+		available = 4
 	}
-	return available
+	return available / 4
 }
 
 func (p *Picker) filter() {
@@ -293,17 +294,46 @@ func (p *Picker) filter() {
 	}
 }
 
-func (p *Picker) formatItem(s api.Session, width int, selected bool) string {
-	label := s.ID
-	if s.Name != "" {
-		label = fmt.Sprintf("%s (%s)", s.Name, s.ID)
+func (p *Picker) formatCard(s api.Session, width int, selected bool) string {
+	var b strings.Builder
+	marker := "  "
+	if s.Path == p.path {
+		marker = "← "
 	}
-	line := fmt.Sprintf("%s — %s — %s", label, s.Path, s.UpdatedAt.Format("2006-01-02 15:04"))
-	if len(line) > width {
-		line = line[:width]
+	title := s.Name
+	if title == "" {
+		title = s.ID
 	}
+	top := fmt.Sprintf("%s%s • %s", marker, title, humanizeTime(s.UpdatedAt))
+	b.WriteString(top + "\n")
+	fmt.Fprintf(&b, "   %s\n", s.Path)
+	if s.LastPrompt != "" {
+		prompt := s.LastPrompt
+		if len(prompt) > width-4 {
+			prompt = prompt[:width-5] + "…"
+		}
+		fmt.Fprintf(&b, "   %s\n", prompt)
+	}
+	card := b.String()
 	if selected {
-		return p.style.selected.Render("> " + line)
+		return p.style.selected.Render(card)
 	}
-	return p.style.item.Render("  " + line)
+	return p.style.item.Render(card)
+}
+
+// humanizeTime returns a short relative timestamp such as "2m ago" or the
+// absolute date for older timestamps.
+func humanizeTime(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+	return t.Format("2006-01-02")
 }
