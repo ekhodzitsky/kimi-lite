@@ -66,6 +66,28 @@ skills = ["go", "python"]
 theme = "dark"
 ```
 
+### Kimi K2.7 Code or Kimi Code subscription
+
+For the latest **Kimi K2.7 Code** via the Moonshot API, use the open-platform endpoint:
+
+```toml
+[llm]
+provider = "moonshot"
+api_key = "YOUR_MOONSHOT_API_KEY"
+model = "kimi-k2.7-code"
+base_url = "https://api.moonshot.ai/v1"
+```
+
+If you have a **Kimi Code subscription**, point at the membership endpoint with the stable `kimi-for-coding` model ID (the backend routes it to the latest coding model):
+
+```toml
+[llm]
+provider = "moonshot"
+api_key = "YOUR_KIMI_CODE_API_KEY"
+model = "kimi-for-coding"
+base_url = "https://api.kimi.com/coding/v1"
+```
+
 Drop skill files into `~/.config/kimi-lite/skills/` (e.g. `go.md`, `python.md`); their contents are appended to the system prompt.
 
 Custom themes are JSON files placed in `~/.config/kimi-lite/themes/`; set `ui.theme` to the file name (without `.json`) to use them. A theme defines colors such as `background`, `foreground`, `primary`, `success`, `error`, and `highlight`.

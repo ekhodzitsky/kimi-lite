@@ -17,6 +17,8 @@ type modelConfig struct {
 // registry is the global model registry mapping model names to configurations.
 var registry = map[string]modelConfig{
 	// Moonshot models
+	"kimi-k2.7-code":   {provider: "moonshot", maxTokens: 32768, contextWindow: 256000},
+	"kimi-for-coding":  {provider: "kimi", maxTokens: 32768, contextWindow: 256000},
 	"kimi-k2.5":        {provider: "moonshot", maxTokens: 8192, contextWindow: 256000},
 	"kimi-k2":          {provider: "moonshot", maxTokens: 8192, contextWindow: 256000},
 	"kimi-k1.5":        {provider: "moonshot", maxTokens: 8192, contextWindow: 256000},

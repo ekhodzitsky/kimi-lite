@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Registered `kimi-k2.7-code` and `kimi-for-coding` in the LLM model registry
+  with a 256K context window.
+
+### Changed
+
+- `README.md` now documents how to configure Kimi K2.7 Code and the Kimi Code
+  subscription endpoint (`https://api.kimi.com/coding/v1`).
+
 ## [0.6.0] - 2026-06-17
 
 ### Added
