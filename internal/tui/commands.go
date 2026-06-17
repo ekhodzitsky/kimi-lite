@@ -140,6 +140,11 @@ type FooterGitMsg struct {
 // ShowHelpMsg opens the help overlay.
 type ShowHelpMsg struct{}
 
+// ApprovalFullscreenMsg toggles the fullscreen diff preview.
+type ApprovalFullscreenMsg struct {
+	Diff string
+}
+
 // footerGitRefreshMsg triggers an asynchronous git status refresh.
 type footerGitRefreshMsg struct{}
 

@@ -188,6 +188,11 @@ type Model struct {
 	helpPanel *help.Model
 	showHelp  bool
 
+	// approvalFullscreen shows a temporary fullscreen diff preview for the
+	// pending approval call.
+	approvalFullscreen  bool
+	approvalDiffContent string
+
 	// Service references (optional, wired by app layer)
 	turnManager    turnManager
 	sessionManager sessionManager
@@ -662,7 +667,11 @@ func (m *Model) View() tea.View {
 	view := mainContent.String()
 
 	if m.state == api.TurnWaitingApproval && m.approvalIsActive() {
-		view = m.renderApprovalDialog(view)
+		if m.approvalFullscreen {
+			view = m.renderApprovalFullscreen(view)
+		} else {
+			view = m.renderApprovalDialog(view)
+		}
 	}
 
 	if m.sessionPicker != nil {
@@ -754,9 +763,38 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 		return cmds
 	}
 
-	// Approval dialog takes precedence when waiting for approval
+	// Fullscreen diff preview closes on Esc or Ctrl+E.
+	if m.approvalFullscreen {
+		if msg.String() == "esc" || msg.String() == "ctrl+e" {
+			m.approvalFullscreen = false
+			m.approvalDiffContent = ""
+		}
+		return cmds
+	}
+
+	// Approval dialog takes precedence when waiting for approval.
 	if m.state == api.TurnWaitingApproval {
 		switch msg.String() {
+		case "1":
+			if resp, ok := m.approvalApproveCurrent(api.ApprovalYes); ok {
+				cmds = append(cmds, func() tea.Msg { return resp })
+			}
+			return cmds
+		case "2":
+			if resp, ok := m.approvalApproveCurrent(api.ApprovalNo); ok {
+				cmds = append(cmds, func() tea.Msg { return resp })
+			}
+			return cmds
+		case "3":
+			if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
+				cmds = append(cmds, func() tea.Msg { return resp })
+			}
+			return cmds
+		case "4", m.config.Keybindings.ApproveDiff:
+			if resp, ok := m.approvalApproveCurrent(api.ApprovalDiff); ok {
+				cmds = append(cmds, func() tea.Msg { return resp })
+			}
+			return cmds
 		case m.config.Keybindings.ApproveYes:
 			if resp, ok := m.approvalApproveCurrent(api.ApprovalYes); ok {
 				cmds = append(cmds, func() tea.Msg { return resp })
@@ -772,9 +810,19 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 				cmds = append(cmds, func() tea.Msg { return resp })
 			}
 			return cmds
-		case m.config.Keybindings.ApproveDiff:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalDiff); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
+		case "ctrl+e":
+			m.mu.RLock()
+			call, ok := m.approval.currentCall()
+			session := m.session
+			protectedPaths := append([]string(nil), m.protectedPaths...)
+			m.mu.RUnlock()
+			if !ok || session == nil {
+				return cmds
+			}
+			diff, err := toolCallDiff(call, session.Path, protectedPaths)
+			if err == nil && diff != "" {
+				m.approvalFullscreen = true
+				m.approvalDiffContent = diff
 			}
 			return cmds
 		}
@@ -1340,8 +1388,18 @@ func (m *Model) renderApprovalDialog(background string) string {
 	default:
 		fmt.Fprintf(&b, "Arguments: %s\n(diff preview unavailable)\n", call.Arguments)
 	}
-	fmt.Fprintf(&b, "\n[%s] yes  [%s] no  [%s] always  [%s] diff", m.config.Keybindings.ApproveYes, m.config.Keybindings.ApproveNo, m.config.Keybindings.ApproveAlways, m.config.Keybindings.ApproveDiff)
+	fmt.Fprintf(&b, "\n 1. yes  2. no  3. always  4. diff")
+	fmt.Fprintf(&b, "\nkeys: 1/2/3/4 | y/n/a/d | ctrl+e fullscreen")
 
+	dialog := m.styles.ApprovalDialog.Render(b.String())
+	return overlayDialog(background, dialog, m.width, m.height)
+}
+
+// renderApprovalFullscreen renders a fullscreen diff preview overlay.
+func (m *Model) renderApprovalFullscreen(background string) string {
+	var b strings.Builder
+	b.WriteString("Diff preview (Esc or Ctrl+E to close)\n\n")
+	b.WriteString(m.approvalDiffContent)
 	dialog := m.styles.ApprovalDialog.Render(b.String())
 	return overlayDialog(background, dialog, m.width, m.height)
 }

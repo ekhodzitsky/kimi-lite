@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -2479,5 +2481,108 @@ func TestHelpOverlay_ScrollKeys(t *testing.T) {
 	m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	if m.helpPanel.Offset() != 0 {
 		t.Errorf("help overlay should clamp to top after pgup, got offset %d", m.helpPanel.Offset())
+	}
+}
+
+func TestApprovalNumericKeys(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		key      rune
+		decision api.ApprovalDecision
+	}{
+		{'1', api.ApprovalYes},
+		{'2', api.ApprovalNo},
+		{'3', api.ApprovalAlways},
+		{'4', api.ApprovalDiff},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.key), func(t *testing.T) {
+			t.Parallel()
+
+			cfg := config.DefaultConfig()
+			session := &api.Session{ID: "test", Path: "/tmp"}
+			m, _ := New(cfg, session, context.Background())
+			m.width = 120
+			m.height = 40
+			m.updateLayout()
+
+			calls := []api.ToolCall{{ID: "1", Name: "edit_file", Arguments: `{}`}}
+			m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+
+			resp, ok := findApprovalResponse(tea.Batch(m.handleKeyMsg(tea.KeyPressMsg{Code: tt.key, Text: string(tt.key)})...))
+			if !ok {
+				t.Fatal("expected ApprovalResponseMsg for numeric approval key")
+			}
+			if resp.Decision != tt.decision {
+				t.Errorf("decision = %v, want %v", resp.Decision, tt.decision)
+			}
+			if resp.CallID != "1" {
+				t.Errorf("callID = %q, want %q", resp.CallID, "1")
+			}
+		})
+	}
+}
+
+func TestApprovalFullscreenDiff(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "file.txt")
+	if err := os.WriteFile(path, []byte("old content\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: tmp}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	calls := []api.ToolCall{{
+		ID:        "1",
+		Name:      "write_file",
+		Arguments: `{"path":"file.txt","content":"new content\n"}`,
+	}}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model := updated.(*Model)
+
+	if !model.approvalFullscreen {
+		t.Fatal("expected fullscreen diff to open")
+	}
+	if !strings.Contains(model.approvalDiffContent, "new content") {
+		t.Errorf("fullscreen diff should contain new content, got %q", model.approvalDiffContent)
+	}
+
+	view := model.View().Content
+	if !strings.Contains(view, "Diff preview") {
+		t.Errorf("view should show fullscreen diff header, got %q", view)
+	}
+
+	// Close on Esc.
+	updated, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Error("expected fullscreen diff to close on Esc")
+	}
+	if model.approvalDiffContent != "" {
+		t.Error("expected diff content to be cleared after close")
+	}
+
+	// Reopen and close on Ctrl+E.
+	updated, _ = model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model = updated.(*Model)
+	if !model.approvalFullscreen {
+		t.Fatal("expected fullscreen diff to reopen")
+	}
+
+	updated, _ = model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Error("expected fullscreen diff to close on Ctrl+E")
 	}
 }
