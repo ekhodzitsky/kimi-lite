@@ -727,8 +727,24 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 // executeToolCall runs a single tool call and recovers from panics, converting
 // them into a ToolResult with an error message so one bad tool cannot crash the
 // whole turn. For non-trivial tools, it emits a transient status event in the
-// user's language before execution.
+// user's language before execution. When an event channel is provided, shell
+// output is streamed as TurnEventToolProgress events via a context callback.
 func (tm *TurnManager) executeToolCall(ctx context.Context, call api.ToolCall, eventCh chan api.TurnEvent) (result api.ToolResult, err error) {
+	progressCtx := ctx
+	if eventCh != nil {
+		cb := func(callID, chunk string) {
+			select {
+			case eventCh <- api.TurnEvent{Type: api.TurnEventToolProgress, CallID: callID, Content: chunk}:
+			case <-ctx.Done():
+			}
+		}
+		progressCtx = WithToolProgress(ctx, cb)
+	}
+	return tm.executeToolCallWithCtx(progressCtx, call, eventCh)
+}
+
+// executeToolCallWithCtx is the inner implementation of executeToolCall.
+func (tm *TurnManager) executeToolCallWithCtx(ctx context.Context, call api.ToolCall, eventCh chan api.TurnEvent) (result api.ToolResult, err error) {
 	if IsStatusWorthyTool(call.Name) && eventCh != nil {
 		tm.mu.RLock()
 		input := ""

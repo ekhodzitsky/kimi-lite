@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -541,6 +542,37 @@ func TestBuiltInToolExecutor_Execute_Shell(t *testing.T) {
 	}
 	if strings.TrimSpace(result.Output) != "hello" {
 		t.Errorf("output = %q, want %q", strings.TrimSpace(result.Output), "hello")
+	}
+}
+
+func TestShellProgressCallback(t *testing.T) {
+	t.Parallel()
+	e, err := NewBuiltInToolExecutor(ToolExecutorConfig{ShellTimeout: 5 * time.Second, SandboxRoot: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	var mu sync.Mutex
+	var progress []string
+	cb := func(callID, chunk string) {
+		mu.Lock()
+		defer mu.Unlock()
+		progress = append(progress, chunk)
+	}
+	ctx := WithToolProgress(context.Background(), cb)
+	res, err := e.Execute(ctx, api.ToolCall{ID: "t1", Name: "shell", Arguments: `{"command": "echo hello && echo world"}`})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("unexpected error: %s", res.Error)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	combined := strings.Join(progress, "")
+	if !strings.Contains(combined, "hello") || !strings.Contains(combined, "world") {
+		t.Errorf("progress missing expected output: %q", combined)
 	}
 }
 

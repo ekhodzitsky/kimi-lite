@@ -266,12 +266,19 @@ const (
 	TurnEventApprovalDiff
 	// TurnEventStatus carries a transient status message for the TUI.
 	TurnEventStatus
+	// TurnEventToolProgress carries a live output chunk from a running tool call.
+	TurnEventToolProgress
 )
+
+// ToolProgressCallback is called with output chunks from a running tool.
+// Implementations must be safe to call from multiple goroutines.
+type ToolProgressCallback func(callID, chunk string)
 
 // TurnEvent is emitted by TurnManager.RunTurn to report streaming progress.
 type TurnEvent struct {
 	Type        TurnEventType
 	Content     string
+	CallID      string // only used for TurnEventToolProgress
 	Error       error
 	ToolCalls   []ToolCall
 	RequestID   int64      // only used for TurnEventApprovalRequest
