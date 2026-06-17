@@ -76,6 +76,7 @@ func NewLoader() *Loader {
 	v.SetDefault("keybindings.approve_always", defaults.Keybindings.ApproveAlways)
 	v.SetDefault("keybindings.approve_diff", defaults.Keybindings.ApproveDiff)
 	v.SetDefault("keybindings.external_editor", defaults.Keybindings.ExternalEditor)
+	v.SetDefault("keybindings.steer", defaults.Keybindings.Steer)
 	v.SetDefault("permission.rules", []api.PermissionRule{})
 	v.SetDefault("permission.risk_threshold", defaults.Permission.RiskThreshold)
 	v.SetDefault("permission.risk_rules", []api.RiskRule{})
@@ -434,6 +435,7 @@ approve_no = "n"
 approve_always = "a"
 approve_diff = "d"
 external_editor = "ctrl+g"
+steer = "ctrl+s"
 `
 	tmp, err := os.CreateTemp(dir, "config.toml.tmp-*")
 	if err != nil {

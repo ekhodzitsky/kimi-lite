@@ -121,6 +121,7 @@ type Styles struct {
 	HelpDesc            lipgloss.Style
 	ApprovalDialog      lipgloss.Style
 	PlanPanel           lipgloss.Style
+	SteerOverlay        lipgloss.Style
 	PlanModeIndicator   lipgloss.Style
 	Footer              lipgloss.Style
 	FooterModel         lipgloss.Style
@@ -266,6 +267,13 @@ func (s *Styles) init() {
 		Foreground(t.Foreground).
 		BorderStyle(lipgloss.DoubleBorder()).
 		BorderForeground(t.Primary).
+		Padding(1, 2)
+
+	s.SteerOverlay = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Foreground).
+		BorderStyle(lipgloss.DoubleBorder()).
+		BorderForeground(t.Secondary).
 		Padding(1, 2)
 
 	s.PlanModeIndicator = lipgloss.NewStyle().

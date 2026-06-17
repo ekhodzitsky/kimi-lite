@@ -90,6 +90,19 @@ type SendMessageMsg struct {
 	Content string
 }
 
+// SteerMsg is emitted when the user submits a steering instruction.
+type SteerMsg struct {
+	Content string
+}
+
+// ShowSteerInputMsg opens the steering input overlay.
+type ShowSteerInputMsg struct{}
+
+// SteeredMsg is emitted when the turn manager reports a mid-stream steer.
+type SteeredMsg struct {
+	Content string
+}
+
 // CompactMsg signals the app to compact the session.
 type CompactMsg struct{}
 

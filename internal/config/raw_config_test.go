@@ -84,6 +84,7 @@ approve_yes = "y"
 approve_no = "n"
 approve_always = "a"
 approve_diff = "d"
+steer = "ctrl+s"
 `
 	t.Setenv("MCP_SECRET", "mcp-secret-value")
 	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {

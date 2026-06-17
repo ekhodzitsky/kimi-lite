@@ -230,6 +230,8 @@ type TurnManager interface {
 	ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error
 	// ResumeWithApproval resumes a turn waiting for tool-call approval.
 	ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, decisions map[string]ApprovalDecision) error
+	// Steer sends a mid-stream follow-up instruction to the active turn.
+	Steer(ctx context.Context, sessionID string, input string) error
 	// PendingApprovals returns the current pending tool calls and request ID.
 	PendingApprovals() ([]ToolCall, int64)
 	// Wait blocks until all in-flight turns complete.
@@ -297,6 +299,8 @@ const (
 	TurnEventToolProgress
 	// TurnEventPlanRequest carries a generated plan that requires user approval.
 	TurnEventPlanRequest
+	// TurnEventSteered signals that the user steered the response mid-stream.
+	TurnEventSteered
 )
 
 // ToolProgressCallback is called with output chunks from a running tool.
@@ -792,4 +796,5 @@ type KeybindingConfig struct {
 	ApproveAlways  string `mapstructure:"approve_always"`
 	ApproveDiff    string `mapstructure:"approve_diff"`
 	ExternalEditor string `mapstructure:"external_editor"`
+	Steer          string `mapstructure:"steer"`
 }

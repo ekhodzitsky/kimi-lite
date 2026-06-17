@@ -854,3 +854,7 @@ func (e *errorRunTurnManager) ResumeWithPlan(ctx context.Context, sessionID stri
 func (e *errorRunTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	return nil
 }
+
+func (e *errorRunTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
+}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -135,6 +136,7 @@ type turnManager interface {
 	RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
 	ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error
 	ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error
+	Steer(ctx context.Context, sessionID string, input string) error
 }
 
 // sessionManager is the interface needed from core.SessionManager.
@@ -203,6 +205,14 @@ type Model struct {
 	planRequest string
 	// planPending is true when the plan approval panel is open.
 	planPending bool
+
+	// steerOpen is true when the steering input overlay is visible.
+	steerOpen bool
+	// steerInput holds the draft steering instruction.
+	steerInput string
+	// steeredPending is true when a steer event was received and the next
+	// streamed assistant message must start a new block.
+	steeredPending bool
 
 	// Service references (optional, wired by app layer)
 	turnManager    turnManager
@@ -395,6 +405,7 @@ func (m *Model) helpData() help.Data {
 			{Keys: "shift+tab", Description: "Toggle plan mode"},
 			{Keys: "ctrl+g", Description: "External editor"},
 			{Keys: "ctrl+y", Description: "Toggle yolo mode"},
+			{Keys: "ctrl+s", Description: "Steer response while streaming"},
 			{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
 			{Keys: "enter", Description: "Expand/collapse tool call"},
 		},
@@ -557,6 +568,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.planRequest = msg.Plan
 		m.planPending = true
 		m.setState(api.TurnWaitingPlan)
+
+	case ShowSteerInputMsg:
+		m.steerOpen = true
+
+	case SteerMsg:
+		cmds = append(cmds, m.handleSteer(msg.Content)...)
+
+	case SteeredMsg:
+		if lastMsg := m.lastAssistantMessage(); lastMsg != nil {
+			lastMsg.SetStreaming(false)
+		}
+		m.addMessage(msgcomp.NewUserMessage(msg.Content, m.styles))
+		m.steeredPending = true
+		m.rebuildRenderedContent()
 
 	case PlanApprovalMsg:
 		m.planPending = false
@@ -748,6 +773,10 @@ func (m *Model) View() tea.View {
 		view = m.renderPlanPanel(view)
 	}
 
+	if m.steerOpen {
+		view = m.renderSteerOverlay(view)
+	}
+
 	if m.sessionPicker != nil {
 		view = overlayDialog(view, m.sessionPicker.View(), m.width, m.height)
 	}
@@ -844,6 +873,11 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 			m.approvalDiffContent = ""
 		}
 		return cmds
+	}
+
+	// Steering overlay takes precedence while it is open.
+	if m.steerOpen {
+		return m.handleSteerKeyMsg(msg)
 	}
 
 	// Shift+Tab toggles input plan mode when the input is focused.
@@ -966,7 +1000,63 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 		}
 	}
 
+	if steerKey(msg, m.config.Keybindings.Steer) {
+		if m.state == api.TurnStreaming || m.state == api.TurnThinking {
+			m.steerOpen = true
+		}
+	}
+
 	return cmds
+}
+
+// steerKey reports whether msg is the configured steering key. An empty config
+// value defaults to ctrl+s for backward compatibility.
+func steerKey(msg tea.KeyPressMsg, configured string) bool {
+	key := configured
+	if key == "" {
+		key = "ctrl+s"
+	}
+	return msg.String() == key
+}
+
+func (m *Model) handleSteerKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.steerOpen = false
+		m.steerInput = ""
+		return nil
+	case "enter":
+		content := strings.TrimSpace(m.steerInput)
+		if content == "" {
+			return nil
+		}
+		m.steerOpen = false
+		m.steerInput = ""
+		return []tea.Cmd{func() tea.Msg { return SteerMsg{Content: content} }}
+	case "backspace", "ctrl+h":
+		if m.steerInput != "" {
+			runes := []rune(m.steerInput)
+			m.steerInput = string(runes[:len(runes)-1])
+		}
+		return nil
+	}
+
+	if text := appendableKeyText(msg); text != "" {
+		m.steerInput += text
+	}
+	return nil
+}
+
+func appendableKeyText(msg tea.KeyPressMsg) string {
+	if msg.Text == "" {
+		return ""
+	}
+	for _, r := range msg.Text {
+		if unicode.IsControl(r) {
+			return ""
+		}
+	}
+	return msg.Text
 }
 
 func (m *Model) cycleFocus(delta int) tea.Cmd {
@@ -1199,6 +1289,8 @@ func (m *Model) readStreamChunk() tea.Cmd {
 			return ApprovalDiffMsg{CallID: event.DiffCallID, Diff: event.DiffContent}
 		case api.TurnEventPlanRequest:
 			return PlanRequestMsg{Plan: event.Content}
+		case api.TurnEventSteered:
+			return SteeredMsg{Content: event.Content}
 		case api.TurnEventStatus:
 			return StatusMsg{Text: event.Content}
 		default:
@@ -1269,9 +1361,14 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 		m.setState(api.TurnStreaming)
 	}
 
-	// Find or create the last assistant message
+	// Find or create the last assistant message. After a steer event the prior
+	// assistant message is finalized and a new one is started.
 	lastMsg := m.lastAssistantMessage()
-	if lastMsg == nil {
+	if lastMsg == nil || m.steeredPending {
+		if lastMsg != nil {
+			lastMsg.SetStreaming(false)
+		}
+		m.steeredPending = false
 		lastMsg = msgcomp.NewAssistantMessage("", m.styles)
 		lastMsg.SetStreaming(true)
 		m.mu.Lock()
@@ -1411,6 +1508,33 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	return cmds
 }
 
+func (m *Model) handleSteer(content string) []tea.Cmd {
+	cmds := make([]tea.Cmd, 0, 1)
+
+	m.mu.RLock()
+	tm := m.turnManager
+	var sessionID string
+	if m.session != nil {
+		sessionID = m.session.ID
+	}
+	appCtx := m.appCtx
+	m.mu.RUnlock()
+
+	timeout := commandTimeout
+	cmds = append(cmds, func() tea.Msg {
+		if tm == nil || sessionID == "" {
+			return ErrorMsg{Err: fmt.Errorf("no turn manager")}
+		}
+		ctx, cancel := context.WithTimeout(appCtx, timeout)
+		defer cancel()
+		if err := tm.Steer(ctx, sessionID, content); err != nil {
+			return ErrorMsg{Err: fmt.Errorf("steer: %w", err)}
+		}
+		return StateChangeMsg{State: api.TurnThinking}
+	})
+	return cmds
+}
+
 func (m *Model) addMessage(msg *msgcomp.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1520,6 +1644,23 @@ func (m *Model) renderPlanPanel(background string) string {
 	b.WriteString(wordWrap(m.planRequest, innerW))
 	b.WriteString("\n\n[y] yes  [n] no")
 	dialog := m.styles.PlanPanel.Render(b.String())
+	return overlayDialog(background, dialog, m.width, m.height)
+}
+
+func (m *Model) renderSteerOverlay(background string) string {
+	var b strings.Builder
+	b.WriteString("Steer the response\n\n")
+	innerW := m.width - 8
+	if innerW < minContentWidth {
+		innerW = minContentWidth
+	}
+	if m.steerInput == "" {
+		b.WriteString(wordWrap("(type a follow-up instruction)", innerW))
+	} else {
+		b.WriteString(wordWrap(m.steerInput, innerW))
+	}
+	b.WriteString("\n\n[Enter] send  [Esc] cancel")
+	dialog := m.styles.SteerOverlay.Render(b.String())
 	return overlayDialog(background, dialog, m.width, m.height)
 }
 

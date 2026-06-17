@@ -506,6 +506,10 @@ func (r *recordingTurnManager) ResumeWithApproval(ctx context.Context, sessionID
 	return nil
 }
 
+func (r *recordingTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
+}
+
 func TestApprovalResponse_DiffForwardsToTurnManager(t *testing.T) {
 	t.Parallel()
 
@@ -1519,6 +1523,10 @@ func (f *fakeTurnManager) ResumeWithApproval(ctx context.Context, sessionID stri
 	return nil
 }
 
+func (f *fakeTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
+}
+
 // configured list of sessions for testing the sessions picker.
 type fakeSessionManagerWithSessions struct {
 	sessions []api.Session
@@ -2237,6 +2245,10 @@ func (c *capturingErrorTurnManager) ResumeWithApproval(ctx context.Context, sess
 	return nil
 }
 
+func (c *capturingErrorTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
+}
+
 func TestRunTurnError_CancelsContext(t *testing.T) {
 	t.Parallel()
 
@@ -2279,6 +2291,10 @@ func (e *errorResumeTurnManager) ResumeWithPlan(ctx context.Context, sessionID s
 
 func (e *errorResumeTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	return e.resumeErr
+}
+
+func (e *errorResumeTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
 }
 
 func TestApprovalResponse_ResumeWithApprovalErrorReturnsErrorMsg(t *testing.T) {
@@ -2883,5 +2899,9 @@ func (r *recordingPlanTurnManager) ResumeWithPlan(ctx context.Context, sessionID
 }
 
 func (r *recordingPlanTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+	return nil
+}
+
+func (r *recordingPlanTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
 	return nil
 }
