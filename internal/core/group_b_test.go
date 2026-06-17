@@ -373,7 +373,7 @@ func TestTurnManager_StartTurn_CountTurnsError(t *testing.T) {
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 	tm := newTestTurnManager(t, nil, nil, nil, store, cfg)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", false)
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for CountTurns failure")
 	}
@@ -398,7 +398,7 @@ func TestTurnManager_StartTurn_SaveTurnError(t *testing.T) {
 
 	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", false)
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for SaveTurn failure")
 	}
@@ -415,7 +415,7 @@ func TestTurnManager_StartTurn_AppendMessageError(t *testing.T) {
 
 	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", false)
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for AppendMessage failure")
 	}
@@ -432,7 +432,7 @@ func TestTurnManager_StartTurn_GetMessagesError(t *testing.T) {
 
 	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", false)
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for GetMessages failure")
 	}
@@ -462,7 +462,7 @@ func TestTurnManager_StartTurn_ChatStreamError(t *testing.T) {
 	}
 	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", false)
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for ChatStream failure")
 	}

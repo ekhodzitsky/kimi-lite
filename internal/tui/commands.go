@@ -87,7 +87,8 @@ type PlanApprovalMsg struct {
 
 // SendMessageMsg is emitted by the root model to the app layer.
 type SendMessageMsg struct {
-	Content string
+	Content      string
+	ContentParts []api.ContentPart
 }
 
 // CompactMsg signals the app to compact the session.

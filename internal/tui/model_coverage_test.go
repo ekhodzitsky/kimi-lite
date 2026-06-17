@@ -843,8 +843,16 @@ func (e *errorRunTurnManager) RunTurn(ctx context.Context, sessionID string, inp
 	return nil, e.err
 }
 
+func (e *errorRunTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return e.RunTurn(ctx, sessionID, input)
+}
+
 func (e *errorRunTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	return nil, e.err
+}
+
+func (e *errorRunTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return e.RunTurnWithPlan(ctx, sessionID, input)
 }
 
 func (e *errorRunTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {

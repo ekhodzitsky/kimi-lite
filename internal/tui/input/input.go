@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/clipboard"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
@@ -22,7 +23,13 @@ const inputWidthPadding = 4
 
 // SendMsg is emitted when the user wants to send the current input.
 type SendMsg struct {
-	Content string
+	Content      string
+	ContentParts []api.ContentPart
+}
+
+// PasteMsg is emitted when a paste operation completed and produced attachments.
+type PasteMsg struct {
+	Parts []api.ContentPart
 }
 
 // KeyMap defines keybindings for the input component.
@@ -30,6 +37,7 @@ type KeyMap struct {
 	Send           key.Binding
 	Newline        key.Binding
 	ExternalEditor key.Binding
+	Paste          key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings.
@@ -47,6 +55,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+g"),
 			key.WithHelp("ctrl+g", "external editor"),
 		),
+		Paste: key.NewBinding(
+			key.WithKeys("ctrl+v", "alt+v"),
+			key.WithHelp("ctrl+v/alt+v", "paste image or file"),
+		),
 	}
 }
 
@@ -61,6 +73,9 @@ func ConfigurableKeyMap(cfg api.KeybindingConfig) KeyMap {
 	}
 	if cfg.ExternalEditor != "" {
 		km.ExternalEditor = key.NewBinding(key.WithKeys(cfg.ExternalEditor), key.WithHelp(cfg.ExternalEditor, "external editor"))
+	}
+	if cfg.Paste != "" {
+		km.Paste = key.NewBinding(key.WithKeys(cfg.Paste), key.WithHelp(cfg.Paste, "paste image or file"))
 	}
 	return km
 }
@@ -102,6 +117,12 @@ type slashState struct {
 	selected   int            // index of the selected candidate
 }
 
+// Attachment holds a pasted file attachment.
+type Attachment struct {
+	Path     string
+	MIMEType string
+}
+
 // Model is the input component model.
 type Model struct {
 	textarea       textarea.Model
@@ -113,6 +134,7 @@ type Model struct {
 	width          int
 	maxHistory     int
 	editor         string // configured editor; env vars used as fallback
+	configDir      string // directory for temporary pasted files
 	fileCandidates []string
 	candidateFn    func() []string
 	mention        *mentionState
@@ -120,6 +142,7 @@ type Model struct {
 	slash          *slashState
 	ctx            context.Context
 	planMode       bool
+	attachments    []Attachment
 	mu             sync.RWMutex
 }
 
@@ -229,6 +252,10 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 
+		if key.Matches(msg, km.Paste) {
+			return m.pasteCmd()
+		}
+
 		if key.Matches(msg, km.Send) {
 			content := strings.TrimSpace(m.textarea.Value())
 			if content != "" {
@@ -242,11 +269,13 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				}
 				m.histIdx = -1
 				m.draft = ""
+				parts := m.attachmentContentParts()
 				m.textarea.Reset()
 				m.mention = nil
 				m.slash = nil
+				m.attachments = nil
 				return func() tea.Msg {
-					return SendMsg{Content: content}
+					return SendMsg{Content: content, ContentParts: parts}
 				}
 			}
 			return nil
@@ -304,6 +333,14 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		m.detectSlash()
 		return tea.Batch(cmds...)
 
+	case PasteMsg:
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, part := range msg.Parts {
+			m.addContentPart(part)
+		}
+		return tea.Batch(cmds...)
+
 	case editorFinishedMsg:
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -344,6 +381,9 @@ func (m *Model) View() tea.View {
 		b.WriteString(m.styles.PlanModeIndicator.Render("[PLAN] Press Shift+Tab to disable plan mode") + "\n")
 	}
 	b.WriteString(m.styles.InputBox.Render(m.textarea.View()))
+	if att := m.attachmentView(); att != "" {
+		b.WriteString("\n" + att)
+	}
 	if comp := m.completionView(); comp != "" {
 		b.WriteString("\n" + comp)
 	}
@@ -359,6 +399,9 @@ func (m *Model) Height() int {
 		b.WriteString(m.styles.PlanModeIndicator.Render("[PLAN] Press Shift+Tab to disable plan mode") + "\n")
 	}
 	b.WriteString(m.styles.InputBox.Render(m.textarea.View()))
+	if att := m.attachmentView(); att != "" {
+		b.WriteString("\n" + att)
+	}
 	if comp := m.completionView(); comp != "" {
 		b.WriteString("\n" + comp)
 	}
@@ -395,6 +438,7 @@ func (m *Model) Reset() {
 	m.slash = nil
 	m.draft = ""
 	m.histIdx = -1
+	m.attachments = nil
 }
 
 // SetValue sets the input value.
@@ -423,6 +467,20 @@ func (m *Model) SetContext(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ctx = ctx
+}
+
+// SetConfigDir sets the directory used to store temporary pasted files.
+func (m *Model) SetConfigDir(dir string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.configDir = dir
+}
+
+// Attachments returns the current pasted file attachments.
+func (m *Model) Attachments() []Attachment {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]Attachment(nil), m.attachments...)
 }
 
 // SetFileCandidates sets the list of file paths available for @-mention
@@ -753,4 +811,101 @@ func (m *Model) updateStyles() {
 		Background(m.styles.Theme.InputBg).
 		Foreground(m.styles.Theme.Muted)
 	m.textarea.SetStyles(s)
+}
+
+// pasteCmd reads the clipboard asynchronously and returns a PasteMsg with any
+// image or file attachments. It runs outside the model lock because clipboard
+// I/O may block.
+func (m *Model) pasteCmd() tea.Cmd {
+	m.mu.RLock()
+	ctx := m.ctx
+	configDir := m.configDir
+	m.mu.RUnlock()
+	if configDir == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		return PasteMsg{Parts: readClipboardAttachments(ctx, configDir)}
+	}
+}
+
+// readClipboardAttachments attempts to read an image or file list from the
+// clipboard and returns them as content parts. Errors are swallowed because a
+// failed paste is not fatal.
+func readClipboardAttachments(ctx context.Context, configDir string) []api.ContentPart {
+	data, mime, err := clipboard.ReadImage(ctx)
+	if err == nil && len(data) > 0 {
+		path, saveErr := clipboard.SaveData(data, clipboard.ExtensionForMIME(mime), configDir)
+		if saveErr == nil {
+			return []api.ContentPart{{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: path}}}
+		}
+	}
+
+	paths, err := clipboard.ReadFilePaths(ctx)
+	if err != nil || len(paths) == 0 {
+		return nil
+	}
+	parts := make([]api.ContentPart, 0, len(paths))
+	for _, path := range paths {
+		mime := clipboard.MIMEForPath(path)
+		if strings.HasPrefix(mime, "image/") {
+			parts = append(parts, api.ContentPart{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: path}})
+		} else {
+			parts = append(parts, api.ContentPart{Type: api.ContentPartText, Text: "[Attached file: " + path + "]"})
+		}
+	}
+	return parts
+}
+
+// addContentPart stores a pasted content part as a file attachment if it
+// references a local path.
+func (m *Model) addContentPart(part api.ContentPart) {
+	switch part.Type {
+	case api.ContentPartImageURL:
+		if part.ImageURL != nil && part.ImageURL.URL != "" {
+			mime := clipboard.MIMEForPath(part.ImageURL.URL)
+			m.attachments = append(m.attachments, Attachment{Path: part.ImageURL.URL, MIMEType: mime})
+		}
+	case api.ContentPartText:
+		if part.Text != "" {
+			m.attachments = append(m.attachments, Attachment{Path: "", MIMEType: "text/plain"})
+		}
+	}
+}
+
+// attachmentContentParts converts stored attachments to content parts.
+func (m *Model) attachmentContentParts() []api.ContentPart {
+	if len(m.attachments) == 0 {
+		return nil
+	}
+	parts := make([]api.ContentPart, 0, len(m.attachments))
+	for _, att := range m.attachments {
+		if strings.HasPrefix(att.MIMEType, "image/") {
+			parts = append(parts, api.ContentPart{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: att.Path}})
+		} else if att.Path != "" {
+			parts = append(parts, api.ContentPart{Type: api.ContentPartText, Text: "[Attached file: " + att.Path + "]"})
+		}
+	}
+	return parts
+}
+
+// attachmentView renders a one-line indicator for pasted attachments.
+func (m *Model) attachmentView() string {
+	if len(m.attachments) == 0 || m.styles == nil {
+		return ""
+	}
+	var b strings.Builder
+	for i, att := range m.attachments {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		name := att.Path
+		if name == "" {
+			name = "attachment"
+		} else {
+			name = filepath.Base(name)
+		}
+		b.WriteString("📎 " + name)
+	}
+	return lipgloss.NewStyle().Foreground(m.styles.Theme.Muted).Render(b.String())
 }

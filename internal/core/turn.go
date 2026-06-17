@@ -227,16 +227,27 @@ func (tm *TurnManager) CancelAll() {
 // It returns a channel that streams turn events (content, done, error).
 // Returns an error if a turn is already in progress.
 func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
-	return tm.runTurnInternal(ctx, sessionID, input, false)
+	return tm.runTurnInternal(ctx, sessionID, input, nil, false)
+}
+
+// RunTurnWithContentParts executes a normal turn with multimodal content parts.
+func (tm *TurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return tm.runTurnInternal(ctx, sessionID, input, parts, false)
 }
 
 // RunTurnWithPlan executes a turn in plan mode. The assistant first produces a
 // plan, then waits for approval before executing it.
 func (tm *TurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
-	return tm.runTurnInternal(ctx, sessionID, input, true)
+	return tm.runTurnInternal(ctx, sessionID, input, nil, true)
 }
 
-func (tm *TurnManager) runTurnInternal(ctx context.Context, sessionID string, input string, planMode bool) (<-chan api.TurnEvent, error) {
+// RunTurnWithPlanWithContentParts executes a plan-mode turn with multimodal
+// content parts.
+func (tm *TurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return tm.runTurnInternal(ctx, sessionID, input, parts, true)
+}
+
+func (tm *TurnManager) runTurnInternal(ctx context.Context, sessionID string, input string, parts []api.ContentPart, planMode bool) (<-chan api.TurnEvent, error) {
 	if !tm.running.CompareAndSwap(false, true) {
 		return nil, fmt.Errorf("turn already in progress")
 	}
@@ -244,7 +255,7 @@ func (tm *TurnManager) runTurnInternal(ctx context.Context, sessionID string, in
 	tm.cancelMu.Lock()
 	tm.activeCancel = runCancel
 	tm.cancelMu.Unlock()
-	outCh, err := tm.startTurn(runCtx, runCancel, sessionID, input, planMode)
+	outCh, err := tm.startTurn(runCtx, runCancel, sessionID, input, parts, planMode)
 	if err != nil {
 		tm.running.Store(false)
 		runCancel()
@@ -256,7 +267,7 @@ func (tm *TurnManager) runTurnInternal(ctx context.Context, sessionID string, in
 	return outCh, nil
 }
 
-func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFunc, sessionID string, input string, planMode bool) (<-chan api.TurnEvent, error) {
+func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFunc, sessionID string, input string, parts []api.ContentPart, planMode bool) (<-chan api.TurnEvent, error) {
 	if tm.cfg != nil && tm.cfg.Get() != nil {
 		maxTurns := tm.cfg.Get().Behavior.MaxTurns
 		if maxTurns > 0 {
@@ -312,10 +323,11 @@ func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFu
 	}
 
 	userMsg := api.Message{
-		ID:        idgen.GenerateID(),
-		Role:      api.RoleUser,
-		Content:   input,
-		CreatedAt: time.Now().UTC(),
+		ID:           idgen.GenerateID(),
+		Role:         api.RoleUser,
+		Content:      input,
+		ContentParts: parts,
+		CreatedAt:    time.Now().UTC(),
 	}
 	if err := tm.store.AppendMessage(ctx, sessionID, userMsg); err != nil {
 		return nil, fmt.Errorf("append user message: %w", err)
