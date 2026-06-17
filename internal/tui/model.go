@@ -456,6 +456,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.input.Completing() {
 			cmds = append(cmds, m.handleKeyMsg(msg)...)
 		}
+		// Plan panel owns the keyboard while open; do not dispatch the key to
+		// child components.
+		if m.planPending {
+			return m, tea.Batch(cmds...)
+		}
 	case tea.MouseReleaseMsg:
 		m.handleMouseMsg(msg)
 	case tea.WindowSizeMsg:
@@ -1508,8 +1513,12 @@ func (m *Model) renderApprovalFullscreen(background string) string {
 func (m *Model) renderPlanPanel(background string) string {
 	var b strings.Builder
 	b.WriteString("Plan requires approval\n\n")
-	b.WriteString(m.planRequest)
-	fmt.Fprintf(&b, "\n\n[y] yes  [n] no")
+	innerW := m.width - 8
+	if innerW < minContentWidth {
+		innerW = minContentWidth
+	}
+	b.WriteString(wordWrap(m.planRequest, innerW))
+	b.WriteString("\n\n[y] yes  [n] no")
 	dialog := m.styles.PlanPanel.Render(b.String())
 	return overlayDialog(background, dialog, m.width, m.height)
 }
@@ -1594,6 +1603,25 @@ func normalizeRect(s string, width, height int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// wordWrap wraps s to the given display width, preserving existing newlines.
+// It is copied from internal/tui/messages/messages.go for use by the plan
+// panel so long plan lines are not truncated by the dialog overlay.
+func wordWrap(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	var out []string
+	for _, line := range lines {
+		for ansi.StringWidth(line) > width {
+			out = append(out, ansi.Cut(line, 0, width))
+			line = ansi.Cut(line, width, ansi.StringWidth(line))
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 // approvalStartRequest starts a new approval request under m.mu and clears any
