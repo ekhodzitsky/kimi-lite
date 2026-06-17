@@ -21,6 +21,7 @@ internal/
   observability/        # Metrics collection and profiling helpers
   store/                # SQLite persistence (pure-Go, CGO-free)
   tui/                  # Terminal UI (Bubble Tea)
+    help/               # /help overlay with shortcuts and slash commands
   git/                  # Git integration
 pkg/api/                # Public types and interfaces
 ```
@@ -102,7 +103,10 @@ Bubble Tea terminal UI.
 - `activity` — transient activity panel between the viewport and input; shows spinner and pending tool names during `Thinking`, `Streaming`, and `ToolCalls` turns
 - `sessions` — modal session picker with search, pagination, current/all-directory toggle, and a hint to press `a` when the current directory has no sessions
 - `mentions` — file-path candidate provider for `@`-mention completion
+- `help` — `/help` overlay listing keyboard shortcuts and slash commands; scrollable with arrow keys, PgUp/PgDown, Home/End; closes on `Esc`, `Enter`, or `q`
+- `input` — also provides `/`-command autocomplete triggered by typing `/`; navigate with `Tab`/`Shift+Tab` or arrow keys, accept with `Enter`, dismiss with `Esc`/`Ctrl+C`
 - `styles` — Lipgloss themes
+- Approval dialog — shows pending tool calls with inline diff previews where available; numeric shortcuts `1` (yes), `2` (no), `3` (always), `4` (diff) plus configurable `y`/`n`/`a`/`d` keys; `Ctrl+E` opens a temporary fullscreen diff overlay that closes on `Esc` or `Ctrl+E`
 - Layout: welcome panel, scrollable viewport, input box, and a two-line footer; the footer shows model info, working directory, git branch/status, token count, context size, and transient localized status messages (truncated on narrow terminals)
 
 ### `internal/mcp`
