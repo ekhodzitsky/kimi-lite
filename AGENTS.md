@@ -43,6 +43,8 @@ Key interfaces and types:
 - `TokenEstimator` — Estimate
 - `MetricsCollector` / `HookRunner` — observability and lifecycle hooks
 - `TurnEventStatus` — transient status message event for the TUI
+- `TurnEventToolProgress` — live output chunk from a running tool call (currently shell)
+- `ToolProgressCallback` — context callback used by tools to stream live output chunks
 
 ### `internal/config`
 Configuration loading from TOML files, environment variables, and CLI flags.
@@ -78,7 +80,7 @@ OpenAI-compatible LLM client with SSE streaming.
 Business logic layer.
 
 - `SessionManager` — create, resume, list sessions; recovers interrupted tool calls by synthesizing missing tool-result messages on resume
-- `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages and emits `TurnEventStatus` messages for non-trivial tools
+- `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages, emits `TurnEventStatus` messages for non-trivial tools, and streams live shell output as `TurnEventToolProgress` events via a context callback
 - `BuiltInToolExecutor` — 13 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `dispatch_subagent`, `TodoList`) with sandboxed file access; `web_search` is only registered when an `api.WebSearcher` provider is injected
   - Uses `os.OpenRoot` when `SandboxRoot` is configured; falls back to `O_NOFOLLOW` (`openFileNoFollow`) when no sandbox root is set
   - Blocks protected paths and sensitive system/secret trees
@@ -100,7 +102,7 @@ Bubble Tea terminal UI.
 - `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`)
 - `viewport` — scrollable output
 - `messages` — message rendering (Markdown via Glamour); tool-call blocks show status icons, `Using`/`Used`/`Error` verbs, and elapsed duration
-- `activity` — transient activity panel between the viewport and input; shows spinner and pending tool names during `Thinking`, `Streaming`, and `ToolCalls` turns
+- `activity` — transient activity panel between the viewport and input; shows a spinner, pending tool names, and up to four trailing lines of live output per running tool call during `Thinking`, `Streaming`, and `ToolCalls` turns
 - `sessions` — modal session picker with search, pagination, current/all-directory toggle, and a hint to press `a` when the current directory has no sessions; each card shows the session name, path, relative update time, and the last prompt; hovering a session from another directory surfaces a copy-pasteable `cd <path> && kimi-lite --resume <id>` command in the footer
 - `mentions` — file-path candidate provider for `@`-mention completion
 - `help` — `/help` overlay listing keyboard shortcuts and slash commands; scrollable with arrow keys, PgUp/PgDown, Home/End; closes on `Esc`, `Enter`, or `q`
