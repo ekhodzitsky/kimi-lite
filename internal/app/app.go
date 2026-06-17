@@ -133,6 +133,23 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
+	// Discover user skills from the config directory.
+	configDir, err := config.EnsureConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("ensure config dir: %w", err)
+	}
+
+	// Restrict local image attachments to the workspace and the paste tmp dir.
+	pasteTmpDir := filepath.Join(configDir, "tmp")
+	if err := os.MkdirAll(pasteTmpDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create paste tmp directory: %w", err)
+	}
+	// Best-effort cleanup of stale pasted attachments to avoid unbounded growth.
+	_ = cleanupPasteTmpDir(pasteTmpDir, 30*24*time.Hour)
+	if setter, ok := llmClient.(interface{ SetAttachmentRoots([]string) }); ok {
+		setter.SetAttachmentRoots([]string{sandboxRoot, pasteTmpDir})
+	}
+
 	// Create web searcher if configured.
 	var webSearcher api.WebSearcher
 	if cfg.WebSearch.Endpoint != "" {
@@ -141,12 +158,6 @@ func New(cfg *api.Config, debug bool) (*App, error) {
 			return nil, fmt.Errorf("create web search provider: %w", err)
 		}
 		webSearcher = ws
-	}
-
-	// Discover user skills from the config directory.
-	configDir, err := config.EnsureConfigDir()
-	if err != nil {
-		return nil, fmt.Errorf("ensure config dir: %w", err)
 	}
 	skillsDir := filepath.Join(configDir, "skills")
 	allSkills, err := core.DiscoverSkills(context.Background(), skillsDir)
@@ -626,6 +637,32 @@ func (a *App) Close() error {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// cleanupPasteTmpDir removes files in pasteTmpDir older than retention. It is
+// best-effort: errors are ignored so that startup is not blocked by a single
+// stale or locked file.
+func cleanupPasteTmpDir(pasteTmpDir string, retention time.Duration) error {
+	cutoff := time.Now().UTC().Add(-retention)
+	return filepath.WalkDir(pasteTmpDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip entries we cannot read
+		}
+		if d.IsDir() {
+			if path == pasteTmpDir {
+				return nil
+			}
+			return filepath.SkipDir // do not recurse
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
 }
 
 // configProvider implements api.ConfigProvider.
