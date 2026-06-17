@@ -14,6 +14,7 @@ import (
 func TestMessageContent_WithImageURL(t *testing.T) {
 	t.Parallel()
 
+	c := NewClient(api.LLMConfig{BaseURL: "http://localhost", APIKey: "key", Model: "m"}, nil)
 	msg := api.Message{
 		Role:    api.RoleUser,
 		Content: "describe",
@@ -22,7 +23,7 @@ func TestMessageContent_WithImageURL(t *testing.T) {
 		},
 	}
 
-	got := messageContent(msg)
+	got := c.messageContent(msg)
 	parts, ok := got.([]contentPart)
 	if !ok {
 		t.Fatalf("expected []contentPart, got %T", got)
@@ -48,6 +49,8 @@ func TestMessageContent_WithLocalImagePath(t *testing.T) {
 		t.Fatalf("write test png: %v", err)
 	}
 
+	c := NewClient(api.LLMConfig{BaseURL: "http://localhost", APIKey: "key", Model: "m"}, nil)
+	c.SetAttachmentRoots([]string{tmpDir})
 	msg := api.Message{
 		Role:    api.RoleUser,
 		Content: "describe",
@@ -56,7 +59,7 @@ func TestMessageContent_WithLocalImagePath(t *testing.T) {
 		},
 	}
 
-	got := messageContent(msg)
+	got := c.messageContent(msg)
 	parts, ok := got.([]contentPart)
 	if !ok {
 		t.Fatalf("expected []contentPart, got %T", got)
@@ -75,6 +78,7 @@ func TestMessageContent_WithLocalImagePath(t *testing.T) {
 func TestMessageContent_WithImageData(t *testing.T) {
 	t.Parallel()
 
+	c := NewClient(api.LLMConfig{BaseURL: "http://localhost", APIKey: "key", Model: "m"}, nil)
 	data := base64.StdEncoding.EncodeToString([]byte("fake-image"))
 	msg := api.Message{
 		Role:    api.RoleUser,
@@ -84,7 +88,7 @@ func TestMessageContent_WithImageData(t *testing.T) {
 		},
 	}
 
-	got := messageContent(msg)
+	got := c.messageContent(msg)
 	parts, ok := got.([]contentPart)
 	if !ok {
 		t.Fatalf("expected []contentPart, got %T", got)
@@ -104,8 +108,9 @@ func TestMessageContent_WithImageData(t *testing.T) {
 func TestMessageContent_NoParts(t *testing.T) {
 	t.Parallel()
 
+	c := NewClient(api.LLMConfig{BaseURL: "http://localhost", APIKey: "key", Model: "m"}, nil)
 	msg := api.Message{Role: api.RoleUser, Content: "hello"}
-	got := messageContent(msg)
+	got := c.messageContent(msg)
 	if s, ok := got.(string); !ok || s != "hello" {
 		t.Errorf("messageContent = %v, want string hello", got)
 	}
@@ -132,5 +137,62 @@ func TestBuildChatRequest_WithContentParts(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"type":"image_url"`) {
 		t.Errorf("request content missing image_url part: %s", b)
+	}
+}
+
+func TestImageURLToDataURL_RejectsPathOutsideRoots(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	otherDir := t.TempDir()
+	path := filepath.Join(otherDir, "dot.png")
+	png := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52}
+	if err := os.WriteFile(path, png, 0o600); err != nil {
+		t.Fatalf("write test png: %v", err)
+	}
+
+	c := NewClient(api.LLMConfig{BaseURL: "http://localhost", APIKey: "key", Model: "m"}, nil)
+	c.SetAttachmentRoots([]string{tmpDir})
+
+	got := c.imageURLToDataURL(path)
+	if got != path {
+		t.Errorf("URL = %q, want original path %q", got, path)
+	}
+}
+
+func TestImageURLToDataURL_RejectsWithoutRoots(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "dot.png")
+	png := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52}
+	if err := os.WriteFile(path, png, 0o600); err != nil {
+		t.Fatalf("write test png: %v", err)
+	}
+
+	c := NewClient(api.LLMConfig{BaseURL: "http://localhost", APIKey: "key", Model: "m"}, nil)
+	// No roots configured.
+
+	got := c.imageURLToDataURL(path)
+	if got != path {
+		t.Errorf("URL = %q, want original path %q", got, path)
+	}
+}
+
+func TestImageURLToDataURL_SizeCap(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	c := NewClient(api.LLMConfig{BaseURL: "http://localhost", APIKey: "key", Model: "m"}, nil)
+	c.SetAttachmentRoots([]string{tmpDir})
+
+	path := filepath.Join(tmpDir, "huge.png")
+	if err := os.WriteFile(path, make([]byte, maxAttachmentSize+1), 0o600); err != nil {
+		t.Fatalf("write large file: %v", err)
+	}
+
+	got := c.imageURLToDataURL(path)
+	if got != path {
+		t.Errorf("URL = %q, want original path %q because file exceeds size cap", got, path)
 	}
 }

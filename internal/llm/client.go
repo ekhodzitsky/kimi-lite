@@ -39,17 +39,21 @@ var ErrEmptyResponse = errors.New("empty response from API")
 
 // Client implements api.LLMClient for OpenAI-compatible APIs.
 type Client struct {
-	httpClient   *http.Client
-	baseURL      string
-	endpoint     string
-	apiKey       string
-	model        string
-	timeout      time.Duration
-	maxAttempts  int
-	extraHeaders http.Header
-	metrics      api.MetricsCollector
-	mu           sync.RWMutex
+	httpClient      *http.Client
+	baseURL         string
+	endpoint        string
+	apiKey          string
+	model           string
+	timeout         time.Duration
+	maxAttempts     int
+	extraHeaders    http.Header
+	metrics         api.MetricsCollector
+	attachmentRoots []string
+	mu              sync.RWMutex
 }
+
+// maxAttachmentSize is the largest local file that will be inlined as base64.
+const maxAttachmentSize = 10 * 1024 * 1024 // 10 MB
 
 // NewClient creates a new LLM client from configuration.
 // If httpClient is nil, a default http.Client is used.
@@ -97,6 +101,24 @@ func (c *Client) SetHeaders(headers map[string]string) {
 	c.extraHeaders = make(http.Header, len(headers))
 	for k, v := range headers {
 		c.extraHeaders.Set(k, v)
+	}
+	c.mu.Unlock()
+}
+
+// SetAttachmentRoots sets the directories from which local image attachments
+// may be read. Paths outside these roots are left as URLs and not inlined.
+func (c *Client) SetAttachmentRoots(roots []string) {
+	c.mu.Lock()
+	c.attachmentRoots = make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r == "" {
+			continue
+		}
+		abs, err := filepath.Abs(r)
+		if err != nil {
+			abs = r
+		}
+		c.attachmentRoots = append(c.attachmentRoots, abs)
 	}
 	c.mu.Unlock()
 }
@@ -534,7 +556,7 @@ func isRetryableError(err error) bool {
 // parts. The message's plain-text Content is always included as the first text
 // part so it is not lost when images are attached. Local file paths in image
 // parts are read and converted to base64 data URLs.
-func messageContent(msg api.Message) any {
+func (c *Client) messageContent(msg api.Message) any {
 	if len(msg.ContentParts) == 0 {
 		return msg.Content
 	}
@@ -553,7 +575,7 @@ func messageContent(msg api.Message) any {
 			}
 			url := ""
 			if p.ImageURL != nil {
-				url = imageURLToDataURL(p.ImageURL.URL)
+				url = c.imageURLToDataURL(p.ImageURL.URL)
 			}
 			parts = append(parts, contentPart{Type: "image_url", ImageURL: &imageURLPart{URL: url, Detail: detail}})
 		case api.ContentPartImageData:
@@ -569,8 +591,9 @@ func messageContent(msg api.Message) any {
 }
 
 // imageURLToDataURL converts a local file path to a base64 data URL. Non-local
-// URLs are returned unchanged.
-func imageURLToDataURL(url string) string {
+// URLs are returned unchanged. Local files are only read when they reside under
+// one of the configured attachment roots and are smaller than maxAttachmentSize.
+func (c *Client) imageURLToDataURL(url string) string {
 	if url == "" {
 		return url
 	}
@@ -578,12 +601,50 @@ func imageURLToDataURL(url string) string {
 		return url
 	}
 	path := filepath.Clean(url)
-	data, err := os.ReadFile(path) //nolint:gosec // path is user-provided paste attachment; cleaned above
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return url
+	}
+
+	c.mu.RLock()
+	roots := append([]string(nil), c.attachmentRoots...)
+	c.mu.RUnlock()
+	if len(roots) == 0 {
+		return url
+	}
+	if !isPathUnderRoots(abs, roots) {
+		return url
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		return url
+	}
+	if info.IsDir() || info.Size() > maxAttachmentSize {
+		return url
+	}
+
+	data, err := os.ReadFile(abs) //nolint:gosec // path validated against attachment roots above
 	if err != nil {
 		return url
 	}
 	mime := http.DetectContentType(data)
 	return fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(data))
+}
+
+// isPathUnderRoots reports whether path is equal to or inside one of the roots.
+// Both path and roots are expected to be clean absolute paths.
+func isPathUnderRoots(path string, roots []string) bool {
+	for _, root := range roots {
+		if path == root {
+			return true
+		}
+		if strings.HasPrefix(path, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildChatRequest constructs the API request payload from api types.
@@ -598,7 +659,7 @@ func (c *Client) buildChatRequest(messages []api.Message, tools []api.ToolDefini
 	for _, msg := range messages {
 		cm := chatMessage{
 			Role:    string(msg.Role),
-			Content: messageContent(msg),
+			Content: c.messageContent(msg),
 		}
 		if msg.Role == api.RoleTool {
 			cm.ToolCallID = msg.ToolCallID
