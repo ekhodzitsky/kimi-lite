@@ -85,6 +85,11 @@ type Styles struct {
 	SlashCommandName    lipgloss.Style
 	SlashCommandDesc    lipgloss.Style
 	ScrollIndicator     lipgloss.Style
+	HelpOverlay         lipgloss.Style
+	HelpTitle           lipgloss.Style
+	HelpKey             lipgloss.Style
+	HelpCommand         lipgloss.Style
+	HelpDesc            lipgloss.Style
 	ApprovalDialog      lipgloss.Style
 	Footer              lipgloss.Style
 	FooterModel         lipgloss.Style
@@ -196,6 +201,17 @@ func (s *Styles) init() {
 		Padding(0, 1)
 	s.SlashCommandName = lipgloss.NewStyle().Foreground(t.Primary).Bold(true)
 	s.SlashCommandDesc = lipgloss.NewStyle().Foreground(t.Muted)
+
+	s.HelpOverlay = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Foreground).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Primary).
+		Padding(1, 2)
+	s.HelpTitle = lipgloss.NewStyle().Bold(true).Foreground(t.Primary).Background(t.Background)
+	s.HelpKey = lipgloss.NewStyle().Foreground(t.Secondary).Background(t.Background)
+	s.HelpCommand = lipgloss.NewStyle().Foreground(t.Primary).Background(t.Background).Bold(true)
+	s.HelpDesc = lipgloss.NewStyle().Foreground(t.Foreground).Background(t.Background)
 
 	s.ScrollIndicator = lipgloss.NewStyle().
 		Foreground(t.Muted).

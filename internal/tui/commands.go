@@ -137,6 +137,9 @@ type FooterGitMsg struct {
 	Behind int
 }
 
+// ShowHelpMsg opens the help overlay.
+type ShowHelpMsg struct{}
+
 // footerGitRefreshMsg triggers an asynchronous git status refresh.
 type footerGitRefreshMsg struct{}
 
@@ -329,6 +332,8 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 			}
 			return ForkResultMsg{Session: sess}
 		}
+	case "/help":
+		return func() tea.Msg { return ShowHelpMsg{} }
 	default:
 		m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("unknown command: %s", cmd), m.styles))
 		return nil

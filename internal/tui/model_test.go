@@ -2382,3 +2382,100 @@ func TestApprovalResponse_DedupesAlwaysAllNames(t *testing.T) {
 		t.Errorf("autoApproveSetter name = %q, want write_file", setNames[0])
 	}
 }
+
+func TestHelpCommand_OpensOverlay(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	updated, cmd := m.Update(input.SendMsg{Content: "/help"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected command for /help")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
+
+	if !model2.showHelp {
+		t.Fatal("expected help overlay to be open")
+	}
+
+	view := model2.View().Content
+	if !strings.Contains(view, "Keyboard shortcuts") {
+		t.Errorf("view should contain help title, got %q", view)
+	}
+	if !strings.Contains(view, "/help") {
+		t.Errorf("view should contain /help command, got %q", view)
+	}
+}
+
+func TestHelpOverlay_CloseKeys(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.Update(ShowHelpMsg{})
+	if !m.showHelp {
+		t.Fatal("expected help overlay to be open")
+	}
+
+	tests := []rune{
+		tea.KeyEsc,
+		tea.KeyEnter,
+		'q',
+	}
+
+	for _, code := range tests {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: code})
+		model := updated.(*Model)
+		if model.showHelp {
+			t.Errorf("help overlay should close on %q", code)
+		}
+		// reopen for next key
+		m = model
+		m.Update(ShowHelpMsg{})
+	}
+}
+
+func TestHelpOverlay_ScrollKeys(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background())
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.Update(ShowHelpMsg{})
+	if !m.showHelp {
+		t.Fatal("expected help overlay to be open")
+	}
+
+	if m.helpPanel.Offset() != 0 {
+		t.Fatalf("initial offset = %d, want 0", m.helpPanel.Offset())
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.helpPanel.Offset() == 0 {
+		t.Error("help overlay should scroll down")
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.helpPanel.Offset() != 0 {
+		t.Errorf("help overlay should clamp to top after pgup, got offset %d", m.helpPanel.Offset())
+	}
+}

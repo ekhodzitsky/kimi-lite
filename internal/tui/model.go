@@ -18,6 +18,7 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/activity"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/footer"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/help"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/mentions"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
@@ -183,6 +184,10 @@ type Model struct {
 	// sessionPicker is the modal session-selection overlay.
 	sessionPicker *sessions.Picker
 
+	// helpPanel is the /help overlay.
+	helpPanel *help.Model
+	showHelp  bool
+
 	// Service references (optional, wired by app layer)
 	turnManager    turnManager
 	sessionManager sessionManager
@@ -243,6 +248,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 	ft := footer.New(st)
 	wc := welcome.New(st)
 	ac := activity.New(st)
+	hp := help.New(st)
 
 	mp := &mentions.FileWalker{MaxDepth: 3}
 	m := &Model{
@@ -253,6 +259,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model,
 		footer:          ft,
 		welcome:         wc,
 		activity:        ac,
+		helpPanel:       hp,
 		messages:        make([]*msgcomp.Message, 0),
 		state:           api.TurnIdle,
 		session:         session,
@@ -352,6 +359,31 @@ func (m *Model) SetApprovalMode(mode int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.approvalMode = mode
+}
+
+func (m *Model) helpData() help.Data {
+	return help.Data{
+		Shortcuts: []help.Shortcut{
+			{Keys: "enter", Description: "Send message"},
+			{Keys: "alt+enter", Description: "Insert newline"},
+			{Keys: "tab / shift+tab", Description: "Switch focus"},
+			{Keys: "ctrl+g", Description: "External editor"},
+			{Keys: "ctrl+y", Description: "Toggle yolo mode"},
+			{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
+			{Keys: "enter", Description: "Expand/collapse tool call"},
+		},
+		Commands: []help.SlashCommand{
+			{Name: "/compact", Description: "Summarize older messages"},
+			{Name: "/clear", Description: "Clear transcript"},
+			{Name: "/sessions", Description: "Switch session"},
+			{Name: "/checkpoint", Description: "Create git checkpoint"},
+			{Name: "/diff", Description: "Show git diff"},
+			{Name: "/mcp", Description: "List MCP tools"},
+			{Name: "/title", Description: "Rename session"},
+			{Name: "/fork", Description: "Fork session"},
+			{Name: "/help", Description: "Show this help"},
+		},
+	}
 }
 
 // Init implements tea.Model.
@@ -531,6 +563,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setState(api.TurnIdle)
 
+	case ShowHelpMsg:
+		m.showHelp = true
+		m.helpPanel.SetSize(m.width-4, m.height-4)
+		m.helpPanel.SetData(m.helpData())
+
 	case msgcomp.RenderInvalidateMsg:
 		m.rebuildRenderedContent()
 
@@ -632,6 +669,10 @@ func (m *Model) View() tea.View {
 		view = overlayDialog(view, m.sessionPicker.View(), m.width, m.height)
 	}
 
+	if m.showHelp {
+		view = overlayDialog(view, m.helpPanel.View().Content, m.width, m.height)
+	}
+
 	v := tea.NewView(view)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
@@ -699,6 +740,19 @@ func (m *Model) setState(s api.TurnState) {
 
 func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	var cmds []tea.Cmd
+
+	// Help overlay takes precedence while it is open.
+	if m.showHelp {
+		if help.CloseKeys(msg.String()) {
+			m.showHelp = false
+			return nil
+		}
+		cmd := m.helpPanel.UpdateMsg(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return cmds
+	}
 
 	// Approval dialog takes precedence when waiting for approval
 	if m.state == api.TurnWaitingApproval {
