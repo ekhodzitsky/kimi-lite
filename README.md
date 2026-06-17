@@ -60,9 +60,15 @@ message = "shell commands always require approval"
 [behavior]
 # Load specific skills by name, or leave empty to load every .md file in ~/.config/kimi-lite/skills/.
 skills = ["go", "python"]
+
+[ui]
+# Built-in "dark" or "light", or a custom JSON theme file name from ~/.config/kimi-lite/themes/.
+theme = "dark"
 ```
 
 Drop skill files into `~/.config/kimi-lite/skills/` (e.g. `go.md`, `python.md`); their contents are appended to the system prompt.
+
+Custom themes are JSON files placed in `~/.config/kimi-lite/themes/`; set `ui.theme` to the file name (without `.json`) to use them. A theme defines colors such as `background`, `foreground`, `primary`, `success`, `error`, and `highlight`.
 
 ## Usage
 
