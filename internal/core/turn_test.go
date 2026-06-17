@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1663,28 +1664,42 @@ func TestTurnManager_RunTurnWithPlan_Approved(t *testing.T) {
 
 	var contents []string
 	var planEvent *api.TurnEvent
+	var mu sync.Mutex
 	done := make(chan struct{})
 	go func() {
 		for e := range outCh {
 			switch e.Type {
 			case api.TurnEventContent:
+				mu.Lock()
 				contents = append(contents, e.Content)
+				mu.Unlock()
 			case api.TurnEventPlanRequest:
+				mu.Lock()
 				ev := e
 				planEvent = &ev
+				mu.Unlock()
 			}
 		}
 		close(done)
 	}()
 
-	for i := 0; i < 100 && planEvent == nil; i++ {
+	for i := 0; i < 100; i++ {
+		mu.Lock()
+		found := planEvent != nil
+		mu.Unlock()
+		if found {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if planEvent == nil {
+	mu.Lock()
+	pe := planEvent
+	mu.Unlock()
+	if pe == nil {
 		t.Fatal("expected plan request event")
 	}
-	if planEvent.Content != "1. Read file\n2. Summarize" {
-		t.Errorf("plan content = %q, want %q", planEvent.Content, "1. Read file\n2. Summarize")
+	if pe.Content != "1. Read file\n2. Summarize" {
+		t.Errorf("plan content = %q, want %q", pe.Content, "1. Read file\n2. Summarize")
 	}
 
 	turn := tm.CurrentTurn()
@@ -1712,8 +1727,11 @@ func TestTurnManager_RunTurnWithPlan_Approved(t *testing.T) {
 	if turn.Response != "Executed plan" {
 		t.Errorf("response = %q, want %q", turn.Response, "Executed plan")
 	}
-	if len(contents) != 2 {
-		t.Errorf("expected 2 content chunks, got %d: %v", len(contents), contents)
+	mu.Lock()
+	contentCount := len(contents)
+	mu.Unlock()
+	if contentCount != 2 {
+		t.Errorf("expected 2 content chunks, got %d", contentCount)
 	}
 
 	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
@@ -1757,25 +1775,39 @@ func TestTurnManager_RunTurnWithPlan_Rejected(t *testing.T) {
 
 	var planEvent *api.TurnEvent
 	var errEvent *api.TurnEvent
+	var mu sync.Mutex
 	done := make(chan struct{})
 	go func() {
 		for e := range outCh {
 			switch e.Type {
 			case api.TurnEventPlanRequest:
+				mu.Lock()
 				ev := e
 				planEvent = &ev
+				mu.Unlock()
 			case api.TurnEventError:
+				mu.Lock()
 				ev := e
 				errEvent = &ev
+				mu.Unlock()
 			}
 		}
 		close(done)
 	}()
 
-	for i := 0; i < 100 && planEvent == nil; i++ {
+	for i := 0; i < 100; i++ {
+		mu.Lock()
+		found := planEvent != nil
+		mu.Unlock()
+		if found {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if planEvent == nil {
+	mu.Lock()
+	pe := planEvent
+	mu.Unlock()
+	if pe == nil {
 		t.Fatal("expected plan request event")
 	}
 
@@ -1796,11 +1828,14 @@ func TestTurnManager_RunTurnWithPlan_Rejected(t *testing.T) {
 	if !strings.Contains(turn.Error, "plan rejected") {
 		t.Errorf("error = %q, want containing 'plan rejected'", turn.Error)
 	}
-	if errEvent == nil {
+	mu.Lock()
+	ee := errEvent
+	mu.Unlock()
+	if ee == nil {
 		t.Fatal("expected error event")
 	}
-	if !strings.Contains(errEvent.Error.Error(), "plan rejected") {
-		t.Errorf("error event = %v, want plan rejected", errEvent.Error)
+	if !strings.Contains(ee.Error.Error(), "plan rejected") {
+		t.Errorf("error event = %v, want plan rejected", ee.Error)
 	}
 }
 
