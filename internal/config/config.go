@@ -234,6 +234,7 @@ func DefaultConfig() *api.Config {
 			ApproveDiff:    "d",
 			ExternalEditor: "ctrl+g",
 			Steer:          "ctrl+s",
+			Paste:          "ctrl+v",
 		},
 		Hooks:      []api.HookConfig{},
 		GitTimeout: 30 * time.Second,
