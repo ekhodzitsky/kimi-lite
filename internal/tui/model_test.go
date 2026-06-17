@@ -2427,7 +2427,8 @@ func TestHelpOverlay_CloseKeys(t *testing.T) {
 	m.height = 40
 	m.updateLayout()
 
-	m.Update(ShowHelpMsg{})
+	updated, _ := m.Update(ShowHelpMsg{})
+	m = updated.(*Model)
 	if !m.showHelp {
 		t.Fatal("expected help overlay to be open")
 	}
@@ -2439,14 +2440,15 @@ func TestHelpOverlay_CloseKeys(t *testing.T) {
 	}
 
 	for _, code := range tests {
-		updated, _ := m.Update(tea.KeyPressMsg{Code: code})
+		updated, _ = m.Update(tea.KeyPressMsg{Code: code})
 		model := updated.(*Model)
 		if model.showHelp {
 			t.Errorf("help overlay should close on %q", code)
 		}
 		// reopen for next key
 		m = model
-		m.Update(ShowHelpMsg{})
+		updated, _ = m.Update(ShowHelpMsg{})
+		m = updated.(*Model)
 	}
 }
 
