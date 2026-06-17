@@ -1,9 +1,11 @@
 package clipboard
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -89,5 +91,69 @@ func TestSaveData(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("saved file permissions = %o, want %o", info.Mode().Perm(), 0o600)
+	}
+}
+
+func TestCopyFileToTemp(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "source.txt")
+	data := []byte("hello paste")
+	if err := os.WriteFile(src, data, 0o600); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	dst, err := CopyFileToTemp(src, tmpDir)
+	if err != nil {
+		t.Fatalf("CopyFileToTemp error: %v", err)
+	}
+	if !filepath.IsAbs(dst) {
+		t.Errorf("CopyFileToTemp returned relative path: %q", dst)
+	}
+	if !strings.Contains(dst, filepath.Join(tmpDir, "tmp")) {
+		t.Errorf("destination = %q, want under configDir/tmp", dst)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read copied file: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("copied data = %q, want %q", got, data)
+	}
+
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat copied file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("copied file permissions = %o, want %o", info.Mode().Perm(), 0o600)
+	}
+}
+
+func TestCopyFileToTemp_SizeCap(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "huge.bin")
+	if err := os.WriteFile(src, make([]byte, MaxPasteFileSize+1), 0o600); err != nil {
+		t.Fatalf("write large source file: %v", err)
+	}
+
+	_, err := CopyFileToTemp(src, tmpDir)
+	if err == nil {
+		t.Fatal("expected error for oversized file")
+	}
+}
+
+func TestReadFilePaths_WindowsFallback(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows only")
+	}
+	t.Parallel()
+	// We cannot reliably control the system clipboard in tests; just ensure the
+	// PowerShell fallback runs without panic.
+	_, err := ReadFilePaths(t.Context())
+	if err != nil {
+		t.Logf("ReadFilePaths returned error (expected if clipboard is empty): %v", err)
 	}
 }

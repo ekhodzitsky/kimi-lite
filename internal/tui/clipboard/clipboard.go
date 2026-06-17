@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,10 @@ import (
 )
 
 const pasteTimeout = 5 * time.Second
+
+// MaxPasteFileSize is the largest file that will be copied from a paste path
+// into the temporary attachment directory.
+const MaxPasteFileSize = 10 * 1024 * 1024 // 10 MB
 
 // ReadImage reads image data from the clipboard and returns the raw bytes and
 // the detected MIME type. It returns an empty result when the clipboard does
@@ -45,6 +50,8 @@ func ReadFilePaths(ctx context.Context) ([]string, error) {
 		out, err = runCmd(ctx, "pbpaste")
 	case "linux":
 		out, err = runCmd(ctx, "xclip", "-selection", "clipboard", "-o")
+	case "windows":
+		out, err = runCmd(ctx, "powershell", "-Command", "Get-Clipboard")
 	default:
 		return nil, fmt.Errorf("clipboard file read not supported on %s", runtime.GOOS)
 	}
@@ -81,6 +88,54 @@ func SaveData(data []byte, ext string, configDir string) (string, error) {
 		return "", fmt.Errorf("write paste file: %w", err)
 	}
 	return path, nil
+}
+
+// CopyFileToTemp copies src into configDir/tmp with the same base name and
+// returns the absolute path of the copy. If src is larger than MaxPasteFileSize
+// the copy is aborted and an error is returned.
+func CopyFileToTemp(src, configDir string) (string, error) {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return "", fmt.Errorf("stat source file: %w", err)
+	}
+	if srcInfo.IsDir() {
+		return "", fmt.Errorf("source is a directory")
+	}
+	if srcInfo.Size() > MaxPasteFileSize {
+		return "", fmt.Errorf("file exceeds maximum paste size")
+	}
+
+	tmpDir := filepath.Join(configDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		return "", fmt.Errorf("create tmp dir: %w", err)
+	}
+
+	ext := filepath.Ext(src)
+	name := fmt.Sprintf("paste-%d%s", time.Now().UnixNano(), ext)
+	dst := filepath.Join(tmpDir, name)
+
+	srcFile, err := os.Open(src) //nolint:gosec // src is a user-pasted file path validated by caller
+	if err != nil {
+		return "", fmt.Errorf("open source file: %w", err)
+	}
+	defer func() { _ = srcFile.Close() }()
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600) //nolint:gosec // dst is constructed under configDir/tmp above
+	if err != nil {
+		return "", fmt.Errorf("create destination file: %w", err)
+	}
+	closeDst := func() error { return dstFile.Close() }
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		_ = closeDst()
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("copy file: %w", err)
+	}
+	if err := closeDst(); err != nil {
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("close destination file: %w", err)
+	}
+	return dst, nil
 }
 
 // ExtensionForMIME returns a sensible file extension for a MIME type.

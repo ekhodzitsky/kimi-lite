@@ -3,6 +3,7 @@ package input
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -30,6 +31,11 @@ type SendMsg struct {
 // PasteMsg is emitted when a paste operation completed and produced attachments.
 type PasteMsg struct {
 	Parts []api.ContentPart
+}
+
+// PasteErrorMsg is emitted when a paste operation failed.
+type PasteErrorMsg struct {
+	Err error
 }
 
 // KeyMap defines keybindings for the input component.
@@ -121,6 +127,12 @@ type slashState struct {
 type Attachment struct {
 	Path     string
 	MIMEType string
+}
+
+// CandidatesRefreshedMsg is emitted when the asynchronous candidate refresh
+// completes.
+type CandidatesRefreshedMsg struct {
+	Candidates []string
 }
 
 // Model is the input component model.
@@ -341,12 +353,21 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		}
 		return tea.Batch(cmds...)
 
+	case PasteErrorMsg:
+		return func() tea.Msg {
+			return PasteErrorMsg{Err: fmt.Errorf("paste failed: %w", msg.Err)}
+		}
+
 	case editorFinishedMsg:
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.handleEditorFinished(msg)
 		m.detectMention()
 		m.detectSlash()
+		return tea.Batch(cmds...)
+
+	case CandidatesRefreshedMsg:
+		m.SetFileCandidates(msg.Candidates)
 		return tea.Batch(cmds...)
 	}
 
@@ -459,6 +480,20 @@ func (m *Model) SetCandidateFunc(fn func() []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.candidateFn = fn
+}
+
+// RefreshCandidatesCmd returns a command that loads file candidates from the
+// configured candidate function and emits a CandidatesRefreshedMsg.
+func (m *Model) RefreshCandidatesCmd() tea.Cmd {
+	m.mu.RLock()
+	fn := m.candidateFn
+	m.mu.RUnlock()
+	return func() tea.Msg {
+		if fn == nil {
+			return CandidatesRefreshedMsg{}
+		}
+		return CandidatesRefreshedMsg{Candidates: fn()}
+	}
 }
 
 // SetContext sets the context used to control the external editor subprocess.
@@ -628,9 +663,6 @@ func (m *Model) detectMention() {
 		return
 	}
 	query := strings.ToLower(word[1:])
-	if len(m.fileCandidates) == 0 && m.candidateFn != nil {
-		m.fileCandidates = m.candidateFn()
-	}
 	candidates := m.filterCandidates(query)
 	if len(candidates) == 0 {
 		m.mention = nil
@@ -813,6 +845,14 @@ func (m *Model) updateStyles() {
 	m.textarea.SetStyles(s)
 }
 
+// clipboardReaderFn is a test seam for clipboard access.
+var (
+	readImageFn      = clipboard.ReadImage
+	readFilePathsFn  = clipboard.ReadFilePaths
+	copyFileToTempFn = clipboard.CopyFileToTemp
+	saveDataFn       = clipboard.SaveData
+)
+
 // pasteCmd reads the clipboard asynchronously and returns a PasteMsg with any
 // image or file attachments. It runs outside the model lock because clipboard
 // I/O may block.
@@ -825,40 +865,53 @@ func (m *Model) pasteCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		return PasteMsg{Parts: readClipboardAttachments(ctx, configDir)}
+		parts, err := readClipboardAttachments(ctx, configDir)
+		if err != nil {
+			return PasteErrorMsg{Err: err}
+		}
+		return PasteMsg{Parts: parts}
 	}
 }
 
 // readClipboardAttachments attempts to read an image or file list from the
-// clipboard and returns them as content parts. Errors are swallowed because a
-// failed paste is not fatal.
-func readClipboardAttachments(ctx context.Context, configDir string) []api.ContentPart {
-	data, mime, err := clipboard.ReadImage(ctx)
+// clipboard and returns them as content parts. File-path attachments are copied
+// into configDir/tmp so they stay within the LLM attachment sandbox.
+func readClipboardAttachments(ctx context.Context, configDir string) ([]api.ContentPart, error) {
+	data, mime, err := readImageFn(ctx)
 	if err == nil && len(data) > 0 {
-		path, saveErr := clipboard.SaveData(data, clipboard.ExtensionForMIME(mime), configDir)
+		path, saveErr := saveDataFn(data, clipboard.ExtensionForMIME(mime), configDir)
 		if saveErr == nil {
-			return []api.ContentPart{{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: path}}}
+			return []api.ContentPart{{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: path}}}, nil
 		}
+		return nil, saveErr
 	}
 
-	paths, err := clipboard.ReadFilePaths(ctx)
-	if err != nil || len(paths) == 0 {
-		return nil
+	paths, err := readFilePathsFn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return nil, nil
 	}
 	parts := make([]api.ContentPart, 0, len(paths))
 	for _, path := range paths {
 		mime := clipboard.MIMEForPath(path)
+		tmpPath, copyErr := copyFileToTempFn(path, configDir)
+		if copyErr != nil {
+			return nil, copyErr
+		}
 		if strings.HasPrefix(mime, "image/") {
-			parts = append(parts, api.ContentPart{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: path}})
+			parts = append(parts, api.ContentPart{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: tmpPath}})
 		} else {
-			parts = append(parts, api.ContentPart{Type: api.ContentPartText, Text: "[Attached file: " + path + "]"})
+			parts = append(parts, api.ContentPart{Type: api.ContentPartText, Text: "[Attached file: " + tmpPath + "]"})
 		}
 	}
-	return parts
+	return parts, nil
 }
 
 // addContentPart stores a pasted content part as a file attachment if it
-// references a local path.
+// references a local path. For text markers that encode an attached file path,
+// the path is extracted and stored so the marker is re-emitted on send.
 func (m *Model) addContentPart(part api.ContentPart) {
 	switch part.Type {
 	case api.ContentPartImageURL:
@@ -867,10 +920,28 @@ func (m *Model) addContentPart(part api.ContentPart) {
 			m.attachments = append(m.attachments, Attachment{Path: part.ImageURL.URL, MIMEType: mime})
 		}
 	case api.ContentPartText:
-		if part.Text != "" {
+		if part.Text == "" {
+			return
+		}
+		if path, ok := parseAttachedFileMarker(part.Text); ok {
+			mime := clipboard.MIMEForPath(path)
+			m.attachments = append(m.attachments, Attachment{Path: path, MIMEType: mime})
+		} else {
 			m.attachments = append(m.attachments, Attachment{Path: "", MIMEType: "text/plain"})
 		}
 	}
+}
+
+// parseAttachedFileMarker extracts the file path from a marker like
+// "[Attached file: /path/to/file]".
+func parseAttachedFileMarker(text string) (string, bool) {
+	const prefix = "[Attached file: "
+	const suffix = "]"
+	if !strings.HasPrefix(text, prefix) || !strings.HasSuffix(text, suffix) {
+		return "", false
+	}
+	path := strings.TrimSuffix(strings.TrimPrefix(text, prefix), suffix)
+	return path, path != ""
 }
 
 // attachmentContentParts converts stored attachments to content parts.

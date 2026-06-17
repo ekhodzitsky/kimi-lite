@@ -790,3 +790,63 @@ func TestPlanModeHeightAccountsForIndicator(t *testing.T) {
 		t.Errorf("plan mode height = %d should be greater than non-plan height = %d", heightWith, heightWithout)
 	}
 }
+
+func TestRefreshCandidatesCmd_PopulatesCandidates(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+
+	called := false
+	m.SetCandidateFunc(func() []string {
+		called = true
+		return []string{"cmd/main.go", "internal/app.go"}
+	})
+
+	cmd := m.RefreshCandidatesCmd()
+	if cmd == nil {
+		t.Fatal("expected RefreshCandidatesCmd to return a command")
+	}
+
+	msg := cmd()
+	refreshed, ok := msg.(CandidatesRefreshedMsg)
+	if !ok {
+		t.Fatalf("expected CandidatesRefreshedMsg, got %T", msg)
+	}
+	if !called {
+		t.Error("candidate function was not called")
+	}
+	if len(refreshed.Candidates) != 2 {
+		t.Errorf("candidates = %d, want 2", len(refreshed.Candidates))
+	}
+
+	updated, _ := m.Update(refreshed)
+	inp := updated.(*Model)
+	if len(inp.fileCandidates) != 2 {
+		t.Errorf("fileCandidates = %d, want 2", len(inp.fileCandidates))
+	}
+}
+
+func TestDetectMention_DoesNotCallCandidateFnSynchronously(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+
+	called := false
+	m.SetCandidateFunc(func() []string {
+		called = true
+		return nil
+	})
+
+	m.SetValue("@cmd")
+	m.detectMention()
+
+	if called {
+		t.Error("detectMention should not call candidateFn synchronously")
+	}
+	if m.Completing() {
+		t.Error("expected no completion when candidates are empty")
+	}
+}
