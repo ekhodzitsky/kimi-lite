@@ -100,6 +100,39 @@ func TestSendMessage(t *testing.T) {
 	}
 }
 
+func TestSendMessage_WithContentParts(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	parts := []api.ContentPart{
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "https://example.com/img.png"}},
+	}
+	updated, cmd := m.Update(input.SendMsg{Content: "hello", ContentParts: parts})
+	model := updated.(*Model)
+
+	if model.state != api.TurnThinking {
+		t.Errorf("state = %d, want TurnThinking", model.state)
+	}
+
+	if cmd == nil {
+		t.Fatal("expected command for SendMessageMsg")
+	}
+	msg := cmd()
+	sendMsg, ok := msg.(SendMessageMsg)
+	if !ok {
+		t.Fatalf("expected SendMessageMsg, got %T", msg)
+	}
+	if len(sendMsg.ContentParts) != 1 {
+		t.Errorf("ContentParts = %d, want 1", len(sendMsg.ContentParts))
+	}
+}
+
 func TestCommandCompact(t *testing.T) {
 	t.Parallel()
 
@@ -490,8 +523,16 @@ func (r *recordingTurnManager) RunTurn(ctx context.Context, sessionID string, in
 	return nil, nil
 }
 
+func (r *recordingTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return r.RunTurn(ctx, sessionID, input)
+}
+
 func (r *recordingTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	return nil, nil
+}
+
+func (r *recordingTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return r.RunTurnWithPlan(ctx, sessionID, input)
 }
 
 func (r *recordingTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
@@ -1511,8 +1552,16 @@ func (f *fakeTurnManager) RunTurn(ctx context.Context, sessionID string, input s
 	return ch, nil
 }
 
+func (f *fakeTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return f.RunTurn(ctx, sessionID, input)
+}
+
 func (f *fakeTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	return f.RunTurn(ctx, sessionID, input)
+}
+
+func (f *fakeTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return f.RunTurnWithPlan(ctx, sessionID, input)
 }
 
 func (f *fakeTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
@@ -2232,9 +2281,17 @@ func (c *capturingErrorTurnManager) RunTurn(ctx context.Context, sessionID strin
 	return nil, errors.New("run turn failed")
 }
 
+func (c *capturingErrorTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return c.RunTurn(ctx, sessionID, input)
+}
+
 func (c *capturingErrorTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	c.capturedCtx = ctx
 	return nil, errors.New("run turn failed")
+}
+
+func (c *capturingErrorTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return c.RunTurnWithPlan(ctx, sessionID, input)
 }
 
 func (c *capturingErrorTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
@@ -2281,8 +2338,16 @@ func (e *errorResumeTurnManager) RunTurn(ctx context.Context, sessionID string, 
 	return nil, nil
 }
 
+func (e *errorResumeTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return e.RunTurn(ctx, sessionID, input)
+}
+
 func (e *errorResumeTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	return nil, nil
+}
+
+func (e *errorResumeTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return e.RunTurnWithPlan(ctx, sessionID, input)
 }
 
 func (e *errorResumeTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
@@ -2884,12 +2949,20 @@ func (r *recordingPlanTurnManager) RunTurn(ctx context.Context, sessionID string
 	return nil, nil
 }
 
+func (r *recordingPlanTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return r.RunTurn(ctx, sessionID, input)
+}
+
 func (r *recordingPlanTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
 	r.runTurnWithPlanCalled = true
 	r.runTurnWithPlanInput = input
 	ch := make(chan api.TurnEvent)
 	close(ch)
 	return ch, nil
+}
+
+func (r *recordingPlanTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return r.RunTurnWithPlan(ctx, sessionID, input)
 }
 
 func (r *recordingPlanTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
@@ -2903,5 +2976,69 @@ func (r *recordingPlanTurnManager) ResumeWithApproval(ctx context.Context, sessi
 }
 
 func (r *recordingPlanTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
+}
+
+func TestSendMessage_ForwardsContentPartsToTurnManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	tm := &recordingPartsTurnManager{}
+	m.SetTurnManager(tm)
+
+	parts := []api.ContentPart{
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "https://example.com/img.png"}},
+	}
+	m.Update(input.SendMsg{Content: "describe", ContentParts: parts})
+
+	if !tm.runTurnWithContentPartsCalled {
+		t.Error("expected RunTurnWithContentParts to be called")
+	}
+	if tm.input != "describe" {
+		t.Errorf("input = %q, want %q", tm.input, "describe")
+	}
+	if len(tm.parts) != 1 {
+		t.Errorf("parts = %d, want 1", len(tm.parts))
+	}
+}
+
+type recordingPartsTurnManager struct {
+	runTurnWithContentPartsCalled bool
+	input                         string
+	parts                         []api.ContentPart
+}
+
+func (r *recordingPartsTurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingPartsTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	r.runTurnWithContentPartsCalled = true
+	r.input = input
+	r.parts = parts
+	ch := make(chan api.TurnEvent)
+	close(ch)
+	return ch, nil
+}
+
+func (r *recordingPartsTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingPartsTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingPartsTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
+}
+
+func (r *recordingPartsTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	return nil
 }

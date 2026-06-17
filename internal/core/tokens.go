@@ -67,6 +67,11 @@ func (e *HeuristicTokenEstimator) estimateContentPart(p api.ContentPart) int {
 			return 85
 		}
 		return 255
+	case api.ContentPartImageData:
+		if p.ImageData != nil && p.ImageData.MIMEType != "" {
+			return 255
+		}
+		return 255
 	default:
 		return e.estimateString(p.Text)
 	}

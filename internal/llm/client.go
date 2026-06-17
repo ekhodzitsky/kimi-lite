@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -14,8 +15,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -528,7 +532,8 @@ func isRetryableError(err error) bool {
 // messageContent returns the OpenAI content value for a message: a plain
 // string when no content parts are present, otherwise an array of text/image
 // parts. The message's plain-text Content is always included as the first text
-// part so it is not lost when images are attached.
+// part so it is not lost when images are attached. Local file paths in image
+// parts are read and converted to base64 data URLs.
 func messageContent(msg api.Message) any {
 	if len(msg.ContentParts) == 0 {
 		return msg.Content
@@ -548,14 +553,37 @@ func messageContent(msg api.Message) any {
 			}
 			url := ""
 			if p.ImageURL != nil {
-				url = p.ImageURL.URL
+				url = imageURLToDataURL(p.ImageURL.URL)
 			}
 			parts = append(parts, contentPart{Type: "image_url", ImageURL: &imageURLPart{URL: url, Detail: detail}})
+		case api.ContentPartImageData:
+			if p.ImageData != nil {
+				url := fmt.Sprintf("data:%s;base64,%s", p.ImageData.MIMEType, p.ImageData.Data)
+				parts = append(parts, contentPart{Type: "image_url", ImageURL: &imageURLPart{URL: url}})
+			}
 		default:
 			parts = append(parts, contentPart{Type: "text", Text: p.Text})
 		}
 	}
 	return parts
+}
+
+// imageURLToDataURL converts a local file path to a base64 data URL. Non-local
+// URLs are returned unchanged.
+func imageURLToDataURL(url string) string {
+	if url == "" {
+		return url
+	}
+	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "data:") {
+		return url
+	}
+	path := filepath.Clean(url)
+	data, err := os.ReadFile(path) //nolint:gosec // path is user-provided paste attachment; cleaned above
+	if err != nil {
+		return url
+	}
+	mime := http.DetectContentType(data)
+	return fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(data))
 }
 
 // buildChatRequest constructs the API request payload from api types.

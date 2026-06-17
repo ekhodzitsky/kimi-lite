@@ -133,7 +133,9 @@ func (m *Model) layout() layoutRect {
 // turnManager is the interface needed from core.TurnManager.
 type turnManager interface {
 	RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
+	RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error)
 	RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
+	RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error)
 	ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error
 	ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error
 	Steer(ctx context.Context, sessionID string, input string) error
@@ -277,6 +279,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeCon
 	inp := input.New(st, input.ConfigurableKeyMap(cfg.Keybindings), cfg.Session.MaxHistory)
 	inp.SetEditor(cfg.UI.Editor)
 	inp.SetContext(appCtx)
+	inp.SetConfigDir(themeConfigDir)
 	inp.SetSlashCommands(input.DefaultSlashCommands)
 	vp := viewport.New(st)
 	ft := footer.New(st)
@@ -406,6 +409,7 @@ func (m *Model) helpData() help.Data {
 			{Keys: "ctrl+g", Description: "External editor"},
 			{Keys: "ctrl+y", Description: "Toggle yolo mode"},
 			{Keys: "ctrl+s", Description: "Steer response while streaming"},
+			{Keys: "ctrl+v/alt+v", Description: "Paste image or file"},
 			{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
 			{Keys: "enter", Description: "Expand/collapse tool call"},
 		},
@@ -672,7 +676,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildRenderedContent()
 
 	case input.SendMsg:
-		cmds = append(cmds, m.handleSend(msg.Content)...)
+		cmds = append(cmds, m.handleSend(msg.Content, msg.ContentParts)...)
 
 	case footerGitRefreshMsg:
 		cmds = append(cmds, m.gitRefreshCmd(), m.scheduleGitRefreshCmd())
@@ -1101,7 +1105,7 @@ func (m *Model) handleMouseMsg(msg tea.MouseReleaseMsg) {
 	}
 }
 
-func (m *Model) handleSend(content string) []tea.Cmd {
+func (m *Model) handleSend(content string, parts []api.ContentPart) []tea.Cmd {
 	var cmds []tea.Cmd
 
 	if strings.HasPrefix(content, "/") {
@@ -1134,11 +1138,21 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 		m.streamCanceled = false
 		m.mu.Unlock()
 
-		run := m.turnManager.RunTurn
+		var streamCh <-chan api.TurnEvent
+		var err error
 		if planMode {
-			run = m.turnManager.RunTurnWithPlan
+			if len(parts) > 0 {
+				streamCh, err = m.turnManager.RunTurnWithPlanWithContentParts(ctx, m.session.ID, content, parts)
+			} else {
+				streamCh, err = m.turnManager.RunTurnWithPlan(ctx, m.session.ID, content)
+			}
+		} else {
+			if len(parts) > 0 {
+				streamCh, err = m.turnManager.RunTurnWithContentParts(ctx, m.session.ID, content, parts)
+			} else {
+				streamCh, err = m.turnManager.RunTurn(ctx, m.session.ID, content)
+			}
 		}
-		streamCh, err := run(ctx, m.session.ID, content)
 		if err != nil {
 			cancel()
 			m.mu.Lock()
@@ -1159,7 +1173,7 @@ func (m *Model) handleSend(content string) []tea.Cmd {
 
 	// Fallback for tests or when no services are wired.
 	cmds = append(cmds, func() tea.Msg {
-		return SendMessageMsg{Content: content}
+		return SendMessageMsg{Content: content, ContentParts: parts}
 	})
 	return cmds
 }

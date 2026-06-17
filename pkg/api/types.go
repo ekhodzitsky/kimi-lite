@@ -33,6 +33,8 @@ const (
 	ContentPartText ContentPartType = "text"
 	// ContentPartImageURL is an image referenced by URL or data URL.
 	ContentPartImageURL ContentPartType = "image_url"
+	// ContentPartImageData is an image encoded as inline base64 data.
+	ContentPartImageData ContentPartType = "image_data"
 )
 
 // ImageURL describes an image for a content part.
@@ -41,11 +43,18 @@ type ImageURL struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// ImageData describes inline image data for a content part.
+type ImageData struct {
+	MIMEType string `json:"mime_type"`
+	Data     string `json:"data"`
+}
+
 // ContentPart represents a single part of a multi-modal message.
 type ContentPart struct {
-	Type     ContentPartType `json:"type"`
-	Text     string          `json:"text,omitempty"`
-	ImageURL *ImageURL       `json:"image_url,omitempty"`
+	Type      ContentPartType `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ImageURL  *ImageURL       `json:"image_url,omitempty"`
+	ImageData *ImageData      `json:"image_data,omitempty"`
 }
 
 // Message represents a single message in a conversation.
@@ -223,9 +232,14 @@ func (s *TurnState) UnmarshalJSON(b []byte) error {
 type TurnManager interface {
 	// RunTurn executes a normal turn.
 	RunTurn(ctx context.Context, sessionID string, input string) (<-chan TurnEvent, error)
+	// RunTurnWithContentParts executes a normal turn with multimodal content parts.
+	RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []ContentPart) (<-chan TurnEvent, error)
 	// RunTurnWithPlan executes a turn in plan mode. The assistant first produces
 	// a plan, then waits for approval before executing it.
 	RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan TurnEvent, error)
+	// RunTurnWithPlanWithContentParts executes a plan-mode turn with multimodal
+	// content parts.
+	RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []ContentPart) (<-chan TurnEvent, error)
 	// ResumeWithPlan resumes a plan-mode turn after approval or rejection.
 	ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error
 	// ResumeWithApproval resumes a turn waiting for tool-call approval.
@@ -797,4 +811,5 @@ type KeybindingConfig struct {
 	ApproveDiff    string `mapstructure:"approve_diff"`
 	ExternalEditor string `mapstructure:"external_editor"`
 	Steer          string `mapstructure:"steer"`
+	Paste          string `mapstructure:"paste"`
 }

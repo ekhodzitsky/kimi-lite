@@ -105,6 +105,64 @@ func TestTurnManager_RunTurn_Simple(t *testing.T) {
 	}
 }
 
+func TestTurnManager_RunTurnWithContentParts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: func(_ context.Context, messages []api.Message, _ []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			if len(messages) == 0 || len(messages[0].ContentParts) == 0 {
+				return nil, fmt.Errorf("expected content parts in user message")
+			}
+			ch := make(chan api.StreamChunk, 2)
+			ch <- api.StreamChunk{Content: "Hello"}
+			ch <- api.StreamChunk{Content: " world", Done: true}
+			close(ch)
+			return ch, nil
+		},
+	}
+	tools := &mockToolExecutor{}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
+
+	parts := []api.ContentPart{
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "https://example.com/img.png"}},
+	}
+	outCh, err := tm.RunTurnWithContentParts(ctx, sess.ID, "Hi", parts)
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	var contents []string
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
+	}
+	if len(contents) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(contents))
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if len(msgs[0].ContentParts) != 1 {
+		t.Fatalf("user message content parts = %d, want 1", len(msgs[0].ContentParts))
+	}
+	if msgs[0].ContentParts[0].ImageURL.URL != "https://example.com/img.png" {
+		t.Errorf("image url = %q, want %q", msgs[0].ContentParts[0].ImageURL.URL, "https://example.com/img.png")
+	}
+}
+
 func TestTurnManager_RunTurn_WithToolCalls(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Image and video paste support in the TUI. Press `Ctrl+V` or `Alt+V` to paste
+  clipboard images or file paths; pasted media is saved to `<config-dir>/tmp`
+  and attached as multimodal content parts on the outgoing user message.
+- `api.ContentPart` now supports inline `image_data` in addition to `image_url`.
+- `api.TurnManager` gains `RunTurnWithContentParts` and
+  `RunTurnWithPlanWithContentParts` for multimodal turns.
+
 ## [0.4.2] - 2026-06-16
 
 ### Changed
