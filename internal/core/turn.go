@@ -48,6 +48,13 @@ type TurnManager struct {
 
 	cancelMu     sync.Mutex
 	activeCancel context.CancelFunc
+
+	planMu         sync.Mutex
+	planPending    bool
+	planInput      string
+	planSessionID  string
+	planApprovalCh chan bool
+	planResult     string
 }
 
 // NewTurnManager creates a new TurnManager. It returns an error if any required
@@ -66,13 +73,14 @@ func NewTurnManager(llm api.LLMClient, tools api.ToolExecutor, approval api.Appr
 		return nil, fmt.Errorf("store is required")
 	}
 	return &TurnManager{
-		llm:        llm,
-		tools:      tools,
-		approval:   approval,
-		store:      store,
-		cfg:        cfg,
-		metrics:    api.NoopMetricsCollector{},
-		approvalCh: make(chan approvalPayload, 1),
+		llm:            llm,
+		tools:          tools,
+		approval:       approval,
+		store:          store,
+		cfg:            cfg,
+		metrics:        api.NoopMetricsCollector{},
+		approvalCh:     make(chan approvalPayload, 1),
+		planApprovalCh: make(chan bool, 1),
 	}, nil
 }
 
@@ -171,6 +179,27 @@ func (tm *TurnManager) ResumeWithApproval(ctx context.Context, sessionID string,
 	}
 }
 
+// ResumeWithPlan resumes a plan-mode turn after the user approves or rejects
+// the generated plan.
+func (tm *TurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	tm.planMu.Lock()
+	defer tm.planMu.Unlock()
+	if !tm.planPending {
+		return fmt.Errorf("no plan pending")
+	}
+	if tm.planSessionID != sessionID {
+		return fmt.Errorf("sessionID mismatch: got %q, want %q", sessionID, tm.planSessionID)
+	}
+	select {
+	case tm.planApprovalCh <- approved:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return fmt.Errorf("plan approval channel busy")
+	}
+}
+
 // Wait blocks until all in-flight turns complete.
 func (tm *TurnManager) Wait() {
 	tm.wg.Wait()
@@ -198,6 +227,16 @@ func (tm *TurnManager) CancelAll() {
 // It returns a channel that streams turn events (content, done, error).
 // Returns an error if a turn is already in progress.
 func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return tm.runTurnInternal(ctx, sessionID, input, false)
+}
+
+// RunTurnWithPlan executes a turn in plan mode. The assistant first produces a
+// plan, then waits for approval before executing it.
+func (tm *TurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return tm.runTurnInternal(ctx, sessionID, input, true)
+}
+
+func (tm *TurnManager) runTurnInternal(ctx context.Context, sessionID string, input string, planMode bool) (<-chan api.TurnEvent, error) {
 	if !tm.running.CompareAndSwap(false, true) {
 		return nil, fmt.Errorf("turn already in progress")
 	}
@@ -205,7 +244,7 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 	tm.cancelMu.Lock()
 	tm.activeCancel = runCancel
 	tm.cancelMu.Unlock()
-	outCh, err := tm.startTurn(runCtx, runCancel, sessionID, input)
+	outCh, err := tm.startTurn(runCtx, runCancel, sessionID, input, planMode)
 	if err != nil {
 		tm.running.Store(false)
 		runCancel()
@@ -217,7 +256,7 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 	return outCh, nil
 }
 
-func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFunc, sessionID string, input string) (<-chan api.TurnEvent, error) {
+func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFunc, sessionID string, input string, planMode bool) (<-chan api.TurnEvent, error) {
 	if tm.cfg != nil && tm.cfg.Get() != nil {
 		maxTurns := tm.cfg.Get().Behavior.MaxTurns
 		if maxTurns > 0 {
@@ -242,6 +281,18 @@ func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFu
 	tm.pendingMu.Lock()
 	tm.pendingCalls = nil
 	tm.pendingMu.Unlock()
+
+	// Drain any stale plan approval from previous plan-mode turns.
+	select {
+	case <-tm.planApprovalCh:
+	default:
+	}
+	tm.planMu.Lock()
+	tm.planPending = planMode
+	tm.planInput = input
+	tm.planSessionID = sessionID
+	tm.planResult = ""
+	tm.planMu.Unlock()
 
 	turn := &api.Turn{
 		ID:        idgen.GenerateID(),
@@ -290,12 +341,12 @@ func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFu
 	}
 
 	tm.wg.Add(1)
-	go tm.run(ctx, runCancel, sessionID, turn, tools, streamCh, eventCh, msgLimit)
+	go tm.run(ctx, runCancel, sessionID, turn, tools, streamCh, eventCh, msgLimit, planMode)
 
 	return eventCh, nil
 }
 
-func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, sessionID string, turn *api.Turn, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int) {
+func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, sessionID string, turn *api.Turn, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int, planMode bool) {
 	defer tm.wg.Done()
 	defer close(eventCh)
 	defer tm.running.Store(false)
@@ -313,11 +364,84 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 		return
 	}
 
+	if planMode && len(toolCalls) == 0 {
+		planText := content
+		tm.mu.Lock()
+		turn.Response = planText
+		turn.State = api.TurnWaitingPlan
+		tm.mu.Unlock()
+		if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
+			slog.Error("failed to save turn", "error", err)
+		}
+
+		select {
+		case eventCh <- api.TurnEvent{Type: api.TurnEventPlanRequest, Content: planText}:
+		case <-ctx.Done():
+			tm.setError(ctx, sessionID, turn, ctx.Err(), eventCh)
+			return
+		}
+
+		var approved bool
+		select {
+		case approved = <-tm.planApprovalCh:
+		case <-ctx.Done():
+			tm.setError(ctx, sessionID, turn, ctx.Err(), eventCh)
+			return
+		}
+		if !approved {
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("plan rejected by user"), eventCh)
+			return
+		}
+
+		tm.planMu.Lock()
+		tm.planPending = false
+		tm.planResult = planText
+		tm.planMu.Unlock()
+
+		if err := tm.store.AppendMessage(ctx, sessionID, api.Message{
+			ID:        idgen.GenerateID(),
+			Role:      api.RoleAssistant,
+			Content:   planText,
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("append plan message: %w", err), eventCh)
+			return
+		}
+		if err := tm.store.AppendMessage(ctx, sessionID, api.Message{
+			ID:        idgen.GenerateID(),
+			Role:      api.RoleSystem,
+			Content:   "The user approved the plan. Proceed with execution.",
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("append continuation prompt: %w", err), eventCh)
+			return
+		}
+
+		messages, err := tm.store.GetMessages(ctx, sessionID, msgLimit)
+		if err != nil {
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("get messages: %w", err), eventCh)
+			return
+		}
+		streamCh, err := tm.llm.ChatStream(ctx, messages, tools)
+		if err != nil {
+			tm.setError(ctx, sessionID, turn, fmt.Errorf("chat stream: %w", err), eventCh)
+			return
+		}
+		content, toolCalls, err = tm.consumeStream(ctx, sessionID, turn, streamCh, eventCh)
+		if err != nil {
+			tm.persistPartialResponse(ctx, sessionID, turn, content)
+			tm.setError(ctx, sessionID, turn, err, eventCh)
+			return
+		}
+	}
+
 	tm.mu.Lock()
 	turn.Response = content
 	turn.ToolCalls = toolCalls
 	if len(toolCalls) > 0 {
 		turn.State = api.TurnToolCalls
+	} else {
+		turn.State = api.TurnStreaming
 	}
 	tm.mu.Unlock()
 	if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
@@ -571,6 +695,9 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 	}
 	tm.metrics.IncCounter("turn.completed")
 	tm.runHooks(ctx, api.HookTurnEnd, sessionID, turn.ID, "")
+	tm.planMu.Lock()
+	tm.planPending = false
+	tm.planMu.Unlock()
 	tm.mu.Lock()
 	tm.turn = turn
 	tm.mu.Unlock()
@@ -785,6 +912,9 @@ func (tm *TurnManager) setError(ctx context.Context, sessionID string, turn *api
 	tm.pendingMu.Lock()
 	tm.pendingCalls = nil
 	tm.pendingMu.Unlock()
+	tm.planMu.Lock()
+	tm.planPending = false
+	tm.planMu.Unlock()
 	if saveErr := tm.store.SaveTurn(ctx, sessionID, *turn); saveErr != nil {
 		slog.Error("failed to save turn", "error", saveErr)
 	}

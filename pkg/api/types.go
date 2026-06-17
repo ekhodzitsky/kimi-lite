@@ -114,6 +114,8 @@ const (
 	TurnToolCalls
 	// TurnWaitingApproval indicates waiting for user approval.
 	TurnWaitingApproval
+	// TurnWaitingPlan indicates waiting for user approval of a generated plan.
+	TurnWaitingPlan
 	// TurnError indicates a turn error occurred.
 	TurnError
 )
@@ -131,6 +133,8 @@ func (s TurnState) String() string {
 		return "tool_calls"
 	case TurnWaitingApproval:
 		return "waiting_approval"
+	case TurnWaitingPlan:
+		return "waiting_plan"
 	case TurnError:
 		return "error"
 	default:
@@ -151,6 +155,8 @@ func (s TurnState) ShortString() string {
 		return "tools"
 	case TurnWaitingApproval:
 		return "approval"
+	case TurnWaitingPlan:
+		return "plan"
 	case TurnError:
 		return "error"
 	default:
@@ -173,6 +179,8 @@ func ParseTurnState(s string) (TurnState, error) {
 		return TurnToolCalls, nil
 	case "waiting_approval":
 		return TurnWaitingApproval, nil
+	case "waiting_plan":
+		return TurnWaitingPlan, nil
 	case "error":
 		return TurnError, nil
 	default:
@@ -209,6 +217,25 @@ func (s *TurnState) UnmarshalJSON(b []byte) error {
 	}
 	*s = parsed
 	return nil
+}
+
+// TurnManager orchestrates a single user input → response cycle.
+type TurnManager interface {
+	// RunTurn executes a normal turn.
+	RunTurn(ctx context.Context, sessionID string, input string) (<-chan TurnEvent, error)
+	// RunTurnWithPlan executes a turn in plan mode. The assistant first produces
+	// a plan, then waits for approval before executing it.
+	RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan TurnEvent, error)
+	// ResumeWithPlan resumes a plan-mode turn after approval or rejection.
+	ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error
+	// ResumeWithApproval resumes a turn waiting for tool-call approval.
+	ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, decisions map[string]ApprovalDecision) error
+	// PendingApprovals returns the current pending tool calls and request ID.
+	PendingApprovals() ([]ToolCall, int64)
+	// Wait blocks until all in-flight turns complete.
+	Wait()
+	// CancelAll cancels the currently in-flight turn.
+	CancelAll()
 }
 
 // Turn represents a single user input → LLM response cycle.
@@ -268,6 +295,8 @@ const (
 	TurnEventStatus
 	// TurnEventToolProgress carries a live output chunk from a running tool call.
 	TurnEventToolProgress
+	// TurnEventPlanRequest carries a generated plan that requires user approval.
+	TurnEventPlanRequest
 )
 
 // ToolProgressCallback is called with output chunks from a running tool.

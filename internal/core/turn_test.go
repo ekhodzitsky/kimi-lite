@@ -1624,6 +1624,223 @@ func TestTurnManager_RunTurn_ErrorEventEmitted(t *testing.T) {
 	}
 }
 
+func TestTurnManager_RunTurnWithPlan_Approved(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Content: "1. Read file\n2. Summarize"},
+					api.StreamChunk{Done: true},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Content: "Executed plan"},
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{defs: []api.ToolDefinition{}}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurnWithPlan(ctx, sess.ID, "Plan something")
+	if err != nil {
+		t.Fatalf("run turn with plan: %v", err)
+	}
+
+	var contents []string
+	var planEvent *api.TurnEvent
+	done := make(chan struct{})
+	go func() {
+		for e := range outCh {
+			switch e.Type {
+			case api.TurnEventContent:
+				contents = append(contents, e.Content)
+			case api.TurnEventPlanRequest:
+				ev := e
+				planEvent = &ev
+			}
+		}
+		close(done)
+	}()
+
+	for i := 0; i < 100 && planEvent == nil; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if planEvent == nil {
+		t.Fatal("expected plan request event")
+	}
+	if planEvent.Content != "1. Read file\n2. Summarize" {
+		t.Errorf("plan content = %q, want %q", planEvent.Content, "1. Read file\n2. Summarize")
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil {
+		t.Fatal("expected current turn")
+	}
+	if turn.State != api.TurnWaitingPlan {
+		t.Errorf("state = %d, want TurnWaitingPlan", turn.State)
+	}
+
+	if err := tm.ResumeWithPlan(ctx, sess.ID, true); err != nil {
+		t.Fatalf("resume with plan: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn to complete")
+	}
+
+	turn = tm.CurrentTurn()
+	if turn.State != api.TurnIdle {
+		t.Errorf("state = %d, want TurnIdle", turn.State)
+	}
+	if turn.Response != "Executed plan" {
+		t.Errorf("response = %q, want %q", turn.Response, "Executed plan")
+	}
+	if len(contents) != 2 {
+		t.Errorf("expected 2 content chunks, got %d: %v", len(contents), contents)
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(msgs))
+	}
+	wantRoles := []api.Role{api.RoleUser, api.RoleAssistant, api.RoleSystem, api.RoleAssistant}
+	for i, want := range wantRoles {
+		if msgs[i].Role != want {
+			t.Errorf("msg[%d].role = %q, want %q", i, msgs[i].Role, want)
+		}
+	}
+}
+
+func TestTurnManager_RunTurnWithPlan_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "1. Do thing"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	tools := &mockToolExecutor{defs: []api.ToolDefinition{}}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurnWithPlan(ctx, sess.ID, "Plan something")
+	if err != nil {
+		t.Fatalf("run turn with plan: %v", err)
+	}
+
+	var planEvent *api.TurnEvent
+	var errEvent *api.TurnEvent
+	done := make(chan struct{})
+	go func() {
+		for e := range outCh {
+			switch e.Type {
+			case api.TurnEventPlanRequest:
+				ev := e
+				planEvent = &ev
+			case api.TurnEventError:
+				ev := e
+				errEvent = &ev
+			}
+		}
+		close(done)
+	}()
+
+	for i := 0; i < 100 && planEvent == nil; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if planEvent == nil {
+		t.Fatal("expected plan request event")
+	}
+
+	if err := tm.ResumeWithPlan(ctx, sess.ID, false); err != nil {
+		t.Fatalf("resume with plan: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn to complete")
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil || turn.State != api.TurnError {
+		t.Fatalf("expected TurnError, got %v", turn)
+	}
+	if !strings.Contains(turn.Error, "plan rejected") {
+		t.Errorf("error = %q, want containing 'plan rejected'", turn.Error)
+	}
+	if errEvent == nil {
+		t.Fatal("expected error event")
+	}
+	if !strings.Contains(errEvent.Error.Error(), "plan rejected") {
+		t.Errorf("error event = %v, want plan rejected", errEvent.Error)
+	}
+}
+
+func TestTurnManager_ResumeWithPlan_SessionIDMismatch(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "1. Do thing"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+
+	outCh, err := tm.RunTurnWithPlan(ctx, sess.ID, "Plan something")
+	if err != nil {
+		t.Fatalf("run turn with plan: %v", err)
+	}
+
+	for i := 0; i < 100; i++ {
+		turn := tm.CurrentTurn()
+		if turn != nil && turn.State == api.TurnWaitingPlan {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := tm.ResumeWithPlan(ctx, "wrong-session", true); err == nil {
+		t.Fatal("expected error for sessionID mismatch")
+	}
+
+	cancel()
+	for range outCh {
+	}
+}
+
 // captureHookRunner records every hook data it receives.
 type captureHookRunner struct {
 	calls []api.HookData
