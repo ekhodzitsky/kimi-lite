@@ -353,8 +353,14 @@ func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFu
 	tm.planResult = ""
 	tm.planMu.Unlock()
 
+	nextSeq, err := tm.store.NextTurnSeq(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("next turn seq: %w", err)
+	}
+
 	turn := &api.Turn{
 		ID:        idgen.GenerateID(),
+		Seq:       nextSeq,
 		State:     api.TurnStreaming,
 		Input:     input,
 		StartedAt: time.Now().UTC(),

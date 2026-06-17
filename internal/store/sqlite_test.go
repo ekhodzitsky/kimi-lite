@@ -1386,8 +1386,8 @@ func TestSQLite_MigrationRunner(t *testing.T) {
 		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 			t.Fatalf("read user_version: %v", err)
 		}
-		if version != 2 {
-			t.Errorf("user_version = %d, want 2", version)
+		if version != 3 {
+			t.Errorf("user_version = %d, want 3", version)
 		}
 	})
 
@@ -1711,6 +1711,49 @@ func TestSQLite_CountTurns(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("thinking count = %d, want 1", count)
+	}
+}
+
+func TestSQLite_NextTurnSeq(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	sess, err := s.CreateSession(ctx, "/tmp/proj")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if _, err := s.NextTurnSeq(ctx, ""); err == nil {
+		t.Error("expected error for empty session ID")
+	}
+
+	seq, err := s.NextTurnSeq(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("next turn seq: %v", err)
+	}
+	if seq != 1 {
+		t.Errorf("seq = %d, want 1", seq)
+	}
+
+	for _, seq := range []int{1, 2, 5} {
+		turn := api.Turn{
+			ID:        fmt.Sprintf("turn-%d", seq),
+			Seq:       seq,
+			State:     api.TurnIdle,
+			StartedAt: time.Now().UTC(),
+		}
+		if err := s.SaveTurn(ctx, sess.ID, turn); err != nil {
+			t.Fatalf("save turn %d: %v", seq, err)
+		}
+	}
+
+	seq, err = s.NextTurnSeq(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("next turn seq after saves: %v", err)
+	}
+	if seq != 6 {
+		t.Errorf("seq = %d, want 6", seq)
 	}
 }
 

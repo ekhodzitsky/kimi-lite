@@ -223,6 +223,18 @@ func (m *mockStore) CountTurns(ctx context.Context, sessionID string, state api.
 	return count, nil
 }
 
+func (m *mockStore) NextTurnSeq(ctx context.Context, sessionID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	max := 0
+	for _, t := range m.turns[sessionID] {
+		if t.Seq > max {
+			max = t.Seq
+		}
+	}
+	return max + 1, nil
+}
+
 func (m *mockStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

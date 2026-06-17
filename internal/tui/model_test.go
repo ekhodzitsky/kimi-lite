@@ -1517,6 +1517,9 @@ func (m *mockStore) GetTurns(ctx context.Context, sessionID string, limit int) (
 func (m *mockStore) CountTurns(ctx context.Context, sessionID string, state api.TurnState) (int, error) {
 	return 0, nil
 }
+func (m *mockStore) NextTurnSeq(ctx context.Context, sessionID string) (int, error) {
+	return 1, nil
+}
 func (m *mockStore) Close() error { return nil }
 
 type fakeGitProvider struct {

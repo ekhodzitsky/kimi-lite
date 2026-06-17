@@ -1418,6 +1418,9 @@ func (c *closingStore) GetTurns(_ context.Context, _ string, _ int) ([]api.Turn,
 func (c *closingStore) CountTurns(_ context.Context, _ string, _ api.TurnState) (int, error) {
 	return 0, nil
 }
+func (c *closingStore) NextTurnSeq(_ context.Context, _ string) (int, error) {
+	return 1, nil
+}
 
 func TestACPCmd_ExecutesClosure(t *testing.T) {
 	origNewApp := newApp

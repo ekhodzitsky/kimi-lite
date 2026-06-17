@@ -257,6 +257,7 @@ type TurnManager interface {
 // Turn represents a single user input → LLM response cycle.
 type Turn struct {
 	ID        string       `json:"id"`
+	Seq       int          `json:"seq"`
 	State     TurnState    `json:"state"`
 	Input     string       `json:"input"`
 	Response  string       `json:"response"`
@@ -366,6 +367,10 @@ type TurnStore interface {
 	SaveTurn(ctx context.Context, sessionID string, turn Turn) error
 	GetTurns(ctx context.Context, sessionID string, limit int) ([]Turn, error)
 	CountTurns(ctx context.Context, sessionID string, state TurnState) (int, error)
+	// NextTurnSeq returns the next monotonic sequence number for a turn in the
+	// given session. The counter is restored from persisted turns so resumed
+	// sessions continue numbering where they left off instead of restarting at 1.
+	NextTurnSeq(ctx context.Context, sessionID string) (int, error)
 }
 
 // Store is the composite interface for all persistence operations.

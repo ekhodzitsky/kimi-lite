@@ -763,9 +763,10 @@ func (s *SQLite) SaveTurn(ctx context.Context, sessionID string, turn api.Turn) 
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO turns (id, session_id, state, input, response, tool_calls, results, error, started_at, ended_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO turns (id, session_id, seq, state, input, response, tool_calls, results, error, started_at, ended_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id, session_id) DO UPDATE SET
+		   seq = excluded.seq,
 		   state = excluded.state,
 		   input = excluded.input,
 		   response = excluded.response,
@@ -774,7 +775,7 @@ func (s *SQLite) SaveTurn(ctx context.Context, sessionID string, turn api.Turn) 
 		   error = excluded.error,
 		   started_at = excluded.started_at,
 		   ended_at = excluded.ended_at`,
-		turn.ID, sessionID, turn.State.String(), turn.Input, turn.Response,
+		turn.ID, sessionID, turn.Seq, turn.State.String(), turn.Input, turn.Response,
 		string(toolCallsJSON), string(resultsJSON), turn.Error,
 		turn.StartedAt.UTC(), endedAt,
 	); err != nil {
@@ -801,7 +802,7 @@ func (s *SQLite) GetTurns(ctx context.Context, sessionID string, limit int) ([]a
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, state, input, response, tool_calls, results, error, started_at, ended_at FROM turns WHERE session_id = ? ORDER BY started_at ASC, id ASC LIMIT ?`, sessionID, limit,
+		`SELECT id, seq, state, input, response, tool_calls, results, error, started_at, ended_at FROM turns WHERE session_id = ? ORDER BY started_at ASC, seq ASC, id ASC LIMIT ?`, sessionID, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get turns: %w", err)
@@ -815,7 +816,7 @@ func (s *SQLite) GetTurns(ctx context.Context, sessionID string, limit int) ([]a
 		var toolCallsJSON string
 		var resultsJSON string
 		var endedAt sql.NullTime
-		if err := rows.Scan(&turn.ID, &stateStr, &turn.Input, &turn.Response, &toolCallsJSON, &resultsJSON, &turn.Error, &turn.StartedAt, &endedAt); err != nil {
+		if err := rows.Scan(&turn.ID, &turn.Seq, &stateStr, &turn.Input, &turn.Response, &toolCallsJSON, &resultsJSON, &turn.Error, &turn.StartedAt, &endedAt); err != nil {
 			return nil, fmt.Errorf("scan turn: %w", err)
 		}
 		turn.State, err = api.ParseTurnState(stateStr)
@@ -857,6 +858,23 @@ func (s *SQLite) CountTurns(ctx context.Context, sessionID string, state api.Tur
 		return 0, fmt.Errorf("count turns: %w", err)
 	}
 	return count, nil
+}
+
+// NextTurnSeq returns the next monotonic sequence number for a turn in the
+// given session. It is 1-based and continues from the highest persisted seq so
+// that resumed sessions do not reuse turn numbers.
+func (s *SQLite) NextTurnSeq(ctx context.Context, sessionID string) (int, error) {
+	if sessionID == "" {
+		return 0, fmt.Errorf("session ID is required")
+	}
+	var max sql.NullInt64
+	row := s.db.QueryRowContext(ctx,
+		`SELECT MAX(seq) FROM turns WHERE session_id = ?`, sessionID,
+	)
+	if err := row.Scan(&max); err != nil {
+		return 0, fmt.Errorf("next turn seq: %w", err)
+	}
+	return int(max.Int64) + 1, nil
 }
 
 // Close closes the underlying database connection.

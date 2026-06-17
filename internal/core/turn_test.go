@@ -637,6 +637,50 @@ func TestTurnManager_RunTurn_MaxTurnsIgnoresErrored(t *testing.T) {
 	}
 }
 
+func TestTurnManager_RunTurn_SeqResumesFromPersistedTurns(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	// Simulate a resumed session that already has turns 1 and 2.
+	_ = store.SaveTurn(ctx, sess.ID, api.Turn{ID: "t1", Seq: 1, State: api.TurnIdle, StartedAt: time.Now().UTC()})
+	_ = store.SaveTurn(ctx, sess.ID, api.Turn{ID: "t2", Seq: 2, State: api.TurnIdle, StartedAt: time.Now().UTC()})
+
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "OK"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	tools := &mockToolExecutor{defs: []api.ToolDefinition{}}
+	approval := &mockApprovalGate{}
+
+	spy := &spyStore{mockStore: store}
+	tm := newTestTurnManager(t, llm, tools, approval, spy, nil)
+
+	outCh, err := tm.RunTurn(ctx, sess.ID, "Hi")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range outCh {
+	}
+	tm.Wait()
+
+	var found bool
+	for _, turn := range spy.savedTurns {
+		if turn.Input == "Hi" {
+			found = true
+			if turn.Seq != 3 {
+				t.Errorf("new turn seq = %d, want 3", turn.Seq)
+			}
+		}
+	}
+	if !found {
+		t.Error("new turn was not saved")
+	}
+}
+
 func TestTurnManager_RunTurn_StreamError(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
