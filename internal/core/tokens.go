@@ -67,6 +67,8 @@ func (e *HeuristicTokenEstimator) estimateContentPart(p api.ContentPart) int {
 			return 85
 		}
 		return 255
+	case api.ContentPartImageData:
+		return 255
 	default:
 		return e.estimateString(p.Text)
 	}

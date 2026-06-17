@@ -21,6 +21,7 @@ internal/
   observability/        # Metrics collection and profiling helpers
   store/                # SQLite persistence (pure-Go, CGO-free)
   tui/                  # Terminal UI (Bubble Tea)
+    help/               # /help overlay with shortcuts and slash commands
   git/                  # Git integration
 pkg/api/                # Public types and interfaces
 ```
@@ -42,6 +43,8 @@ Key interfaces and types:
 - `TokenEstimator` — Estimate
 - `MetricsCollector` / `HookRunner` — observability and lifecycle hooks
 - `TurnEventStatus` — transient status message event for the TUI
+- `TurnEventToolProgress` — live output chunk from a running tool call (currently shell)
+- `ToolProgressCallback` — context callback used by tools to stream live output chunks
 
 ### `internal/config`
 Configuration loading from TOML files, environment variables, and CLI flags.
@@ -69,6 +72,7 @@ OpenAI-compatible LLM client with SSE streaming.
 - `NewClient(cfg, httpClient)` — creates client
 - `Chat()` — non-streaming request
 - `ChatStream()` — returns `<-chan api.StreamChunk`
+- `SetAttachmentRoots([]string)` — restricts local file paths that may be inlined as base64 data URLs to the configured roots and a 10 MB size cap
 - Retry logic with exponential backoff (including 429 rate limits)
 - Context cancellation respected
 - Bare-client fallback when no custom httpClient is provided
@@ -77,7 +81,11 @@ OpenAI-compatible LLM client with SSE streaming.
 Business logic layer.
 
 - `SessionManager` — create, resume, list sessions; recovers interrupted tool calls by synthesizing missing tool-result messages on resume
-- `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages and emits `TurnEventStatus` messages for non-trivial tools
+- `TurnManager` — orchestrates input → LLM → tools → output; preserves multi-modal `ToolResult.ContentParts` on tool-result messages, emits `TurnEventStatus` messages for non-trivial tools, streams live shell output as `TurnEventToolProgress` events via a context callback, supports plan mode, and supports mid-stream steering
+  - `RunTurnWithContentParts` / `RunTurnWithPlanWithContentParts` — multimodal turn entry points that carry `api.ContentPart` attachments
+  - `RunTurnWithPlan` — executes a turn in plan mode; the assistant emits a plan and waits for user approval before running any tool calls
+  - `ResumeWithPlan` — resumes a plan-mode turn after the user approves or rejects the pending plan
+  - `Steer` — injects a follow-up instruction into a streaming turn
 - `BuiltInToolExecutor` — 13 built-in tools (`read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `dispatch_subagent`, `TodoList`) with sandboxed file access; `web_search` is only registered when an `api.WebSearcher` provider is injected
   - Uses `os.OpenRoot` when `SandboxRoot` is configured; falls back to `O_NOFOLLOW` (`openFileNoFollow`) when no sandbox root is set
   - Blocks protected paths and sensitive system/secret trees
@@ -96,13 +104,18 @@ Business logic layer.
 Bubble Tea terminal UI.
 
 - `Model` — root model composing child components
-- `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`)
+- `input` — multi-line textarea with history; `ctrl+g` opens the current buffer in the external editor (`ui.editor`, `$VISUAL`, `$EDITOR`, or `vi`); `Shift+Tab` toggles plan mode, which is shown by a `[PLAN]` indicator above the input box; `ctrl+v`/`alt+v` pastes clipboard images or file paths as attachments, copying them to `<config-dir>/tmp`
 - `viewport` — scrollable output
-- `sidebar` — file browser
-- `messages` — message rendering (Markdown via Glamour)
-- `sessions` — modal session picker with search, pagination, current/all-directory toggle, and a hint to press `a` when the current directory has no sessions
-- `styles` — Lipgloss themes
-- Status bar displays transient localized status messages before non-trivial tool calls and truncates them on narrow terminals
+- `messages` — message rendering (Markdown via Glamour); tool-call blocks show status icons, `Using`/`Used`/`Error` verbs, and elapsed duration
+- `activity` — transient activity panel between the viewport and input; shows a spinner, pending tool names, and up to four trailing lines of live output per running tool call during `Thinking`, `Streaming`, and `ToolCalls` turns
+- `sessions` — modal session picker with search, pagination, current/all-directory toggle, and a hint to press `a` when the current directory has no sessions; each card shows the session name, path, relative update time, and the last prompt; hovering a session from another directory surfaces a copy-pasteable `cd <path> && kimi-lite --resume <id>` command in the footer
+- `mentions` — file-path candidate provider for `@`-mention completion
+- `help` — `/help` overlay listing keyboard shortcuts and slash commands; scrollable with arrow keys, PgUp/PgDown, Home/End; closes on `Esc`, `Enter`, or `q`
+- `input` — also provides `/`-command autocomplete triggered by typing `/`; navigate with `Tab`/`Shift+Tab` or arrow keys, accept with `Enter`, dismiss with `Esc`/`Ctrl+C`
+- `styles` — Lipgloss themes; built-in `dark` and `light` themes, plus custom JSON themes loaded from `<config-dir>/themes/<name>.json` or an absolute path via `ui.theme`
+- Approval dialog — shows pending tool calls with inline diff previews where available; numeric shortcuts `1` (yes), `2` (no), `3` (always), `4` (diff) plus configurable `y`/`n`/`a`/`d` keys; `Ctrl+E` opens a temporary fullscreen diff overlay that closes on `Esc` or `Ctrl+E`
+- Plan approval panel — appears when a plan-mode turn generates a plan; keyboard is captured by the panel, and pressing `y` approves the plan (resuming execution via `ResumeWithPlan(true)`) while `n` rejects it (`ResumeWithPlan(false)`) and cancels the turn
+- Layout: welcome panel, scrollable viewport, input box, and a two-line footer; the footer shows model info, working directory, git branch/status, token count, context size, and transient localized status messages (truncated on narrow terminals)
 
 ### `internal/mcp`
 MCP client implementation supporting the legacy `mcp-guard` stdio path, direct
@@ -125,6 +138,7 @@ Git integration via shelling out to `git`.
 - `NewProvider(dir)` — creates provider for directory
 - `Status()` — `git status` output
 - `Diff(path)` — file diff
+- `Branch()` — current branch name
 - `IsRepo()` — checks for `.git`
 - `Commit(ctx, message)` — creates a checkpoint commit with `--no-verify` and a local identity
 

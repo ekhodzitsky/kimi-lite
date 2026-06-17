@@ -1,24 +1,24 @@
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                  ╔═════════════════════════════════════════╗                   
-                  ║                                         ║                   
-                  ║  Tool call requires approval            ║                   
-                  ║                                         ║                   
-                  ║  Tool: read_file                        ║                   
-                  ║  Arguments: {"path":"foo.txt"}          ║                   
-                  ║                                         ║                   
-                  ║  [y] yes  [n] no  [a] always  [d] diff  ║                   
-╭─────────────────║                                         ║──────────────────╮
-│ ┃ Type a message╚═════════════════════════════════════════╝                  │
+╭──────────────────────────────────────────────────────────────────────────╮    
+│                                                                          │    
+│  Welcome to Kimi Code!                                                   │    
+│  Send /help for help info.                                               │    
+│                                                                          │    
+│  Directory: /tmp                                                         │    
+│  Session:   t╔═══════════════════════════════════════════════╗           │    
+│  Model:     k║                                               ║           │    
+│  Version:   0║  Tool call requires approval                  ║           │    
+│              ║                                               ║           │    
+╰──────────────║  Tool: read_file                              ║───────────╯    
+               ║  Arguments: {"path":"foo.txt"}                ║                
+               ║                                               ║                
+               ║   1. yes  2. no  3. always  4. diff           ║                
+               ║  keys: 1/2/3/4 | y/n/a/d | ctrl+e fullscreen  ║                
+               ║                                               ║                
+               ╚═══════════════════════════════════════════════╝                
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ┃ Type a message... (Enter to send, Alt+Enter for newline)                   │
 │ ┃                                                                            │
 │ ┃                                                                            │
 │ ┃                                                                            │
 │ ┃                                                                            │
 │ ┃                                                                            │
-╰──────────────────────────────────────────────────────────────────────────────╯
-   kimi-k2.5   [approval]                                                       

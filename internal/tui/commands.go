@@ -36,6 +36,12 @@ type ToolResultMsg struct {
 	Result api.ToolResult
 }
 
+// ToolProgressMsg carries a live output chunk from a running tool call.
+type ToolProgressMsg struct {
+	CallID  string
+	Content string
+}
+
 // StatusMsg carries a transient status sentence for the status bar.
 type StatusMsg struct {
 	Text string
@@ -69,8 +75,32 @@ type ApprovalDiffMsg struct {
 	Diff   string
 }
 
+// PlanRequestMsg carries a generated plan for user approval.
+type PlanRequestMsg struct {
+	Plan string
+}
+
+// PlanApprovalMsg carries the user's plan approval decision.
+type PlanApprovalMsg struct {
+	Approved bool
+}
+
 // SendMessageMsg is emitted by the root model to the app layer.
 type SendMessageMsg struct {
+	Content      string
+	ContentParts []api.ContentPart
+}
+
+// SteerMsg is emitted when the user submits a steering instruction.
+type SteerMsg struct {
+	Content string
+}
+
+// ShowSteerInputMsg opens the steering input overlay.
+type ShowSteerInputMsg struct{}
+
+// SteeredMsg is emitted when the turn manager reports a mid-stream steer.
+type SteeredMsg struct {
 	Content string
 }
 
@@ -128,6 +158,18 @@ type ForkResultMsg struct {
 type debouncedResizeMsg struct {
 	gen int
 }
+
+// FooterGitMsg carries git status information for the footer.
+type FooterGitMsg struct {
+	Branch string
+	Dirty  bool
+}
+
+// ShowHelpMsg opens the help overlay.
+type ShowHelpMsg struct{}
+
+// footerGitRefreshMsg triggers an asynchronous git status refresh.
+type footerGitRefreshMsg struct{}
 
 func (m *Model) handleCommand(content string) tea.Cmd {
 	parts := strings.Fields(content)
@@ -318,6 +360,8 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 			}
 			return ForkResultMsg{Session: sess}
 		}
+	case "/help":
+		return func() tea.Msg { return ShowHelpMsg{} }
 	default:
 		m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("unknown command: %s", cmd), m.styles))
 		return nil

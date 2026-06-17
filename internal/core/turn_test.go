@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -101,6 +102,64 @@ func TestTurnManager_RunTurn_Simple(t *testing.T) {
 	}
 	if msgs[1].Role != api.RoleAssistant {
 		t.Errorf("msg[1].role = %q, want assistant", msgs[1].Role)
+	}
+}
+
+func TestTurnManager_RunTurnWithContentParts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: func(_ context.Context, messages []api.Message, _ []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			if len(messages) == 0 || len(messages[0].ContentParts) == 0 {
+				return nil, fmt.Errorf("expected content parts in user message")
+			}
+			ch := make(chan api.StreamChunk, 2)
+			ch <- api.StreamChunk{Content: "Hello"}
+			ch <- api.StreamChunk{Content: " world", Done: true}
+			close(ch)
+			return ch, nil
+		},
+	}
+	tools := &mockToolExecutor{}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
+
+	parts := []api.ContentPart{
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "https://example.com/img.png"}},
+	}
+	outCh, err := tm.RunTurnWithContentParts(ctx, sess.ID, "Hi", parts)
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	var contents []string
+	for e := range outCh {
+		if e.Type == api.TurnEventContent {
+			contents = append(contents, e.Content)
+		}
+	}
+	if len(contents) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(contents))
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if len(msgs[0].ContentParts) != 1 {
+		t.Fatalf("user message content parts = %d, want 1", len(msgs[0].ContentParts))
+	}
+	if msgs[0].ContentParts[0].ImageURL.URL != "https://example.com/img.png" {
+		t.Errorf("image url = %q, want %q", msgs[0].ContentParts[0].ImageURL.URL, "https://example.com/img.png")
 	}
 }
 
@@ -1624,6 +1683,257 @@ func TestTurnManager_RunTurn_ErrorEventEmitted(t *testing.T) {
 	}
 }
 
+func TestTurnManager_RunTurnWithPlan_Approved(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Content: "1. Read file\n2. Summarize"},
+					api.StreamChunk{Done: true},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Content: "Executed plan"},
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{defs: []api.ToolDefinition{}}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurnWithPlan(ctx, sess.ID, "Plan something")
+	if err != nil {
+		t.Fatalf("run turn with plan: %v", err)
+	}
+
+	var contents []string
+	var planEvent *api.TurnEvent
+	var mu sync.Mutex
+	done := make(chan struct{})
+	go func() {
+		for e := range outCh {
+			switch e.Type {
+			case api.TurnEventContent:
+				mu.Lock()
+				contents = append(contents, e.Content)
+				mu.Unlock()
+			case api.TurnEventPlanRequest:
+				mu.Lock()
+				ev := e
+				planEvent = &ev
+				mu.Unlock()
+			}
+		}
+		close(done)
+	}()
+
+	for i := 0; i < 100; i++ {
+		mu.Lock()
+		found := planEvent != nil
+		mu.Unlock()
+		if found {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	pe := planEvent
+	mu.Unlock()
+	if pe == nil {
+		t.Fatal("expected plan request event")
+	}
+	if pe.Content != "1. Read file\n2. Summarize" {
+		t.Errorf("plan content = %q, want %q", pe.Content, "1. Read file\n2. Summarize")
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil {
+		t.Fatal("expected current turn")
+	}
+	if turn.State != api.TurnWaitingPlan {
+		t.Errorf("state = %d, want TurnWaitingPlan", turn.State)
+	}
+
+	if err := tm.ResumeWithPlan(ctx, sess.ID, true); err != nil {
+		t.Fatalf("resume with plan: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn to complete")
+	}
+
+	turn = tm.CurrentTurn()
+	if turn.State != api.TurnIdle {
+		t.Errorf("state = %d, want TurnIdle", turn.State)
+	}
+	if turn.Response != "Executed plan" {
+		t.Errorf("response = %q, want %q", turn.Response, "Executed plan")
+	}
+	mu.Lock()
+	contentCount := len(contents)
+	mu.Unlock()
+	if contentCount != 2 {
+		t.Errorf("expected 2 content chunks, got %d", contentCount)
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(msgs))
+	}
+	wantRoles := []api.Role{api.RoleUser, api.RoleAssistant, api.RoleSystem, api.RoleAssistant}
+	for i, want := range wantRoles {
+		if msgs[i].Role != want {
+			t.Errorf("msg[%d].role = %q, want %q", i, msgs[i].Role, want)
+		}
+	}
+}
+
+func TestTurnManager_RunTurnWithPlan_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "1. Do thing"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	tools := &mockToolExecutor{defs: []api.ToolDefinition{}}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurnWithPlan(ctx, sess.ID, "Plan something")
+	if err != nil {
+		t.Fatalf("run turn with plan: %v", err)
+	}
+
+	var planEvent *api.TurnEvent
+	var errEvent *api.TurnEvent
+	var mu sync.Mutex
+	done := make(chan struct{})
+	go func() {
+		for e := range outCh {
+			switch e.Type {
+			case api.TurnEventPlanRequest:
+				mu.Lock()
+				ev := e
+				planEvent = &ev
+				mu.Unlock()
+			case api.TurnEventError:
+				mu.Lock()
+				ev := e
+				errEvent = &ev
+				mu.Unlock()
+			}
+		}
+		close(done)
+	}()
+
+	for i := 0; i < 100; i++ {
+		mu.Lock()
+		found := planEvent != nil
+		mu.Unlock()
+		if found {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	pe := planEvent
+	mu.Unlock()
+	if pe == nil {
+		t.Fatal("expected plan request event")
+	}
+
+	if err := tm.ResumeWithPlan(ctx, sess.ID, false); err != nil {
+		t.Fatalf("resume with plan: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn to complete")
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil || turn.State != api.TurnError {
+		t.Fatalf("expected TurnError, got %v", turn)
+	}
+	if !strings.Contains(turn.Error, "plan rejected") {
+		t.Errorf("error = %q, want containing 'plan rejected'", turn.Error)
+	}
+	mu.Lock()
+	ee := errEvent
+	mu.Unlock()
+	if ee == nil {
+		t.Fatal("expected error event")
+	}
+	if !strings.Contains(ee.Error.Error(), "plan rejected") {
+		t.Errorf("error event = %v, want plan rejected", ee.Error)
+	}
+}
+
+func TestTurnManager_ResumeWithPlan_SessionIDMismatch(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "1. Do thing"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+
+	outCh, err := tm.RunTurnWithPlan(ctx, sess.ID, "Plan something")
+	if err != nil {
+		t.Fatalf("run turn with plan: %v", err)
+	}
+
+	for i := 0; i < 100; i++ {
+		turn := tm.CurrentTurn()
+		if turn != nil && turn.State == api.TurnWaitingPlan {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := tm.ResumeWithPlan(ctx, "wrong-session", true); err == nil {
+		t.Fatal("expected error for sessionID mismatch")
+	}
+
+	cancel()
+	for range outCh {
+	}
+}
+
 // captureHookRunner records every hook data it receives.
 type captureHookRunner struct {
 	calls []api.HookData
@@ -1678,5 +1988,225 @@ func TestTurnManager_CancelAll_FiresInterruptHook(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected turn_interrupt hook for session %s, got %+v", sess.ID, hook.calls)
+	}
+}
+
+func TestTurnManager_RunTurnWithPlanWithContentParts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	callCount := 0
+	llm := &mockLLMClient{
+		chatStreamFunc: func(ctx context.Context, messages []api.Message, tools []api.ToolDefinition) (<-chan api.StreamChunk, error) {
+			callCount++
+			if callCount == 1 {
+				return streamChunks(
+					api.StreamChunk{Content: "1. Read file\n2. Summarize"},
+					api.StreamChunk{Done: true},
+				)(ctx, messages, tools)
+			}
+			return streamChunks(
+				api.StreamChunk{Content: "Executed plan"},
+				api.StreamChunk{Done: true},
+			)(ctx, messages, tools)
+		},
+	}
+	tools := &mockToolExecutor{defs: []api.ToolDefinition{}}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
+
+	parts := []api.ContentPart{
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "https://example.com/img.png"}},
+	}
+	outCh, err := tm.RunTurnWithPlanWithContentParts(ctx, sess.ID, "Plan something", parts)
+	if err != nil {
+		t.Fatalf("run turn with plan: %v", err)
+	}
+
+	var planEvent *api.TurnEvent
+	var mu sync.Mutex
+	done := make(chan struct{})
+	go func() {
+		for e := range outCh {
+			if e.Type == api.TurnEventPlanRequest {
+				mu.Lock()
+				ev := e
+				planEvent = &ev
+				mu.Unlock()
+			}
+		}
+		close(done)
+	}()
+
+	for i := 0; i < 100; i++ {
+		mu.Lock()
+		found := planEvent != nil
+		mu.Unlock()
+		if found {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	pe := planEvent
+	mu.Unlock()
+	if pe == nil {
+		t.Fatal("expected plan request event")
+	}
+
+	if err := tm.ResumeWithPlan(ctx, sess.ID, true); err != nil {
+		t.Fatalf("resume with plan: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn to complete")
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil {
+		t.Fatal("expected current turn")
+	}
+	if turn.State != api.TurnIdle {
+		t.Errorf("state = %d, want TurnIdle", turn.State)
+	}
+	if turn.Response != "Executed plan" {
+		t.Errorf("response = %q, want %q", turn.Response, "Executed plan")
+	}
+
+	msgs, _ := store.GetMessages(ctx, sess.ID, 0)
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(msgs))
+	}
+	if len(msgs[0].ContentParts) != 1 {
+		t.Fatalf("user message content parts = %d, want 1", len(msgs[0].ContentParts))
+	}
+	if msgs[0].ContentParts[0].ImageURL.URL != "https://example.com/img.png" {
+		t.Errorf("image url = %q, want %q", msgs[0].ContentParts[0].ImageURL.URL, "https://example.com/img.png")
+	}
+}
+
+func TestTurnManager_RunTurnWithPlan_FirstStreamToolCallsRejected(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	var executed atomic.Bool
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "Let me call a tool"},
+			api.StreamChunk{Done: true, ToolCalls: []api.ToolCall{
+				{ID: "tc1", Name: "read_file", Arguments: `{"path":"/tmp/test.txt"}`},
+			}},
+		),
+	}
+	tools := &mockToolExecutor{
+		executeFunc: func(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
+			executed.Store(true)
+			return api.ToolResult{CallID: call.ID, Name: call.Name, Output: "file content"}, nil
+		},
+		defs: []api.ToolDefinition{{Name: "read_file", Description: "read"}},
+	}
+	approval := &mockApprovalGate{
+		shouldAutoApprove: func(call api.ToolCall) (api.ApprovalDecision, bool) {
+			return api.ApprovalYes, true
+		},
+	}
+	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
+
+	tm := newTestTurnManager(t, llm, tools, approval, store, cfg)
+
+	outCh, err := tm.RunTurnWithPlan(ctx, sess.ID, "Plan something")
+	if err != nil {
+		t.Fatalf("run turn with plan: %v", err)
+	}
+
+	var errEvent *api.TurnEvent
+	for e := range outCh {
+		if e.Type == api.TurnEventError {
+			ev := e
+			errEvent = &ev
+		}
+	}
+
+	if executed.Load() {
+		t.Error("tool should not have executed when plan mode produced tool calls")
+	}
+
+	turn := tm.CurrentTurn()
+	if turn == nil || turn.State != api.TurnError {
+		t.Fatalf("expected TurnError, got %v", turn)
+	}
+	if !strings.Contains(turn.Error, "plan mode produced tool calls") {
+		t.Errorf("error = %q, want containing 'plan mode produced tool calls'", turn.Error)
+	}
+	if errEvent == nil {
+		t.Fatal("expected error event")
+	}
+	if !strings.Contains(errEvent.Error.Error(), "plan mode produced tool calls") {
+		t.Errorf("error event = %v, want plan mode produced tool calls", errEvent.Error)
+	}
+}
+
+func TestTurnManager_ResumeWithPlan_AfterTurnMovedOn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newMockStore()
+	sess, _ := store.CreateSession(ctx, "/tmp/proj")
+
+	llm := &mockLLMClient{
+		chatStreamFunc: streamChunks(
+			api.StreamChunk{Content: "1. Do thing"},
+			api.StreamChunk{Done: true},
+		),
+	}
+	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, &mockApprovalGate{}, store, nil)
+
+	outCh, err := tm.RunTurnWithPlan(ctx, sess.ID, "Plan something")
+	if err != nil {
+		t.Fatalf("run turn with plan: %v", err)
+	}
+
+	planSeen := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		for e := range outCh {
+			if e.Type == api.TurnEventPlanRequest {
+				close(planSeen)
+			}
+		}
+		close(done)
+	}()
+
+	select {
+	case <-planSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for plan request event")
+	}
+
+	if err := tm.ResumeWithPlan(ctx, sess.ID, true); err != nil {
+		t.Fatalf("resume with plan: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for turn to complete")
+	}
+
+	if err := tm.ResumeWithPlan(ctx, sess.ID, true); err == nil {
+		t.Fatal("expected error for ResumeWithPlan after turn moved on")
+	} else if !strings.Contains(err.Error(), "no plan pending") {
+		t.Errorf("error = %q, want containing 'no plan pending'", err.Error())
 	}
 }

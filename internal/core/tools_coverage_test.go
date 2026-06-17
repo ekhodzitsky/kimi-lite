@@ -972,7 +972,7 @@ func TestRunCommandWithContext_ContextCancelled(t *testing.T) {
 	cancel()
 
 	cmd := shellCommandContext(ctx, "echo hello")
-	_, err := runCommandWithContext(ctx, cmd)
+	_, err := runCommandWithContext(ctx, cmd, nil)
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
@@ -2215,7 +2215,7 @@ func TestRunCommandWithContext_StartError(t *testing.T) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "/nonexistent-binary-for-test")
-	_, err := runCommandWithContext(ctx, cmd)
+	_, err := runCommandWithContext(ctx, cmd, nil)
 	if err == nil {
 		t.Fatal("expected error when command fails to start")
 	}

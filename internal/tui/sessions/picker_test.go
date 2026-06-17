@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -81,5 +82,34 @@ func TestPicker_Cancel(t *testing.T) {
 	done, selected := p.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if !done || selected {
 		t.Errorf("escape should cancel, got done=%v selected=%v", done, selected)
+	}
+}
+
+func TestFormatCard(t *testing.T) {
+	t.Parallel()
+
+	p := NewPicker(nil, "/tmp", 80, 30)
+	s := api.Session{
+		ID:         "abc",
+		Name:       "test",
+		Path:       "/tmp",
+		UpdatedAt:  time.Now(),
+		LastPrompt: "hello world",
+	}
+	card := p.formatCard(s, 80, true)
+	if !strings.Contains(card, "test") {
+		t.Errorf("missing title: %q", card)
+	}
+	if !strings.Contains(card, "hello world") {
+		t.Errorf("missing last prompt: %q", card)
+	}
+	if !strings.Contains(card, "←") {
+		t.Errorf("missing current-directory marker: %q", card)
+	}
+
+	s.Path = "/other"
+	cardOther := p.formatCard(s, 80, false)
+	if strings.Contains(cardOther, "←") {
+		t.Errorf("unexpected current-directory marker for other path: %q", cardOther)
 	}
 }

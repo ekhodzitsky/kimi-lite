@@ -1017,6 +1017,99 @@ func TestProvider_IsRepo_Canceled(t *testing.T) {
 	}
 }
 
+func TestProvider_Branch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		dir        string
+		stdout     []byte
+		stderr     []byte
+		err        error
+		want       string
+		wantErr    bool
+		wantErrMsg string
+		wantCalls  []mockCall
+	}{
+		{
+			name:   "success",
+			dir:    "/project",
+			stdout: []byte("main\n"),
+			want:   "main",
+			wantCalls: []mockCall{
+				{dir: "/project", name: "git", args: []string{"rev-parse", "--abbrev-ref", "HEAD"}},
+			},
+		},
+		{
+			name:   "detached head empty output",
+			stdout: []byte(""),
+			want:   "HEAD",
+			wantCalls: []mockCall{
+				{name: "git", args: []string{"rev-parse", "--abbrev-ref", "HEAD"}},
+			},
+		},
+		{
+			name:       "git not installed",
+			err:        exec.ErrNotFound,
+			wantErr:    true,
+			wantErrMsg: "git is not installed",
+			wantCalls: []mockCall{
+				{name: "git", args: []string{"rev-parse", "--abbrev-ref", "HEAD"}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := &mockRunner{stdout: tt.stdout, stderr: tt.stderr, err: tt.err}
+			p := newProvider(m, tt.dir)
+
+			got, err := p.Branch(context.Background())
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.wantErrMsg != "" && !strings.Contains(err.Error(), tt.wantErrMsg) {
+					t.Fatalf("expected error containing %q, got %q", tt.wantErrMsg, err.Error())
+				}
+				assertCalls(t, m.callsSnapshot(), tt.wantCalls)
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got)
+			}
+			assertCalls(t, m.callsSnapshot(), tt.wantCalls)
+		})
+	}
+}
+
+func TestProvider_Branch_Timeout(t *testing.T) {
+	t.Parallel()
+
+	timeout := 50 * time.Millisecond
+	m := &mockRunner{delay: 100 * time.Millisecond}
+	p := newProvider(m, "/project", timeout)
+
+	start := time.Now()
+	_, err := p.Branch(context.Background())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timeout error, got %q", err.Error())
+	}
+	if elapsed > timeout+500*time.Millisecond {
+		t.Fatalf("expected prompt timeout, took %v", elapsed)
+	}
+}
+
 func TestProvider_Diff_Canceled(t *testing.T) {
 	t.Parallel()
 

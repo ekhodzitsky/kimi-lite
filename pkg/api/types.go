@@ -33,6 +33,8 @@ const (
 	ContentPartText ContentPartType = "text"
 	// ContentPartImageURL is an image referenced by URL or data URL.
 	ContentPartImageURL ContentPartType = "image_url"
+	// ContentPartImageData is an image encoded as inline base64 data.
+	ContentPartImageData ContentPartType = "image_data"
 )
 
 // ImageURL describes an image for a content part.
@@ -41,11 +43,18 @@ type ImageURL struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// ImageData describes inline image data for a content part.
+type ImageData struct {
+	MIMEType string `json:"mime_type"`
+	Data     string `json:"data"`
+}
+
 // ContentPart represents a single part of a multi-modal message.
 type ContentPart struct {
-	Type     ContentPartType `json:"type"`
-	Text     string          `json:"text,omitempty"`
-	ImageURL *ImageURL       `json:"image_url,omitempty"`
+	Type      ContentPartType `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ImageURL  *ImageURL       `json:"image_url,omitempty"`
+	ImageData *ImageData      `json:"image_data,omitempty"`
 }
 
 // Message represents a single message in a conversation.
@@ -91,12 +100,13 @@ type ToolDefinition struct {
 
 // Session represents a conversation session.
 type Session struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Path      string    `json:"path"` // working directory
-	Messages  []Message `json:"messages,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Path       string    `json:"path"` // working directory
+	Messages   []Message `json:"messages,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	LastPrompt string    `json:"last_prompt,omitempty"`
 }
 
 // TurnState represents the current state of a single turn.
@@ -113,6 +123,8 @@ const (
 	TurnToolCalls
 	// TurnWaitingApproval indicates waiting for user approval.
 	TurnWaitingApproval
+	// TurnWaitingPlan indicates waiting for user approval of a generated plan.
+	TurnWaitingPlan
 	// TurnError indicates a turn error occurred.
 	TurnError
 )
@@ -130,6 +142,8 @@ func (s TurnState) String() string {
 		return "tool_calls"
 	case TurnWaitingApproval:
 		return "waiting_approval"
+	case TurnWaitingPlan:
+		return "waiting_plan"
 	case TurnError:
 		return "error"
 	default:
@@ -150,6 +164,8 @@ func (s TurnState) ShortString() string {
 		return "tools"
 	case TurnWaitingApproval:
 		return "approval"
+	case TurnWaitingPlan:
+		return "plan"
 	case TurnError:
 		return "error"
 	default:
@@ -172,6 +188,8 @@ func ParseTurnState(s string) (TurnState, error) {
 		return TurnToolCalls, nil
 	case "waiting_approval":
 		return TurnWaitingApproval, nil
+	case "waiting_plan":
+		return TurnWaitingPlan, nil
 	case "error":
 		return TurnError, nil
 	default:
@@ -208,6 +226,32 @@ func (s *TurnState) UnmarshalJSON(b []byte) error {
 	}
 	*s = parsed
 	return nil
+}
+
+// TurnManager orchestrates a single user input → response cycle.
+type TurnManager interface {
+	// RunTurn executes a normal turn.
+	RunTurn(ctx context.Context, sessionID string, input string) (<-chan TurnEvent, error)
+	// RunTurnWithContentParts executes a normal turn with multimodal content parts.
+	RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []ContentPart) (<-chan TurnEvent, error)
+	// RunTurnWithPlan executes a turn in plan mode. The assistant first produces
+	// a plan, then waits for approval before executing it.
+	RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan TurnEvent, error)
+	// RunTurnWithPlanWithContentParts executes a plan-mode turn with multimodal
+	// content parts.
+	RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []ContentPart) (<-chan TurnEvent, error)
+	// ResumeWithPlan resumes a plan-mode turn after approval or rejection.
+	ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error
+	// ResumeWithApproval resumes a turn waiting for tool-call approval.
+	ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, decisions map[string]ApprovalDecision) error
+	// Steer sends a mid-stream follow-up instruction to the active turn.
+	Steer(ctx context.Context, sessionID string, input string) error
+	// PendingApprovals returns the current pending tool calls and request ID.
+	PendingApprovals() ([]ToolCall, int64)
+	// Wait blocks until all in-flight turns complete.
+	Wait()
+	// CancelAll cancels the currently in-flight turn.
+	CancelAll()
 }
 
 // Turn represents a single user input → LLM response cycle.
@@ -265,12 +309,23 @@ const (
 	TurnEventApprovalDiff
 	// TurnEventStatus carries a transient status message for the TUI.
 	TurnEventStatus
+	// TurnEventToolProgress carries a live output chunk from a running tool call.
+	TurnEventToolProgress
+	// TurnEventPlanRequest carries a generated plan that requires user approval.
+	TurnEventPlanRequest
+	// TurnEventSteered signals that the user steered the response mid-stream.
+	TurnEventSteered
 )
+
+// ToolProgressCallback is called with output chunks from a running tool.
+// Implementations must be safe to call from multiple goroutines.
+type ToolProgressCallback func(callID, chunk string)
 
 // TurnEvent is emitted by TurnManager.RunTurn to report streaming progress.
 type TurnEvent struct {
 	Type        TurnEventType
 	Content     string
+	CallID      string // only used for TurnEventToolProgress
 	Error       error
 	ToolCalls   []ToolCall
 	RequestID   int64      // only used for TurnEventApprovalRequest
@@ -395,6 +450,8 @@ type GitProvider interface {
 	// A genuine non-repository returns (false, nil); execution errors return
 	// a non-nil error so callers can distinguish them from "not a repo".
 	IsRepo(ctx context.Context) (bool, error)
+	// Branch returns the current branch name, or "HEAD" when detached.
+	Branch(ctx context.Context) (string, error)
 }
 
 // ConfigProvider provides access to application configuration.
@@ -738,11 +795,13 @@ type TokenEstimator interface {
 
 // KeybindingConfig holds keybinding settings.
 type KeybindingConfig struct {
-	Send           string `mapstructure:"send"`
-	Newline        string `mapstructure:"newline"`
-	Cancel         string `mapstructure:"cancel"`
-	Quit           string `mapstructure:"quit"`
-	Yolo           string `mapstructure:"yolo"`
+	Send    string `mapstructure:"send"`
+	Newline string `mapstructure:"newline"`
+	Cancel  string `mapstructure:"cancel"`
+	Quit    string `mapstructure:"quit"`
+	Yolo    string `mapstructure:"yolo"`
+	// ToggleSidebar is unused: the sidebar was removed from the TUI.
+	// The field is retained for backward compatibility with existing configs.
 	ToggleSidebar  string `mapstructure:"toggle_sidebar"`
 	FocusNext      string `mapstructure:"focus_next"`
 	FocusPrev      string `mapstructure:"focus_prev"`
@@ -751,4 +810,6 @@ type KeybindingConfig struct {
 	ApproveAlways  string `mapstructure:"approve_always"`
 	ApproveDiff    string `mapstructure:"approve_diff"`
 	ExternalEditor string `mapstructure:"external_editor"`
+	Steer          string `mapstructure:"steer"`
+	Paste          string `mapstructure:"paste"`
 }

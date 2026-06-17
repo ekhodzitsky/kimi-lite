@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-17
+
+### Added
+
+- Image and file paste support in the TUI. Press `Ctrl+V` or `Alt+V` to paste
+  clipboard images or file paths; pasted attachments are copied to
+  `<config-dir>/tmp` and attached as multimodal content parts on the outgoing
+  user message. The default keybinding is configurable via `keybindings.paste`.
+- `api.ContentPart` now supports inline `image_data` in addition to `image_url`.
+- `api.TurnManager` gains `RunTurnWithContentParts`,
+  `RunTurnWithPlan`, `RunTurnWithPlanWithContentParts`, `ResumeWithPlan`, and
+  `Steer` to support plan mode and mid-stream steering.
+- Mid-stream steering: press `Ctrl+S` during streaming to inject a follow-up
+  instruction.
+- Plan mode: press `Shift+Tab` to have the assistant generate a plan for
+  approval before executing tool calls.
+
+### Changed
+
+- **Breaking:** `api.TurnManager` is an exported interface; the new methods
+  listed above break existing third-party implementations. Projects implementing
+  `TurnManager` will need to add these methods.
+- `internal/llm/client.go` now validates local attachment paths against a
+  configured set of roots and refuses to read files outside those roots or
+  above a 10 MB size cap.
+- `Model.Update` no longer performs blocking I/O; `RunTurn*` calls are
+  dispatched inside `tea.Cmd` functions.
+
+### Fixed
+
+- Non-image file attachments (e.g., `.txt`, `.go`) are no longer silently
+  dropped when sending a message.
+- Modal overlays (`help`, `steer`, `approval diff`) now consume keyboard input
+  instead of leaking it to the input/viewport components.
+- Plan-mode turns that unexpectedly produce tool calls before plan approval are
+  rejected instead of executing tools first.
+- Mention candidate file paths are loaded asynchronously and no longer block
+  the UI on every `@` keystroke.
+- The default config now includes `keybindings.paste`.
+
 ## [0.4.2] - 2026-06-16
 
 ### Changed
@@ -191,6 +231,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `--debug` flag, sanitized error logging, structured `slog` output.
 - **Cross-platform** — static binary with `CGO_ENABLED=0`, supports macOS, Linux (glibc & musl), ARM64.
 
+[Unreleased]: https://github.com/ekhodzitsky/kimi-lite/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.5.0
 [0.3.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.3.0
 [0.2.10]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.10
 [0.2.9]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.2.9

@@ -4,6 +4,8 @@ package sessions
 import (
 	"fmt"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -199,8 +201,8 @@ func (p *Picker) View() string {
 		start, end := p.visibleRange()
 		for i := start; i < end && i < len(p.filtered); i++ {
 			s := p.filtered[i]
-			line := p.formatItem(s, innerW, i == p.cursor)
-			b.WriteString(line + "\n")
+			card := p.formatCard(s, innerW, i == p.cursor)
+			b.WriteString(card + "\n")
 		}
 	}
 
@@ -259,12 +261,12 @@ func (p *Picker) visibleRange() (int, int) {
 }
 
 func (p *Picker) computePageSize() int {
-	// Reserve header + footer + borders.
+	// Reserve header + footer + borders; each card can span up to 4 lines.
 	available := p.height - 8
-	if available < 3 {
-		available = 3
+	if available < 4 {
+		available = 4
 	}
-	return available
+	return available / 4
 }
 
 func (p *Picker) filter() {
@@ -293,17 +295,73 @@ func (p *Picker) filter() {
 	}
 }
 
-func (p *Picker) formatItem(s api.Session, width int, selected bool) string {
-	label := s.ID
-	if s.Name != "" {
-		label = fmt.Sprintf("%s (%s)", s.Name, s.ID)
+func (p *Picker) formatCard(s api.Session, width int, selected bool) string {
+	if width < 5 {
+		width = 5
 	}
-	line := fmt.Sprintf("%s — %s — %s", label, s.Path, s.UpdatedAt.Format("2006-01-02 15:04"))
-	if len(line) > width {
-		line = line[:width]
+	maxContent := width - 4
+
+	var b strings.Builder
+	marker := "  "
+	if s.Path == p.path {
+		marker = "← "
 	}
+	title := s.Name
+	if title == "" {
+		title = s.ID
+	}
+	top := fmt.Sprintf("%s%s • %s", marker, title, humanizeTime(s.UpdatedAt))
+	top = truncateRunes(top, maxContent)
+	b.WriteString(top + "\n")
+	pathLine := fmt.Sprintf("   %s", s.Path)
+	pathLine = truncateRunes(pathLine, maxContent)
+	b.WriteString(pathLine + "\n")
+	if s.LastPrompt != "" {
+		prompt := truncateRunes(s.LastPrompt, maxContent)
+		fmt.Fprintf(&b, "   %s\n", prompt)
+	}
+	card := b.String()
 	if selected {
-		return p.style.selected.Render("> " + line)
+		return p.style.selected.Render(card)
 	}
-	return p.style.item.Render("  " + line)
+	return p.style.item.Render(card)
+}
+
+// truncateRunes truncates s to at most maxRunes runes, appending an ellipsis
+// when truncated. It avoids splitting multi-byte runes.
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	var b strings.Builder
+	count := 0
+	for _, r := range s {
+		if count >= maxRunes-1 {
+			b.WriteRune('…')
+			break
+		}
+		b.WriteRune(r)
+		count++
+	}
+	return b.String()
+}
+
+// humanizeTime returns a short relative timestamp such as "2m ago" or the
+// absolute date for older timestamps.
+func humanizeTime(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+	return t.Format("2006-01-02")
 }

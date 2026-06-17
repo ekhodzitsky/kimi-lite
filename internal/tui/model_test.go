@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +15,6 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/internal/config"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
-	"github.com/ekhodzitsky/kimi-lite/internal/tui/sidebar"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -22,7 +23,7 @@ func TestNew(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, err := New(cfg, session, context.Background())
+	m, err := New(cfg, session, context.Background(), "")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -42,7 +43,7 @@ func TestInit(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	cmd := m.Init()
 	if cmd == nil {
 		t.Error("Init() should return a non-nil command")
@@ -54,7 +55,7 @@ func TestWindowResize(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	model := updated.(*Model)
@@ -72,7 +73,7 @@ func TestSendMessage(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -99,12 +100,45 @@ func TestSendMessage(t *testing.T) {
 	}
 }
 
+func TestSendMessage_WithContentParts(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	parts := []api.ContentPart{
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "https://example.com/img.png"}},
+	}
+	updated, cmd := m.Update(input.SendMsg{Content: "hello", ContentParts: parts})
+	model := updated.(*Model)
+
+	if model.state != api.TurnThinking {
+		t.Errorf("state = %d, want TurnThinking", model.state)
+	}
+
+	if cmd == nil {
+		t.Fatal("expected command for SendMessageMsg")
+	}
+	msg := cmd()
+	sendMsg, ok := msg.(SendMessageMsg)
+	if !ok {
+		t.Fatalf("expected SendMessageMsg, got %T", msg)
+	}
+	if len(sendMsg.ContentParts) != 1 {
+		t.Errorf("ContentParts = %d, want 1", len(sendMsg.ContentParts))
+	}
+}
+
 func TestCommandCompact(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -139,7 +173,7 @@ func TestCommandCompact_KeepRecentFromConfig(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Behavior.CompactKeepRecent = 7
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -171,7 +205,7 @@ func TestCommandClear(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -198,7 +232,7 @@ func TestCommandSessions(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -223,7 +257,7 @@ func TestCommandCheckpoint(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -245,7 +279,7 @@ func TestCommandUnknown(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -269,7 +303,7 @@ func TestStreamChunk(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -297,7 +331,7 @@ func TestStreamChunkDone(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -321,7 +355,7 @@ func TestStreamChunkError(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -345,7 +379,7 @@ func TestToolCall(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -375,7 +409,7 @@ func TestToolResult(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -404,7 +438,7 @@ func TestApprovalRequest(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -428,7 +462,7 @@ func TestApprovalResponse(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -454,7 +488,7 @@ func TestApprovalResponse_DiffDoesNotFinalize(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -489,6 +523,22 @@ func (r *recordingTurnManager) RunTurn(ctx context.Context, sessionID string, in
 	return nil, nil
 }
 
+func (r *recordingTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return r.RunTurn(ctx, sessionID, input)
+}
+
+func (r *recordingTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return r.RunTurnWithPlan(ctx, sessionID, input)
+}
+
+func (r *recordingTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
+}
+
 func (r *recordingTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	r.resumeCalls = append(r.resumeCalls, struct {
 		requestID int64
@@ -497,12 +547,16 @@ func (r *recordingTurnManager) ResumeWithApproval(ctx context.Context, sessionID
 	return nil
 }
 
+func (r *recordingTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
+}
+
 func TestApprovalResponse_DiffForwardsToTurnManager(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -562,7 +616,7 @@ func TestApprovalDiffMsg_AddsMessageAndKeepsWaiting(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -598,8 +652,7 @@ func TestApprovalDialog_WideRunes(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: t.TempDir()}
-	m, _ := New(cfg, session, context.Background())
-	m.sidebar.Toggle()
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -634,8 +687,7 @@ func TestApprovalDialog_NarrowTerminal(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: t.TempDir()}
-	m, _ := New(cfg, session, context.Background())
-	m.sidebar.Toggle()
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 30
 	m.height = 10
 	m.updateLayout()
@@ -666,7 +718,7 @@ func TestStateChange(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	updated, _ := m.Update(StateChangeMsg{State: api.TurnThinking})
 	model := updated.(*Model)
@@ -681,7 +733,7 @@ func TestErrorMsg(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -705,7 +757,7 @@ func TestQuitKey(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if cmd == nil {
@@ -724,7 +776,7 @@ func TestCancelKey(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.setState(api.TurnThinking)
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
@@ -735,31 +787,12 @@ func TestCancelKey(t *testing.T) {
 	}
 }
 
-func TestToggleSidebar(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
-	m.width = 120
-	m.height = 40
-	m.updateLayout()
-
-	visibleBefore := m.sidebar.Visible()
-	updated, _ := m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
-	model := updated.(*Model)
-
-	if model.sidebar.Visible() == visibleBefore {
-		t.Error("sidebar visibility should toggle")
-	}
-}
-
 func TestSetters(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	m.SetModelName("gpt-4")
 	if m.modelName != "gpt-4" {
@@ -821,7 +854,7 @@ func TestView(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	// Before resize, should show loading
 	view := m.View().Content
@@ -847,7 +880,7 @@ func TestState(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	if m.State() != api.TurnIdle {
 		t.Errorf("State() = %d, want TurnIdle", m.State())
@@ -859,12 +892,73 @@ func TestState(t *testing.T) {
 	}
 }
 
-func TestStatusBarStates(t *testing.T) {
+func TestWelcomeVisibleWhenEmpty(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	view := m.View().Content
+	if !strings.Contains(view, "Welcome to Kimi Code!") {
+		t.Errorf("empty transcript should show welcome title, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Directory:") {
+		t.Errorf("welcome should show directory label, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Session:") {
+		t.Errorf("welcome should show session label, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Model:") {
+		t.Errorf("welcome should show model label, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Version:") {
+		t.Errorf("welcome should show version label, got:\n%s", view)
+	}
+
+	// The viewport should be shorter than the full available height because the
+	// welcome panel occupies the top rows.
+	if m.welcomeHeight() == 0 {
+		t.Error("welcomeHeight should be non-zero when there are no messages")
+	}
+}
+
+func TestWelcomeHiddenWhenMessages(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	emptyHeight := m.layout().vpHeight
+
+	m.addMessage(msgcomp.NewUserMessage("hello", m.styles))
+	m.updateLayout()
+
+	view := m.View().Content
+	if strings.Contains(view, "Welcome to Kimi Code!") {
+		t.Errorf("welcome panel should be hidden when messages exist, got:\n%s", view)
+	}
+	if m.welcomeHeight() != 0 {
+		t.Errorf("welcomeHeight should be 0 with messages, got %d", m.welcomeHeight())
+	}
+	if m.layout().vpHeight <= emptyHeight {
+		t.Errorf("viewport should grow when welcome is hidden: got %d, want > %d", m.layout().vpHeight, emptyHeight)
+	}
+}
+
+func TestFooterStates(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -880,20 +974,21 @@ func TestStatusBarStates(t *testing.T) {
 
 	for _, s := range states {
 		m.setState(s)
-		view := m.statusBar()
+		m.updateFooter()
+		view := m.footer.View()
 		if view == "" {
-			t.Errorf("statusBar() empty for state %d", s)
+			t.Errorf("footer.View() empty for state %d", s)
 		}
 	}
 }
 
-func TestStatusBar_ShowsContextUsageAfterTurn(t *testing.T) {
+func TestFooter_ShowsContextUsageAfterTurn(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
 	cfg.UI.ShowTokenCount = true
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -906,50 +1001,53 @@ func TestStatusBar_ShowsContextUsageAfterTurn(t *testing.T) {
 	})
 
 	m.updateContextStats()
+	m.updateFooter()
 
-	bar := m.statusBar()
-	if !strings.Contains(bar, "ctx:") {
-		t.Fatalf("status bar should show ctx usage, got %q", bar)
+	bar := m.footer.View()
+	if !strings.Contains(bar, "context:") {
+		t.Fatalf("footer should show context usage, got %q", bar)
 	}
 	// The percentage must be non-zero after a non-empty turn.
-	if strings.Contains(bar, "ctx: 0%") {
-		t.Errorf("status bar should show non-zero ctx usage, got %q", bar)
+	if strings.Contains(bar, "context: 0.0%") {
+		t.Errorf("footer should show non-zero context usage, got %q", bar)
 	}
 }
 
-func TestStatusBar_HidesContextUsageWhenDisabled(t *testing.T) {
+func TestFooter_ShowsContextUsageRegardlessOfTokenCountSetting(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
 	cfg.UI.ShowTokenCount = false
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
 	m.SetContextStats(50, 100)
+	m.updateFooter()
 
-	bar := m.statusBar()
-	if strings.Contains(bar, "ctx:") {
-		t.Errorf("status bar should omit ctx field when ShowTokenCount=false, got %q", bar)
+	bar := m.footer.View()
+	if !strings.Contains(bar, "context:") {
+		t.Errorf("footer should show context usage regardless of ShowTokenCount, got %q", bar)
 	}
 }
 
-func TestStatusBar_TruncatesLongStatusOnNarrowTerminal(t *testing.T) {
+func TestFooter_TruncatesLongStatusOnNarrowTerminal(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
-	m.width = 30
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 50
 	m.height = 10
 	m.updateLayout()
 	m.statusText = strings.Repeat("x", 200)
+	m.updateFooter()
 
-	bar := m.statusBar()
+	bar := m.footer.View()
 	for _, line := range strings.Split(bar, "\n") {
 		if w := lipgloss.Width(line); w > m.width {
-			t.Errorf("status bar line width = %d, want <= %d", w, m.width)
+			t.Errorf("footer line width = %d, want <= %d", w, m.width)
 		}
 	}
 }
@@ -959,7 +1057,7 @@ func TestStreamChunkWithToolCalls(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -990,7 +1088,7 @@ func TestTurnWithToolCallRendersToolCallAndResult(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1049,8 +1147,8 @@ func TestTurnWithToolCallRendersToolCallAndResult(t *testing.T) {
 			if strings.Contains(view, "pending") {
 				t.Errorf("viewport should not contain pending status after result, got %q", view)
 			}
-			if !strings.Contains(toolCallMsg.View().Content, "done") {
-				t.Errorf("tool call message should render done status, got %q", toolCallMsg.View().Content)
+			if !strings.Contains(toolCallMsg.View().Content, "Used") {
+				t.Errorf("tool call message should render Used status, got %q", toolCallMsg.View().Content)
 			}
 		}
 	}
@@ -1067,29 +1165,8 @@ func TestTurnWithToolCallRendersToolCallAndResult(t *testing.T) {
 	if !strings.Contains(view, "read_file") {
 		t.Errorf("viewport should contain tool name, got %q", view)
 	}
-	if !strings.Contains(toolCallMsg.View().Content, "done") {
-		t.Errorf("tool call message should render done status, got %q", toolCallMsg.View().Content)
-	}
-}
-
-func TestSidebarSelectFile(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
-	m.width = 120
-	m.height = 40
-	m.updateLayout()
-
-	updated, _ := m.Update(sidebar.SelectFileMsg{Path: "/tmp/test.go"})
-	model := updated.(*Model)
-
-	if len(model.messages) != 1 {
-		t.Fatalf("messages length = %d, want 1", len(model.messages))
-	}
-	if !strings.Contains(model.messages[0].Content, "/tmp/test.go") {
-		t.Errorf("message should contain file path, got %q", model.messages[0].Content)
+	if !strings.Contains(toolCallMsg.View().Content, "Used") {
+		t.Errorf("tool call message should render Used status, got %q", toolCallMsg.View().Content)
 	}
 }
 
@@ -1098,7 +1175,7 @@ func TestErrorMsg_DoesNotOverrideTurnErrorOnDone(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1132,7 +1209,7 @@ func TestYoloToggle(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	var modes []int
 	m.SetApprovalModeSetter(func(mode int) {
@@ -1158,27 +1235,29 @@ func TestYoloToggle(t *testing.T) {
 	}
 }
 
-func TestYoloToggle_StatusBar(t *testing.T) {
+func TestYoloToggle_Footer(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
 
-	// Default status bar should not contain YOLO.
-	view := m.statusBar()
+	// Default footer should not contain YOLO.
+	m.updateFooter()
+	view := m.footer.View()
 	if strings.Contains(view, "YOLO") {
-		t.Error("status bar should not contain YOLO in default mode")
+		t.Error("footer should not contain YOLO in default mode")
 	}
 
 	// Toggle to YOLO mode.
 	m.SetApprovalMode(2)
-	view = m.statusBar()
+	m.updateFooter()
+	view = m.footer.View()
 	if !strings.Contains(view, "YOLO") {
-		t.Error("status bar should contain YOLO when in yolo mode")
+		t.Error("footer should contain YOLO when in yolo mode")
 	}
 }
 
@@ -1187,7 +1266,7 @@ func TestDirtyFlag_NavigationDoesNotRefreshViewport(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1218,9 +1297,14 @@ func TestLayoutGeometryConsistency(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
+	m.updateLayout()
+
+	// Add a message to hide the welcome panel so viewport geometry matches the
+	// classic full-height layout.
+	m.addMessage(msgcomp.NewUserMessage("hello", m.styles))
 	m.updateLayout()
 
 	// Compute expected layout values
@@ -1246,7 +1330,7 @@ func TestRawModeToggle_FocusedMessagePath(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1276,7 +1360,7 @@ func TestRawModeToggle_InputFocusIgnored(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1304,7 +1388,7 @@ func TestDirtyFlag_StreamChunkSetsDirty(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1334,7 +1418,7 @@ func TestStreamChunk_StaleAfterCancellation(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1452,7 +1536,8 @@ func (f *fakeGitProvider) Commit(ctx context.Context, message string) error {
 	f.commitMsg = message
 	return f.err
 }
-func (f *fakeGitProvider) IsRepo(ctx context.Context) (bool, error) { return true, nil }
+func (f *fakeGitProvider) IsRepo(ctx context.Context) (bool, error)   { return true, nil }
+func (f *fakeGitProvider) Branch(ctx context.Context) (string, error) { return "main", nil }
 
 type fakeTurnManager struct {
 	events []api.TurnEvent
@@ -1467,7 +1552,27 @@ func (f *fakeTurnManager) RunTurn(ctx context.Context, sessionID string, input s
 	return ch, nil
 }
 
+func (f *fakeTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return f.RunTurn(ctx, sessionID, input)
+}
+
+func (f *fakeTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return f.RunTurn(ctx, sessionID, input)
+}
+
+func (f *fakeTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return f.RunTurnWithPlan(ctx, sessionID, input)
+}
+
+func (f *fakeTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
+}
+
 func (f *fakeTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+	return nil
+}
+
+func (f *fakeTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
 	return nil
 }
 
@@ -1514,7 +1619,7 @@ func TestCheckpointMsg_Success(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1558,7 +1663,7 @@ func TestCheckpointMsg_Error(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1596,7 +1701,7 @@ func TestCheckpointMsg_NoGitProvider(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1628,7 +1733,7 @@ func TestSessionsMsg_WithSessions(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1668,7 +1773,7 @@ func TestSessionsMsg_Error(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1703,7 +1808,7 @@ func TestSessionsMsg_Empty(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1738,7 +1843,7 @@ func TestSessionsMsg_NoSessionManager(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1770,7 +1875,7 @@ func TestCompactTimeout(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1806,7 +1911,7 @@ func TestClearMessagesTimeout(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1841,7 +1946,7 @@ func TestWindowSizeMsg_DebouncesRebuild(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1895,7 +2000,7 @@ func TestWindowSizeMsg_UnchangedDimensions_NoRebuild(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1917,7 +2022,7 @@ func TestDiffCommand_RendersGitDiffOutput(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1946,7 +2051,7 @@ func TestDiffCommand_NoGitProviderShowsError(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -1973,7 +2078,7 @@ func TestDiffCommand_EmptyDiffShowsError(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2002,7 +2107,7 @@ func TestStreamChunk_IncrementalRenderMatchesRebuild(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2046,7 +2151,7 @@ func TestMCPCommand_ListsTools(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2081,7 +2186,7 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2104,16 +2209,14 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 }
 
 // TestGoldenViewIdle is a smoke golden test for the deterministic TUI harness.
-// It renders the idle state with the sidebar hidden so the output is stable.
 func TestGoldenViewIdle(t *testing.T) {
 	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: t.TempDir()}
-	m, err := New(cfg, session, context.Background())
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, err := New(cfg, session, context.Background(), "")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	m.sidebar.Toggle()
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -2123,12 +2226,11 @@ func TestGoldenViewIdle(t *testing.T) {
 
 func newGoldenModel(t *testing.T) *Model {
 	cfg := config.DefaultConfig()
-	session := &api.Session{ID: "test", Path: t.TempDir()}
-	m, err := New(cfg, session, context.Background())
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, err := New(cfg, session, context.Background(), "")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	m.sidebar.Toggle()
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -2179,7 +2281,28 @@ func (c *capturingErrorTurnManager) RunTurn(ctx context.Context, sessionID strin
 	return nil, errors.New("run turn failed")
 }
 
+func (c *capturingErrorTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return c.RunTurn(ctx, sessionID, input)
+}
+
+func (c *capturingErrorTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	c.capturedCtx = ctx
+	return nil, errors.New("run turn failed")
+}
+
+func (c *capturingErrorTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return c.RunTurnWithPlan(ctx, sessionID, input)
+}
+
+func (c *capturingErrorTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
+}
+
 func (c *capturingErrorTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+	return nil
+}
+
+func (c *capturingErrorTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
 	return nil
 }
 
@@ -2188,7 +2311,7 @@ func TestRunTurnError_CancelsContext(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2196,7 +2319,18 @@ func TestRunTurnError_CancelsContext(t *testing.T) {
 	tm := &capturingErrorTurnManager{}
 	m.SetTurnManager(tm)
 
-	m.Update(input.SendMsg{Content: "hello"})
+	_, cmd := m.Update(input.SendMsg{Content: "hello"})
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	msg := cmd()
+	runResult, ok := msg.(RunTurnResultMsg)
+	if !ok {
+		t.Fatalf("expected RunTurnResultMsg, got %T", msg)
+	}
+
+	m.Update(runResult)
 
 	if tm.capturedCtx == nil {
 		t.Fatal("RunTurn was not called")
@@ -2215,8 +2349,28 @@ func (e *errorResumeTurnManager) RunTurn(ctx context.Context, sessionID string, 
 	return nil, nil
 }
 
+func (e *errorResumeTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return e.RunTurn(ctx, sessionID, input)
+}
+
+func (e *errorResumeTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (e *errorResumeTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return e.RunTurnWithPlan(ctx, sessionID, input)
+}
+
+func (e *errorResumeTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
+}
+
 func (e *errorResumeTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
 	return e.resumeErr
+}
+
+func (e *errorResumeTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
 }
 
 func TestApprovalResponse_ResumeWithApprovalErrorReturnsErrorMsg(t *testing.T) {
@@ -2224,7 +2378,7 @@ func TestApprovalResponse_ResumeWithApprovalErrorReturnsErrorMsg(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2282,7 +2436,7 @@ func TestReadStreamChunk_IgnoresStaleEventsAfterCancel(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 
 	ch := make(chan api.TurnEvent, 1)
 	ch <- api.TurnEvent{Type: api.TurnEventContent, Content: "stale"}
@@ -2307,7 +2461,7 @@ func TestRenderApprovalDialog_NilSession(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: t.TempDir()}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 80
 	m.height = 24
 	m.updateLayout()
@@ -2330,7 +2484,7 @@ func TestApprovalResponse_DedupesAlwaysAllNames(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	session := &api.Session{ID: "test", Path: "/tmp"}
-	m, _ := New(cfg, session, context.Background())
+	m, _ := New(cfg, session, context.Background(), "")
 	m.width = 120
 	m.height = 40
 	m.updateLayout()
@@ -2353,5 +2507,792 @@ func TestApprovalResponse_DedupesAlwaysAllNames(t *testing.T) {
 	}
 	if len(setNames) > 0 && setNames[0] != "write_file" {
 		t.Errorf("autoApproveSetter name = %q, want write_file", setNames[0])
+	}
+}
+
+func TestHelpCommand_OpensOverlay(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	updated, cmd := m.Update(input.SendMsg{Content: "/help"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected command for /help")
+	}
+
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
+
+	if !model2.showHelp {
+		t.Fatal("expected help overlay to be open")
+	}
+
+	view := model2.View().Content
+	if !strings.Contains(view, "Keyboard shortcuts") {
+		t.Errorf("view should contain help title, got %q", view)
+	}
+	if !strings.Contains(view, "/help") {
+		t.Errorf("view should contain /help command, got %q", view)
+	}
+}
+
+func TestHelpOverlay_CloseKeys(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	updated, _ := m.Update(ShowHelpMsg{})
+	m = updated.(*Model)
+	if !m.showHelp {
+		t.Fatal("expected help overlay to be open")
+	}
+
+	tests := []rune{
+		tea.KeyEsc,
+		tea.KeyEnter,
+		'q',
+	}
+
+	for _, code := range tests {
+		updated, _ = m.Update(tea.KeyPressMsg{Code: code})
+		model := updated.(*Model)
+		if model.showHelp {
+			t.Errorf("help overlay should close on %q", code)
+		}
+		// reopen for next key
+		m = model
+		updated, _ = m.Update(ShowHelpMsg{})
+		m = updated.(*Model)
+	}
+}
+
+func TestHelpOverlay_ScrollKeys(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.Update(ShowHelpMsg{})
+	if !m.showHelp {
+		t.Fatal("expected help overlay to be open")
+	}
+
+	if m.helpPanel.Offset() != 0 {
+		t.Fatalf("initial offset = %d, want 0", m.helpPanel.Offset())
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.helpPanel.Offset() == 0 {
+		t.Error("help overlay should scroll down")
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.helpPanel.Offset() != 0 {
+		t.Errorf("help overlay should clamp to top after pgup, got offset %d", m.helpPanel.Offset())
+	}
+}
+
+func TestApprovalNumericKeys(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		key      rune
+		decision api.ApprovalDecision
+	}{
+		{'1', api.ApprovalYes},
+		{'2', api.ApprovalNo},
+		{'3', api.ApprovalAlways},
+		{'4', api.ApprovalDiff},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.key), func(t *testing.T) {
+			t.Parallel()
+
+			cfg := config.DefaultConfig()
+			session := &api.Session{ID: "test", Path: "/tmp"}
+			m, _ := New(cfg, session, context.Background(), "")
+			m.width = 120
+			m.height = 40
+			m.updateLayout()
+
+			calls := []api.ToolCall{{ID: "1", Name: "edit_file", Arguments: `{}`}}
+			m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+
+			resp, ok := findApprovalResponse(tea.Batch(m.handleKeyMsg(tea.KeyPressMsg{Code: tt.key, Text: string(tt.key)})...))
+			if !ok {
+				t.Fatal("expected ApprovalResponseMsg for numeric approval key")
+			}
+			if resp.Decision != tt.decision {
+				t.Errorf("decision = %v, want %v", resp.Decision, tt.decision)
+			}
+			if resp.CallID != "1" {
+				t.Errorf("callID = %q, want %q", resp.CallID, "1")
+			}
+		})
+	}
+}
+
+func TestApprovalFullscreenDiff(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "file.txt")
+	if err := os.WriteFile(path, []byte("old content\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: tmp}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	calls := []api.ToolCall{{
+		ID:        "1",
+		Name:      "write_file",
+		Arguments: `{"path":"file.txt","content":"new content\n"}`,
+	}}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model := updated.(*Model)
+
+	if !model.approvalFullscreen {
+		t.Fatal("expected fullscreen diff to open")
+	}
+	if !strings.Contains(model.approvalDiffContent, "new content") {
+		t.Errorf("fullscreen diff should contain new content, got %q", model.approvalDiffContent)
+	}
+
+	view := model.View().Content
+	if !strings.Contains(view, "Diff preview") {
+		t.Errorf("view should show fullscreen diff header, got %q", view)
+	}
+
+	// Close on Esc.
+	updated, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Error("expected fullscreen diff to close on Esc")
+	}
+	if model.approvalDiffContent != "" {
+		t.Error("expected diff content to be cleared after close")
+	}
+
+	// Reopen and close on Ctrl+E.
+	updated, _ = model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model = updated.(*Model)
+	if !model.approvalFullscreen {
+		t.Fatal("expected fullscreen diff to reopen")
+	}
+
+	updated, _ = model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Error("expected fullscreen diff to close on Ctrl+E")
+	}
+}
+
+func TestApprovalFullscreenResetsOnNewRequest(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "file.txt")
+	if err := os.WriteFile(path, []byte("old content\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: tmp}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	calls := []api.ToolCall{{
+		ID:        "1",
+		Name:      "write_file",
+		Arguments: `{"path":"file.txt","content":"new content\n"}`,
+	}}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model := updated.(*Model)
+	if !model.approvalFullscreen {
+		t.Fatal("expected fullscreen diff to open")
+	}
+
+	// A new approval request must clear the stale fullscreen diff state.
+	updated, _ = model.Update(ApprovalRequestMsg{Calls: calls, RequestID: 2})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Error("expected approvalFullscreen to reset on new ApprovalRequestMsg")
+	}
+	if model.approvalDiffContent != "" {
+		t.Errorf("expected approvalDiffContent to be cleared, got %q", model.approvalDiffContent)
+	}
+}
+
+func TestPlanModeToggle_ShiftTabTogglesIndicator(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	if m.input.PlanMode() {
+		t.Error("plan mode should start disabled")
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	model := updated.(*Model)
+	if !model.input.PlanMode() {
+		t.Error("plan mode should be enabled after shift+tab")
+	}
+	view := model.View().Content
+	if !strings.Contains(view, "[PLAN]") {
+		t.Errorf("view should contain plan indicator, got:\n%s", view)
+	}
+
+	updated, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	model = updated.(*Model)
+	if model.input.PlanMode() {
+		t.Error("plan mode should be disabled after second shift+tab")
+	}
+}
+
+func TestPlanPanel_OpensOnPlanRequestMsg(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	plan := "1. Read file\n2. Edit file"
+	updated, _ := m.Update(PlanRequestMsg{Plan: plan})
+	model := updated.(*Model)
+
+	if !model.planPending {
+		t.Error("expected planPending to be true")
+	}
+	if model.planRequest != plan {
+		t.Errorf("planRequest = %q, want %q", model.planRequest, plan)
+	}
+	if model.state != api.TurnWaitingPlan {
+		t.Errorf("state = %d, want TurnWaitingPlan", model.state)
+	}
+
+	view := model.View().Content
+	if !strings.Contains(view, "Plan requires approval") {
+		t.Errorf("view should contain plan panel header, got:\n%s", view)
+	}
+	if !strings.Contains(view, "1. Read file") || !strings.Contains(view, "2. Edit file") {
+		t.Errorf("view should contain plan text, got:\n%s", view)
+	}
+	if !strings.Contains(view, "[y] yes") || !strings.Contains(view, "[n] no") {
+		t.Errorf("view should contain y/n choices, got:\n%s", view)
+	}
+}
+
+func TestPlanPanel_y_n_EmitsPlanApprovalMsg(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+
+	tests := []struct {
+		key      rune
+		approved bool
+	}{
+		{'y', true},
+		{'n', false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.key), func(t *testing.T) {
+			t.Parallel()
+
+			m, _ := New(cfg, session, context.Background(), "")
+			m.width = 80
+			m.height = 24
+			m.updateLayout()
+			m.Update(PlanRequestMsg{Plan: "plan"})
+
+			updated, cmd := m.Update(tea.KeyPressMsg{Code: tt.key, Text: string(tt.key)})
+			model := updated.(*Model)
+			if cmd == nil {
+				t.Fatal("expected command for plan approval key")
+			}
+			var approval PlanApprovalMsg
+			switch msg := cmd().(type) {
+			case PlanApprovalMsg:
+				approval = msg
+			case tea.BatchMsg:
+				found := false
+				for _, c := range msg {
+					if c == nil {
+						continue
+					}
+					if m, ok := c().(PlanApprovalMsg); ok {
+						approval = m
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("expected PlanApprovalMsg in batch, got %T", cmd())
+				}
+			default:
+				t.Fatalf("expected PlanApprovalMsg, got %T", msg)
+			}
+			if approval.Approved != tt.approved {
+				t.Errorf("approved = %v, want %v", approval.Approved, tt.approved)
+			}
+			updated2, _ := model.Update(approval)
+			model2 := updated2.(*Model)
+			if model2.planPending {
+				t.Error("planPending should be cleared by PlanApprovalMsg")
+			}
+		})
+	}
+}
+
+func TestSend_WithPlanMode_CallsRunTurnWithPlan(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	tm := &recordingPlanTurnManager{}
+	m.SetTurnManager(tm)
+	m.input.SetPlanMode(true)
+
+	updated, cmd := m.Update(input.SendMsg{Content: "hello"})
+	model := updated.(*Model)
+
+	if model.input.PlanMode() {
+		t.Error("plan mode should be disabled after sending")
+	}
+	if model.state != api.TurnThinking {
+		t.Errorf("state = %d, want TurnThinking", model.state)
+	}
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	msg := cmd()
+	runResult, ok := msg.(RunTurnResultMsg)
+	if !ok {
+		t.Fatalf("expected RunTurnResultMsg, got %T", msg)
+	}
+	model.Update(runResult)
+
+	if !tm.runTurnWithPlanCalled {
+		t.Error("expected RunTurnWithPlan to be called")
+	}
+	if tm.runTurnWithPlanInput != "hello" {
+		t.Errorf("RunTurnWithPlan input = %q, want %q", tm.runTurnWithPlanInput, "hello")
+	}
+}
+
+func TestPlanApprovalMsg_CallsResumeWithPlan(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	tm := &recordingPlanTurnManager{}
+	m.SetTurnManager(tm)
+	m.Update(PlanRequestMsg{Plan: "plan"})
+
+	updated, cmd := m.Update(PlanApprovalMsg{Approved: true})
+	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command after PlanApprovalMsg")
+	}
+	msg := cmd()
+	stateChange, ok := msg.(StateChangeMsg)
+	if !ok {
+		t.Fatalf("expected StateChangeMsg, got %T", msg)
+	}
+	if stateChange.State != api.TurnThinking {
+		t.Errorf("state change = %d, want TurnThinking", stateChange.State)
+	}
+	if model.planPending {
+		t.Error("planPending should be false after PlanApprovalMsg")
+	}
+	if !tm.resumeWithPlanCalled || tm.resumeWithPlanApproved != true {
+		t.Errorf("expected ResumeWithPlan(true) to be called, got called=%v approved=%v", tm.resumeWithPlanCalled, tm.resumeWithPlanApproved)
+	}
+}
+
+// recordingPlanTurnManager records plan-mode turn manager calls.
+type recordingPlanTurnManager struct {
+	runTurnWithPlanCalled  bool
+	runTurnWithPlanInput   string
+	resumeWithPlanCalled   bool
+	resumeWithPlanApproved bool
+}
+
+func (r *recordingPlanTurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingPlanTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return r.RunTurn(ctx, sessionID, input)
+}
+
+func (r *recordingPlanTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	r.runTurnWithPlanCalled = true
+	r.runTurnWithPlanInput = input
+	ch := make(chan api.TurnEvent)
+	close(ch)
+	return ch, nil
+}
+
+func (r *recordingPlanTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return r.RunTurnWithPlan(ctx, sessionID, input)
+}
+
+func (r *recordingPlanTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	r.resumeWithPlanCalled = true
+	r.resumeWithPlanApproved = approved
+	return nil
+}
+
+func (r *recordingPlanTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+	return nil
+}
+
+func (r *recordingPlanTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
+}
+
+func TestSendMessage_ForwardsContentPartsToTurnManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	tm := &recordingPartsTurnManager{}
+	m.SetTurnManager(tm)
+
+	parts := []api.ContentPart{
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "https://example.com/img.png"}},
+	}
+	_, cmd := m.Update(input.SendMsg{Content: "describe", ContentParts: parts})
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	msg := cmd()
+	runResult, ok := msg.(RunTurnResultMsg)
+	if !ok {
+		t.Fatalf("expected RunTurnResultMsg, got %T", msg)
+	}
+	m.Update(runResult)
+
+	if !tm.runTurnWithContentPartsCalled {
+		t.Error("expected RunTurnWithContentParts to be called")
+	}
+	if tm.input != "describe" {
+		t.Errorf("input = %q, want %q", tm.input, "describe")
+	}
+	if len(tm.parts) != 1 {
+		t.Errorf("parts = %d, want 1", len(tm.parts))
+	}
+}
+
+type recordingPartsTurnManager struct {
+	runTurnWithContentPartsCalled bool
+	input                         string
+	parts                         []api.ContentPart
+}
+
+func (r *recordingPartsTurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingPartsTurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	r.runTurnWithContentPartsCalled = true
+	r.input = input
+	r.parts = parts
+	ch := make(chan api.TurnEvent)
+	close(ch)
+	return ch, nil
+}
+
+func (r *recordingPartsTurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingPartsTurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return nil, nil
+}
+
+func (r *recordingPartsTurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	return nil
+}
+
+func (r *recordingPartsTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	return nil
+}
+
+func (r *recordingPartsTurnManager) ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error {
+	return nil
+}
+
+func TestSend_AsyncRunsTurnManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	tm := &fakeTurnManager{
+		events: []api.TurnEvent{
+			{Type: api.TurnEventContent, Content: "hi"},
+			{Type: api.TurnEventDone},
+		},
+	}
+	m.SetTurnManager(tm)
+
+	updated, cmd := m.Update(input.SendMsg{Content: "hello"})
+	model := updated.(*Model)
+
+	if model.state != api.TurnThinking {
+		t.Fatalf("state = %d, want TurnThinking", model.state)
+	}
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	msg := cmd()
+	runResult, ok := msg.(RunTurnResultMsg)
+	if !ok {
+		t.Fatalf("expected RunTurnResultMsg, got %T", msg)
+	}
+	if runResult.Err != nil {
+		t.Fatalf("unexpected RunTurn error: %v", runResult.Err)
+	}
+
+	updated2, cmd2 := model.Update(runResult)
+	model2 := updated2.(*Model)
+
+	if model2.streamCh == nil {
+		t.Fatal("streamCh should be set after RunTurnResultMsg")
+	}
+	if cmd2 == nil {
+		t.Fatal("expected readStreamChunk command after RunTurnResultMsg")
+	}
+}
+
+func TestSend_AsyncErrorDisplaysError(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.SetTurnManager(&errorRunTurnManager{err: errors.New("run turn failed")})
+
+	_, cmd := m.Update(input.SendMsg{Content: "hello"})
+	if cmd == nil {
+		t.Fatal("expected async command after send")
+	}
+
+	runResult := cmd().(RunTurnResultMsg)
+	updated, _ := m.Update(runResult)
+	model := updated.(*Model)
+
+	if model.state != api.TurnError {
+		t.Errorf("state = %d, want TurnError", model.state)
+	}
+	found := false
+	for _, msg := range model.messages {
+		if strings.Contains(msg.Content, "run turn failed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected error message, got %v", model.messages)
+	}
+}
+
+func TestOverlayKeys_ConsumedByHelpOverlay(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	assistant := msgcomp.NewAssistantMessage("**bold**", m.styles)
+	m.addMessage(assistant)
+	m.focused = focusViewport
+
+	// Open help overlay.
+	updated, _ := m.Update(ShowHelpMsg{})
+	model := updated.(*Model)
+	if !model.showHelp {
+		t.Fatal("expected help overlay to be open")
+	}
+
+	// Pressing 'r' while help is open must not toggle raw mode.
+	updated, _ = model.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	model2 := updated.(*Model)
+	if !model2.showHelp {
+		t.Error("help overlay should remain open")
+	}
+	for _, msg := range model2.messages {
+		if msg.RawMode {
+			t.Error("raw mode should not toggle while help overlay is open")
+		}
+	}
+}
+
+func TestOverlayKeys_ConsumedByApprovalFullscreen(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: t.TempDir()}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	path := filepath.Join(session.Path, "file.txt")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	calls := []api.ToolCall{{
+		ID:        "1",
+		Name:      "write_file",
+		Arguments: `{"path":"file.txt","content":"new\n"}`,
+	}}
+	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+	m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	if !m.approvalFullscreen {
+		t.Fatal("expected fullscreen diff to be open")
+	}
+
+	m.focused = focusViewport
+	assistant := msgcomp.NewAssistantMessage("**bold**", m.styles)
+	m.addMessage(assistant)
+
+	// Pressing 'r' while fullscreen diff is open must not toggle raw mode.
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	model := updated.(*Model)
+	if !model.approvalFullscreen {
+		t.Error("fullscreen diff should remain open")
+	}
+	for _, msg := range model.messages {
+		if msg.RawMode {
+			t.Error("raw mode should not toggle while fullscreen diff is open")
+		}
+	}
+}
+
+func TestOverlayKeys_ConsumedBySteerOverlay(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+	m.setState(api.TurnStreaming)
+
+	// Open steer overlay.
+	m.Update(ShowSteerInputMsg{})
+	if !m.steerOpen {
+		t.Fatal("expected steer overlay to be open")
+	}
+
+	inputValueBefore := m.input.Value()
+
+	// Pressing a printable key should go to the steer input, not the main input.
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	model := updated.(*Model)
+	if !model.steerOpen {
+		t.Error("steer overlay should remain open")
+	}
+	if model.input.Value() != inputValueBefore {
+		t.Errorf("main input value changed while steer overlay was open: %q", model.input.Value())
+	}
+	if model.steerInput != "x" {
+		t.Errorf("steerInput = %q, want %q", model.steerInput, "x")
+	}
+}
+
+func TestPlanPending_IgnoresSteerKey(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+	m.setState(api.TurnStreaming)
+	m.planPending = true
+	m.planRequest = "plan"
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl, Text: "ctrl+s"})
+	model := updated.(*Model)
+
+	if model.steerOpen {
+		t.Error("steer overlay should not open while plan approval panel is pending")
+	}
+	if !model.planPending {
+		t.Error("planPending should remain true")
 	}
 }

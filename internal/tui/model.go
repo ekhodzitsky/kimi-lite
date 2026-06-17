@@ -3,24 +3,26 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
+	"maps"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/activity"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/footer"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/help"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/mentions"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/sessions"
-	"github.com/ekhodzitsky/kimi-lite/internal/tui/sidebar"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/viewport"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/welcome"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -29,15 +31,14 @@ type focusedComponent int
 
 const (
 	focusInput focusedComponent = iota
-	focusSidebar
 	focusViewport
 )
 
 const (
-	statusHeight      = 1
+	statusHeight      = 2
 	minContentWidth   = 20
 	minViewportHeight = 5
-	// viewportWidthPadding accounts for sidebar border + content padding.
+	// viewportWidthPadding accounts for viewport border + content padding.
 	viewportWidthPadding = 4
 	minInputHeight       = 3
 
@@ -47,6 +48,9 @@ const (
 	// integer representation used by the TUI's approval-mode callback.
 	approvalModeAuto = int(core.ModeAuto)
 	approvalModeYolo = int(core.ModeYolo)
+
+	// maxToolProgressLen caps live tool output stored in the root model.
+	maxToolProgressLen = 2048
 )
 
 // inputHeight returns the current rendered height of the input component.
@@ -58,59 +62,15 @@ func (m *Model) inputHeight() int {
 	return h
 }
 
-// layoutRect holds computed geometry for a single frame.
-type layoutRect struct {
-	sbWidth      int
-	contentWidth int
-	vpWidth      int
-	vpHeight     int
-	inputHeight  int
-	statusY      int
-}
-
-// eq reports whether two layouts have identical geometry.
-func (r layoutRect) eq(o layoutRect) bool {
-	return r.sbWidth == o.sbWidth &&
-		r.contentWidth == o.contentWidth &&
-		r.vpWidth == o.vpWidth &&
-		r.vpHeight == o.vpHeight &&
-		r.inputHeight == o.inputHeight &&
-		r.statusY == o.statusY
-}
-
-// layout computes all geometry once, folding in min-content/min-viewport clamps.
-func (m *Model) layout() layoutRect {
-	sbWidth := 0
-	if m.sidebar.Visible() {
-		sbWidth = m.sidebar.Width()
-	}
-	contentWidth := m.width - sbWidth
-	if contentWidth < minContentWidth {
-		contentWidth = minContentWidth
-	}
-	inputHeight := m.inputHeight()
-	vpHeight := m.height - statusHeight - inputHeight
-	if vpHeight < minViewportHeight {
-		vpHeight = minViewportHeight
-	}
-	statusY := vpHeight + inputHeight
-	if statusY > m.height {
-		statusY = m.height
-	}
-	return layoutRect{
-		sbWidth:      sbWidth,
-		contentWidth: contentWidth,
-		vpWidth:      contentWidth - viewportWidthPadding,
-		vpHeight:     vpHeight,
-		inputHeight:  inputHeight,
-		statusY:      statusY,
-	}
-}
-
 // turnManager is the interface needed from core.TurnManager.
 type turnManager interface {
 	RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
+	RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error)
+	RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error)
+	RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error)
+	ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error
 	ResumeWithApproval(ctx context.Context, sessionID string, requestID int64, approvals map[string]api.ApprovalDecision) error
+	Steer(ctx context.Context, sessionID string, input string) error
 }
 
 // sessionManager is the interface needed from core.SessionManager.
@@ -137,8 +97,12 @@ type Model struct {
 
 	input    *input.Model
 	vp       *viewport.Model
-	sidebar  *sidebar.Model
 	messages []*msgcomp.Message
+	footer   *footer.Model
+	welcome  *welcome.Model
+	activity *activity.Model
+
+	mentionProvider mentions.Provider
 
 	state       api.TurnState
 	session     *api.Session
@@ -148,6 +112,9 @@ type Model struct {
 	toolCount   int
 	statusText  string
 
+	gitBranch string
+	gitDirty  bool
+
 	width  int
 	height int
 
@@ -156,6 +123,28 @@ type Model struct {
 
 	// sessionPicker is the modal session-selection overlay.
 	sessionPicker *sessions.Picker
+
+	// helpPanel is the /help overlay.
+	helpPanel *help.Model
+	showHelp  bool
+
+	// approvalFullscreen shows a temporary fullscreen diff preview for the
+	// pending approval call.
+	approvalFullscreen  bool
+	approvalDiffContent string
+
+	// planRequest holds the generated plan waiting for user approval.
+	planRequest string
+	// planPending is true when the plan approval panel is open.
+	planPending bool
+
+	// steerOpen is true when the steering input overlay is visible.
+	steerOpen bool
+	// steerInput holds the draft steering instruction.
+	steerInput string
+	// steeredPending is true when a steer event was received and the next
+	// streamed assistant message must start a new block.
+	steeredPending bool
 
 	// Service references (optional, wired by app layer)
 	turnManager    turnManager
@@ -178,6 +167,10 @@ type Model struct {
 	streamCh       <-chan api.TurnEvent
 	streamCancel   context.CancelFunc
 	streamCanceled bool // true after cancel/error until a new stream starts
+	streamGen      int  // increments for each new send to identify stale results
+
+	// Live output from running tools, keyed by call ID.
+	toolProgress map[string]string
 
 	// Focus management
 	focused focusedComponent
@@ -201,39 +194,68 @@ type Model struct {
 	mu sync.RWMutex
 }
 
-// New creates the root TUI model.
-func New(cfg *api.Config, session *api.Session, appCtx context.Context) (*Model, error) {
-	st := styles.New(cfg.UI.Theme)
+// New creates the root TUI model. themeConfigDir is the directory that
+// contains user-defined themes under a "themes" subdirectory.
+func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeConfigDir string) (*Model, error) {
+	if _, err := os.Stat(session.Path); err != nil {
+		return nil, fmt.Errorf("session path %q: %w", session.Path, err)
+	}
+
+	theme, err := styles.LoadTheme(cfg.UI.Theme, themeConfigDir)
+	if err != nil {
+		return nil, fmt.Errorf("load theme: %w", err)
+	}
+	st := styles.NewFromTheme(theme)
 
 	inp := input.New(st, input.ConfigurableKeyMap(cfg.Keybindings), cfg.Session.MaxHistory)
 	inp.SetEditor(cfg.UI.Editor)
 	inp.SetContext(appCtx)
+	inp.SetConfigDir(themeConfigDir)
+	inp.SetSlashCommands(input.DefaultSlashCommands)
 	vp := viewport.New(st)
+	ft := footer.New(st)
+	wc := welcome.New(st)
+	ac := activity.New(st)
+	hp := help.New(st)
 
-	sb, err := sidebar.New(st, session.Path)
-	if err != nil {
-		return nil, fmt.Errorf("create sidebar: %w", err)
-	}
-
+	mp := &mentions.FileWalker{MaxDepth: 3}
 	m := &Model{
-		styles:       st,
-		config:       cfg,
-		input:        inp,
-		vp:           vp,
-		sidebar:      sb,
-		messages:     make([]*msgcomp.Message, 0),
-		state:        api.TurnIdle,
-		session:      session,
-		contextMax:   0,
-		modelName:    cfg.LLM.Model,
-		focused:      focusInput,
-		appCtx:       appCtx,
-		rb:           newRenderBuffer(),
-		approval:     newApprovalController(),
-		approvalMode: approvalModeAuto,
+		styles:          st,
+		config:          cfg,
+		input:           inp,
+		vp:              vp,
+		footer:          ft,
+		welcome:         wc,
+		activity:        ac,
+		helpPanel:       hp,
+		messages:        make([]*msgcomp.Message, 0),
+		state:           api.TurnIdle,
+		session:         session,
+		contextMax:      0,
+		modelName:       cfg.LLM.Model,
+		focused:         focusInput,
+		appCtx:          appCtx,
+		rb:              newRenderBuffer(),
+		approval:        newApprovalController(),
+		approvalMode:    approvalModeAuto,
+		mentionProvider: mp,
+		toolProgress:    make(map[string]string),
 	}
+	inp.SetCandidateFunc(func() []string {
+		m.mu.RLock()
+		provider := m.mentionProvider
+		path := ""
+		if m.session != nil {
+			path = m.session.Path
+		}
+		m.mu.RUnlock()
+		if provider == nil {
+			return nil
+		}
+		cands, _ := provider.Candidates(path)
+		return cands
+	})
 	m.updateLayout()
-	m.syncInputCandidates()
 	return m, nil
 }
 
@@ -307,12 +329,43 @@ func (m *Model) SetApprovalMode(mode int) {
 	m.approvalMode = mode
 }
 
+func (m *Model) helpData() help.Data {
+	return help.Data{
+		Shortcuts: []help.Shortcut{
+			{Keys: "enter", Description: "Send message"},
+			{Keys: "alt+enter", Description: "Insert newline"},
+			{Keys: "tab", Description: "Switch focus"},
+			{Keys: "shift+tab", Description: "Toggle plan mode"},
+			{Keys: "ctrl+g", Description: "External editor"},
+			{Keys: "ctrl+y", Description: "Toggle yolo mode"},
+			{Keys: "ctrl+s", Description: "Steer response while streaming"},
+			{Keys: "ctrl+v/alt+v", Description: "Paste image or file"},
+			{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
+			{Keys: "enter", Description: "Expand/collapse tool call"},
+		},
+		Commands: []help.SlashCommand{
+			{Name: "/compact", Description: "Summarize older messages"},
+			{Name: "/clear", Description: "Clear transcript"},
+			{Name: "/sessions", Description: "Switch session"},
+			{Name: "/checkpoint", Description: "Create git checkpoint"},
+			{Name: "/diff", Description: "Show git diff"},
+			{Name: "/mcp", Description: "List MCP tools"},
+			{Name: "/title", Description: "Rename session"},
+			{Name: "/fork", Description: "Fork session"},
+			{Name: "/help", Description: "Show this help"},
+		},
+	}
+}
+
 // Init implements tea.Model.
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.input.Init(),
 		m.vp.Init(),
-		m.sidebar.Init(),
+		m.footer.Init(),
+		m.activity.Init(),
+		m.input.RefreshCandidatesCmd(),
+		m.scheduleGitRefreshCmd(),
 	)
 }
 
@@ -327,6 +380,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if selected {
 				id := m.sessionPicker.Selected().ID
 				m.sessionPicker = nil
+				m.statusText = ""
 				if id != "" {
 					cmds = append(cmds, m.resumeSessionCmd(id))
 				}
@@ -334,12 +388,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if done {
 				m.sessionPicker = nil
+				m.statusText = ""
+				return m, nil
+			}
+			if sel := m.sessionPicker.Selected(); sel.Path != "" && m.session != nil && sel.Path != m.session.Path {
+				m.statusText = fmt.Sprintf("cd %s && kimi-lite --resume %s", shellQuote(sel.Path), sel.ID)
+			} else {
+				m.statusText = ""
 			}
 			return m, nil
 		}
 		// Let the input component consume completion keys while a popup is open.
 		if !m.input.Completing() {
 			cmds = append(cmds, m.handleKeyMsg(msg)...)
+		}
+		// Overlays own the keyboard while open; do not dispatch the key to
+		// child components.
+		if m.planPending || m.showHelp || m.approvalFullscreen || m.steerOpen {
+			return m, tea.Batch(cmds...)
 		}
 	case tea.MouseReleaseMsg:
 		m.handleMouseMsg(msg)
@@ -372,7 +438,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ToolCallMsg:
 		cmds = append(cmds, m.handleToolCalls(msg.Calls)...)
 
+	case ToolProgressMsg:
+		m.appendToolProgress(msg.CallID, msg.Content)
+		m.updateActivity()
+
 	case ToolResultMsg:
+		m.mu.Lock()
+		delete(m.toolProgress, msg.Result.CallID)
+		m.mu.Unlock()
+		m.updateActivity()
 		cmds = append(cmds, m.handleToolResult(msg.Result)...)
 
 	case ErrorMsg:
@@ -382,6 +456,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StatusMsg:
 		m.statusText = msg.Text
+
+	case input.PasteErrorMsg:
+		m.statusText = msg.Err.Error()
 
 	case StateChangeMsg:
 		m.setState(msg.State)
@@ -425,6 +502,48 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Diff preview for %s:\n%s", msg.CallID, msg.Diff), m.styles))
 		m.setState(api.TurnWaitingApproval)
 
+	case PlanRequestMsg:
+		m.planRequest = msg.Plan
+		m.planPending = true
+		m.setState(api.TurnWaitingPlan)
+
+	case ShowSteerInputMsg:
+		m.steerOpen = true
+
+	case SteerMsg:
+		cmds = append(cmds, m.handleSteer(msg.Content)...)
+
+	case SteeredMsg:
+		if lastMsg := m.lastAssistantMessage(); lastMsg != nil {
+			lastMsg.SetStreaming(false)
+		}
+		m.addMessage(msgcomp.NewUserMessage(msg.Content, m.styles))
+		m.steeredPending = true
+		m.rebuildRenderedContent()
+
+	case PlanApprovalMsg:
+		m.planPending = false
+		m.planRequest = ""
+		m.mu.RLock()
+		tm := m.turnManager
+		var sessionID string
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+		cmds = append(cmds, func() tea.Msg {
+			if tm == nil || sessionID == "" {
+				return ErrorMsg{Err: fmt.Errorf("no turn manager")}
+			}
+			ctx, cancel := context.WithTimeout(appCtx, commandTimeout)
+			defer cancel()
+			if err := tm.ResumeWithPlan(ctx, sessionID, msg.Approved); err != nil {
+				return ErrorMsg{Err: fmt.Errorf("resume plan: %w", err)}
+			}
+			return StateChangeMsg{State: api.TurnThinking}
+		})
+
 	case SessionsMsg:
 		cmds = append(cmds, m.listSessionsCmd())
 
@@ -450,7 +569,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = nil
 			m.rb = newRenderBuffer()
 			m.mu.Unlock()
-			_ = m.sidebar.SetRoot(msg.Session.Path)
+			cmds = append(cmds, m.input.RefreshCandidatesCmd())
 			for _, msg := range msg.Session.Messages {
 				m.appendSessionMessage(msg)
 			}
@@ -482,14 +601,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setState(api.TurnIdle)
 
+	case ShowHelpMsg:
+		m.showHelp = true
+		m.helpPanel.SetSize(m.width-4, m.height-4)
+		m.helpPanel.SetData(m.helpData())
+
 	case msgcomp.RenderInvalidateMsg:
 		m.rebuildRenderedContent()
 
 	case input.SendMsg:
-		cmds = append(cmds, m.handleSend(msg.Content)...)
+		cmds = append(cmds, m.handleSend(msg.Content, msg.ContentParts)...)
 
-	case sidebar.SelectFileMsg:
-		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Selected file: %s", msg.Path), m.styles))
+	case RunTurnResultMsg:
+		cmds = append(cmds, m.handleRunTurnResult(msg)...)
+
+	case footerGitRefreshMsg:
+		cmds = append(cmds, m.gitRefreshCmd(), m.scheduleGitRefreshCmd())
+
+	case FooterGitMsg:
+		m.mu.Lock()
+		m.gitBranch = msg.Branch
+		m.gitDirty = msg.Dirty
+		m.mu.Unlock()
+		m.updateFooter()
 	}
 
 	// Update focused child component for KeyMsg; all children for other messages
@@ -502,18 +636,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.input.UpdateMsg(msg))
 			case focusViewport:
 				cmds = append(cmds, m.vp.UpdateMsg(msg))
-			case focusSidebar:
-				if m.sidebar.Visible() {
-					cmds = append(cmds, m.sidebar.UpdateMsg(msg))
-					m.syncInputCandidates()
-				}
 			}
 		}
 	} else {
 		cmds = append(cmds, m.input.UpdateMsg(msg))
 		cmds = append(cmds, m.vp.UpdateMsg(msg))
-		cmds = append(cmds, m.sidebar.UpdateMsg(msg))
-		m.syncInputCandidates()
 	}
 
 	// Update messages - pass KeyMsg through only when the viewport is focused
@@ -529,6 +656,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.messages[i].UpdateMsg(msg))
 		}
 	}
+
+	cmds = append(cmds, m.footer.UpdateMsg(msg))
+	cmds = append(cmds, m.activity.UpdateMsg(msg))
 
 	m.mu.Lock()
 	if m.rb.isDirty() {
@@ -549,28 +679,49 @@ func (m *Model) View() tea.View {
 		return v
 	}
 
+	m.updateFooter()
+	m.updateWelcomeData()
+	m.updateActivity()
+
 	var mainContent strings.Builder
+	if len(m.messages) == 0 {
+		mainContent.WriteString(m.welcome.View())
+		mainContent.WriteString("\n")
+	}
 	mainContent.WriteString(m.vp.View().Content)
 	mainContent.WriteString("\n")
+	if act := m.activity.View(); act != "" {
+		mainContent.WriteString(act)
+		mainContent.WriteString("\n")
+	}
 	mainContent.WriteString(m.input.View().Content)
 	mainContent.WriteString("\n")
-	mainContent.WriteString(m.statusBar())
+	mainContent.WriteString(m.footer.View())
 
 	view := mainContent.String()
-	if m.sidebar.Visible() {
-		view = lipgloss.JoinHorizontal(
-			lipgloss.Top,
-			m.sidebar.View().Content,
-			view,
-		)
-	}
 
 	if m.state == api.TurnWaitingApproval && m.approvalIsActive() {
-		view = m.renderApprovalDialog(view)
+		if m.approvalFullscreen {
+			view = m.renderApprovalFullscreen(view)
+		} else {
+			view = m.renderApprovalDialog(view)
+		}
+	}
+
+	if m.planPending {
+		view = m.renderPlanPanel(view)
+	}
+
+	if m.steerOpen {
+		view = m.renderSteerOverlay(view)
 	}
 
 	if m.sessionPicker != nil {
 		view = overlayDialog(view, m.sessionPicker.View(), m.width, m.height)
+	}
+
+	if m.showHelp {
+		view = overlayDialog(view, m.helpPanel.View().Content, m.width, m.height)
 	}
 
 	v := tea.NewView(view)
@@ -638,106 +789,8 @@ func (m *Model) setState(s api.TurnState) {
 	m.state = s
 }
 
-// syncInputCandidates refreshes the input's file completion list from the
-// sidebar's currently visible tree.
-func (m *Model) syncInputCandidates() {
-	m.input.SetFileCandidates(m.sidebar.RefreshVisiblePaths())
-}
-
-func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
-	var cmds []tea.Cmd
-
-	// Approval dialog takes precedence when waiting for approval
-	if m.state == api.TurnWaitingApproval {
-		switch msg.String() {
-		case m.config.Keybindings.ApproveYes:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalYes); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case m.config.Keybindings.ApproveNo:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalNo); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case m.config.Keybindings.ApproveAlways:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		case m.config.Keybindings.ApproveDiff:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalDiff); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
-			}
-			return cmds
-		}
-	}
-
-	switch msg.String() {
-	case m.config.Keybindings.Quit:
-		cmds = append(cmds, tea.Quit)
-	case m.config.Keybindings.Cancel:
-		// If the user has typed a draft, clear it first instead of cancelling
-		// the active stream. A second Cancel then stops the stream.
-		if m.input.Value() != "" {
-			m.input.SetValue("")
-			break
-		}
-		m.mu.Lock()
-		state := m.state
-		cancel := m.streamCancel
-		m.mu.Unlock()
-		if state == api.TurnThinking || state == api.TurnStreaming {
-			if cancel != nil {
-				cancel()
-			}
-			m.mu.Lock()
-			m.streamCh = nil
-			m.streamCancel = nil
-			m.streamCanceled = true
-			m.mu.Unlock()
-			m.setState(api.TurnIdle)
-		}
-	case m.config.Keybindings.ToggleSidebar:
-		m.sidebar.Toggle()
-		m.updateLayout()
-		if !m.sidebar.Visible() && m.focused == focusSidebar {
-			m.focused = focusInput
-			m.syncInputCandidates()
-			if cmd := m.input.Focus(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
-	case m.config.Keybindings.FocusNext:
-		if cmd := m.cycleFocus(1); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-	case m.config.Keybindings.FocusPrev:
-		if cmd := m.cycleFocus(-1); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-	case m.config.Keybindings.Yolo:
-		if m.approvalModeSetter != nil {
-			m.mu.Lock()
-			if m.approvalMode == approvalModeAuto {
-				m.approvalMode = approvalModeYolo
-			} else {
-				m.approvalMode = approvalModeAuto
-			}
-			mode := m.approvalMode
-			m.mu.Unlock()
-			m.approvalModeSetter(mode)
-		}
-	}
-
-	return cmds
-}
-
 func (m *Model) cycleFocus(delta int) tea.Cmd {
 	components := []focusedComponent{focusInput, focusViewport}
-	if m.sidebar.Visible() {
-		components = []focusedComponent{focusInput, focusSidebar, focusViewport}
-	}
 
 	currentIdx := -1
 	for i, c := range components {
@@ -756,86 +809,10 @@ func (m *Model) cycleFocus(delta int) tea.Cmd {
 	m.focused = components[newIdx]
 
 	if m.focused == focusInput {
-		m.syncInputCandidates()
 		return m.input.Focus()
 	}
 	m.input.Blur()
 	return nil
-}
-
-func (m *Model) handleMouseMsg(msg tea.MouseReleaseMsg) {
-	if msg.Button != tea.MouseLeft {
-		return
-	}
-
-	l := m.layout()
-
-	if m.sidebar.Visible() && msg.X < l.sbWidth {
-		m.focused = focusSidebar
-		return
-	}
-
-	if msg.Y >= l.vpHeight && msg.Y < l.statusY {
-		m.focused = focusInput
-		m.syncInputCandidates()
-	} else if msg.Y < l.vpHeight {
-		m.focused = focusViewport
-	}
-}
-
-func (m *Model) handleSend(content string) []tea.Cmd {
-	var cmds []tea.Cmd
-
-	if strings.HasPrefix(content, "/") {
-		cmd := m.handleCommand(content)
-		if cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-		return cmds
-	}
-
-	// Allow sending from Idle or Error state; block only during active turns.
-	if m.state == api.TurnThinking || m.state == api.TurnStreaming || m.state == api.TurnToolCalls || m.state == api.TurnWaitingApproval {
-		return nil
-	}
-
-	m.toolCount = 0
-	m.statusText = ""
-	m.addMessage(msgcomp.NewUserMessage(content, m.styles))
-	m.setState(api.TurnThinking)
-
-	// If turn manager and session are wired, execute a real LLM turn.
-	if m.turnManager != nil && m.session != nil {
-		ctx, cancel := context.WithCancel(m.appCtx)
-		m.mu.Lock()
-		m.streamCancel = cancel
-		m.streamCh = nil
-		m.streamCanceled = false
-		m.mu.Unlock()
-		streamCh, err := m.turnManager.RunTurn(ctx, m.session.ID, content)
-		if err != nil {
-			cancel()
-			m.mu.Lock()
-			m.streamCancel = nil
-			m.streamCh = nil
-			m.streamCanceled = true
-			m.mu.Unlock()
-			m.addMessage(msgcomp.NewErrorMessage(err, m.styles))
-			m.setState(api.TurnError)
-			return cmds
-		}
-		m.mu.Lock()
-		m.streamCh = streamCh
-		m.mu.Unlock()
-		cmds = append(cmds, m.readStreamChunk())
-		return cmds
-	}
-
-	// Fallback for tests or when no services are wired.
-	cmds = append(cmds, func() tea.Msg {
-		return SendMessageMsg{Content: content}
-	})
-	return cmds
 }
 
 // listSessionsCmd returns a command that lists sessions asynchronously.
@@ -897,172 +874,37 @@ func (m *Model) checkpointCmd() tea.Cmd {
 	}
 }
 
-// readStreamChunk returns a command that reads the next event from the stream.
-func (m *Model) readStreamChunk() tea.Cmd {
-	ch := m.streamCh // capture at command creation time
-	return func() tea.Msg {
-		if ch == nil {
-			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true}}
-		}
-		// Guard against stale events after cancellation or a new stream starting.
-		m.mu.RLock()
-		currentCh := m.streamCh
-		canceled := m.streamCanceled
-		m.mu.RUnlock()
-		if ch != currentCh || canceled {
-			return nil
-		}
-		event, ok := <-ch
-		if !ok {
-			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true}}
-		}
-		switch event.Type {
-		case api.TurnEventContent:
-			return StreamChunkMsg{Chunk: api.StreamChunk{Content: event.Content}}
-		case api.TurnEventDone:
-			return StreamChunkMsg{Chunk: api.StreamChunk{Done: true, ToolCalls: event.ToolCalls}}
-		case api.TurnEventError:
-			return ErrorMsg{Err: event.Error}
-		case api.TurnEventApprovalRequest:
-			return ApprovalRequestMsg{Calls: event.ToolCalls, RequestID: event.RequestID}
-		case api.TurnEventToolResult:
-			return ToolResultMsg{Result: event.Result}
-		case api.TurnEventApprovalDiff:
-			return ApprovalDiffMsg{CallID: event.DiffCallID, Diff: event.DiffContent}
-		case api.TurnEventStatus:
-			return StatusMsg{Text: event.Content}
-		default:
-			slog.Warn("unknown turn event type", "type", event.Type)
-			return nil
-		}
-	}
+// scheduleGitRefreshCmd schedules the next asynchronous git refresh.
+func (m *Model) scheduleGitRefreshCmd() tea.Cmd {
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg { return footerGitRefreshMsg{} })
 }
 
-func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
-	var cmds []tea.Cmd
-
-	// Guard against stale buffered chunks after stream cancellation.
+// gitRefreshCmd returns a command that fetches the current git branch and
+// dirty state for the footer.
+func (m *Model) gitRefreshCmd() tea.Cmd {
 	m.mu.RLock()
-	streamCh := m.streamCh
-	streamCanceled := m.streamCanceled
+	gp := m.gitProvider
+	appCtx := m.appCtx
 	m.mu.RUnlock()
-	if !chunk.Done && streamCh == nil && streamCanceled {
-		return cmds
+
+	return func() tea.Msg {
+		if gp == nil {
+			return FooterGitMsg{}
+		}
+		ctx, cancel := context.WithTimeout(appCtx, 5*time.Second)
+		defer cancel()
+		repo, err := gp.IsRepo(ctx)
+		if err != nil || !repo {
+			return FooterGitMsg{}
+		}
+		branch, _ := gp.Branch(ctx)
+		status, _ := gp.Status(ctx)
+		dirty := strings.TrimSpace(status) != ""
+		return FooterGitMsg{Branch: branch, Dirty: dirty}
 	}
-
-	if chunk.Error != nil {
-		m.addMessage(msgcomp.NewErrorMessage(chunk.Error, m.styles))
-		m.setState(api.TurnError)
-		m.mu.Lock()
-		if m.streamCancel != nil {
-			m.streamCancel()
-		}
-		m.streamCancel = nil
-		m.streamCh = nil
-		m.streamCanceled = true
-		m.rb.setLastBlockStart(0)
-		m.mu.Unlock()
-		return cmds
-	}
-
-	if chunk.Done {
-		if m.state != api.TurnError {
-			m.setState(api.TurnIdle)
-		}
-		m.statusText = ""
-		if lastMsg := m.lastAssistantMessage(); lastMsg != nil {
-			lastMsg.SetStreaming(false)
-		}
-		// Rebuild renderedContent since the last assistant message may now be glamour-rendered
-		m.rebuildRenderedContent()
-		// Estimate token usage after turn completes.
-		m.updateContextStats()
-		if len(chunk.ToolCalls) > 0 {
-			// Do not clear streamCh yet; more events may come from the turn manager.
-			cmds = append(cmds, func() tea.Msg {
-				return ToolCallMsg{Calls: chunk.ToolCalls}
-			})
-			return cmds
-		}
-		m.mu.Lock()
-		if m.streamCancel != nil {
-			m.streamCancel()
-		}
-		m.streamCancel = nil
-		m.streamCh = nil
-		m.streamCanceled = false
-		m.mu.Unlock()
-		return cmds
-	}
-
-	if m.state != api.TurnStreaming {
-		m.setState(api.TurnStreaming)
-	}
-
-	// Find or create the last assistant message
-	lastMsg := m.lastAssistantMessage()
-	if lastMsg == nil {
-		lastMsg = msgcomp.NewAssistantMessage("", m.styles)
-		lastMsg.SetStreaming(true)
-		m.mu.Lock()
-		m.messages = append(m.messages, lastMsg)
-		m.rb.setLastBlockStart(m.rb.len())
-		m.rb.updateLastBlock(lastMsg.View().Content)
-		m.mu.Unlock()
-	} else {
-		m.mu.Lock()
-		if m.rb.lastBlockStart() == 0 {
-			// After a full rebuild (e.g., resize), recompute the assistant's start position
-			m.rb.setLastBlockStart(m.rb.len() - len(lastMsg.View().Content))
-			if m.rb.lastBlockStart() < 0 {
-				m.rb.setLastBlockStart(0)
-			}
-		}
-		m.mu.Unlock()
-	}
-
-	lastMsg.AppendContent(chunk.Content)
-	lastMsg.SetWidth(m.vpWidth())
-
-	// Incremental update: truncate back to lastBlockStart and re-render just the last message
-	m.mu.Lock()
-	m.rb.updateLastBlock(lastMsg.View().Content)
-	m.mu.Unlock()
-
-	// Continue polling for the next chunk
-	cmds = append(cmds, m.readStreamChunk())
-
-	return cmds
 }
 
-func (m *Model) handleToolCalls(calls []api.ToolCall) []tea.Cmd {
-	cmds := make([]tea.Cmd, 0, 1)
-	for _, call := range calls {
-		m.addMessage(msgcomp.NewToolCallMessage(call, m.styles))
-	}
-	m.toolCount += len(calls)
-	m.setState(api.TurnToolCalls)
-	cmds = append(cmds, m.readStreamChunk())
-	return cmds
-}
-
-func (m *Model) handleToolResult(result api.ToolResult) []tea.Cmd {
-	cmds := make([]tea.Cmd, 0, 1)
-	m.statusText = ""
-	m.mu.Lock()
-	for _, msg := range m.messages {
-		if msg.Type == msgcomp.TypeToolCall && msg.ToolCall.ID == result.CallID {
-			msg.SetToolResult(result)
-			break
-		}
-	}
-	m.mu.Unlock()
-	// Re-render the tool call message so the result is visible in the viewport.
-	m.rebuildRenderedContent()
-	cmds = append(cmds, m.readStreamChunk())
-	return cmds
-}
-
+// readStreamChunk returns a command that reads the next event from the stream.
 func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 
@@ -1113,6 +955,8 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 
 	reqID := m.approvalRequestID()
 	m.approvalClear()
+	m.approvalFullscreen = false
+	m.approvalDiffContent = ""
 	m.setState(api.TurnThinking)
 
 	m.mu.RLock()
@@ -1196,169 +1040,7 @@ func (m *Model) lastAssistantMessage() *msgcomp.Message {
 	return nil
 }
 
-func (m *Model) renderApprovalDialog(background string) string {
-	m.mu.RLock()
-	call, ok := m.approval.currentCall()
-	session := m.session
-	protectedPaths := append([]string(nil), m.protectedPaths...)
-	m.mu.RUnlock()
-	if !ok || session == nil {
-		return background
-	}
-	var b strings.Builder
-	b.WriteString("Tool call requires approval\n\n")
-	fmt.Fprintf(&b, "Tool: %s\n", call.Name)
-	diff, err := toolCallDiff(call, session.Path, protectedPaths)
-	switch {
-	case err == nil && diff != "":
-		fmt.Fprintf(&b, "\n%s\n", diff)
-	case err == nil:
-		fmt.Fprintf(&b, "Arguments: %s\n", call.Arguments)
-	case errors.Is(err, core.ErrDiffFileTooLarge):
-		fmt.Fprintf(&b, "Arguments: %s\n(diff preview disabled: file too large)\n", call.Arguments)
-	case errors.Is(err, core.ErrDiffPathBlocked):
-		fmt.Fprintf(&b, "Arguments: %s\n(diff preview blocked)\n", call.Arguments)
-	default:
-		fmt.Fprintf(&b, "Arguments: %s\n(diff preview unavailable)\n", call.Arguments)
-	}
-	fmt.Fprintf(&b, "\n[%s] yes  [%s] no  [%s] always  [%s] diff", m.config.Keybindings.ApproveYes, m.config.Keybindings.ApproveNo, m.config.Keybindings.ApproveAlways, m.config.Keybindings.ApproveDiff)
-
-	dialog := m.styles.ApprovalDialog.Render(b.String())
-	return overlayDialog(background, dialog, m.width, m.height)
-}
-
-// overlayDialog composites a dialog box over a background, centering it both
-// horizontally and vertically. The background is normalized to exactly width x
-// height cells before the dialog is painted on top, so the rendered output is
-// stable even on narrow terminals or when the dialog is larger than the
-// background. Wide runes (CJK/emoji) are handled via ansi.Cut.
-//
-// The overlay is implemented with lipgloss v2's Canvas and Layer compositor
-// instead of hand-rolled ANSI string splicing.
-func overlayDialog(background string, dialog string, width int, height int) string {
-	bgLines := strings.Split(background, "\n")
-
-	// Normalize the background to exactly height lines.
-	if len(bgLines) < height {
-		bgLines = append(bgLines, make([]string, height-len(bgLines))...)
-	}
-	bgLines = bgLines[:height]
-
-	// Normalize each line to exactly width cells.
-	for i, line := range bgLines {
-		lineWidth := ansi.StringWidth(line)
-		switch {
-		case lineWidth > width:
-			bgLines[i] = ansi.Cut(line, 0, width)
-		case lineWidth < width:
-			bgLines[i] = line + strings.Repeat(" ", width-lineWidth)
-		}
-	}
-
-	dialogHeight := lipgloss.Height(dialog)
-	dialogWidth := lipgloss.Width(dialog)
-
-	startY := (height - dialogHeight) / 2
-	if startY < 0 {
-		startY = 0
-	}
-	startX := (width - dialogWidth) / 2
-	if startX < 0 {
-		startX = 0
-	}
-
-	// Clamp the dialog line so the rendered output never exceeds the
-	// requested width, even on very narrow terminals.
-	maxDialogWidth := width - startX
-	dialogLines := strings.Split(dialog, "\n")
-	for i, dLine := range dialogLines {
-		if ansi.StringWidth(dLine) > maxDialogWidth {
-			dialogLines[i] = ansi.Cut(dLine, 0, maxDialogWidth)
-		}
-	}
-	dialog = strings.Join(dialogLines, "\n")
-
-	comp := lipgloss.NewCompositor(
-		lipgloss.NewLayer(strings.Join(bgLines, "\n")),
-		lipgloss.NewLayer(dialog).X(startX).Y(startY).Z(1),
-	)
-	rendered := lipgloss.NewCanvas(width, height).Compose(comp).Render()
-
-	// Canvas.Render trims trailing whitespace. Re-normalize each line to the
-	// requested width x height so callers get a stable, predictable rectangle.
-	return normalizeRect(rendered, width, height)
-}
-
-// normalizeRect pads or truncates a rendered string so that every line has
-// exactly width cells and the output contains exactly height lines.
-func normalizeRect(s string, width, height int) string {
-	lines := strings.Split(s, "\n")
-	if len(lines) < height {
-		lines = append(lines, make([]string, height-len(lines))...)
-	}
-	lines = lines[:height]
-	for i, line := range lines {
-		lineWidth := ansi.StringWidth(line)
-		switch {
-		case lineWidth > width:
-			lines[i] = ansi.Cut(line, 0, width)
-		case lineWidth < width:
-			lines[i] = line + strings.Repeat(" ", width-lineWidth)
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-// approvalStartRequest starts a new approval request under m.mu.
-func (m *Model) approvalStartRequest(calls []api.ToolCall, requestID int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.approval.startRequest(calls, requestID)
-}
-
-// approvalHandleResponse records one approval decision under m.mu.
-func (m *Model) approvalHandleResponse(resp ApprovalResponseMsg) (done bool, approvals map[string]api.ApprovalDecision, alwaysAll bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.approval.handleResponse(resp)
-}
-
-// approvalRequestID returns the active approval request ID under m.mu.
-func (m *Model) approvalRequestID() int64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.approval.requestID()
-}
-
-// approvalPending returns the current pending calls under m.mu.
-func (m *Model) approvalPending() []api.ToolCall {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.approval.pending()
-}
-
-// approvalClear resets the approval controller under m.mu.
-func (m *Model) approvalClear() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.approval.clear()
-}
-
-// approvalIsActive reports whether there is an active approval request under m.mu.
-func (m *Model) approvalIsActive() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.approval.isActive()
-}
-
-// approvalApproveCurrent produces a response for the current call under m.mu.
-func (m *Model) approvalApproveCurrent(decision api.ApprovalDecision) (ApprovalResponseMsg, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.approval.approveCurrent(decision)
-}
-
-func (m *Model) statusBar() string {
+func (m *Model) updateFooter() {
 	m.mu.RLock()
 	state := m.state
 	modelName := m.modelName
@@ -1366,85 +1048,105 @@ func (m *Model) statusBar() string {
 	contextMax := m.contextMax
 	toolCount := m.toolCount
 	approvalMode := m.approvalMode
+	statusText := m.statusText
+	cwd := ""
+	if m.session != nil {
+		cwd = m.session.Path
+	}
+	gitBranch := m.gitBranch
+	gitDirty := m.gitDirty
 	m.mu.RUnlock()
 
-	stateStr := state.ShortString()
-	width := m.contentWidth()
-
-	// Build fixed-width parts first so the status area can be truncated to fit
-	// on narrow terminals.
-	fixedParts := make([]string, 0, 4)
-	fixedParts = append(fixedParts, m.styles.StatusBar.Render(fmt.Sprintf(" %s ", modelName)))
-	if approvalMode == approvalModeYolo {
-		fixedParts = append(fixedParts, m.styles.StatusBar.Render(" YOLO "))
-	}
-	if m.config.UI.ShowTokenCount && contextMax > 0 {
-		pct := float64(contextUsed) / float64(contextMax) * 100
-		fixedParts = append(fixedParts, m.styles.StatusBar.Render(fmt.Sprintf("ctx: %.0f%%", pct)))
-	}
-	if toolCount > 0 {
-		fixedParts = append(fixedParts, m.styles.StatusBar.Render(fmt.Sprintf("tools: %d", toolCount)))
-	}
-
-	fixedWidth := 0
-	for _, p := range fixedParts {
-		fixedWidth += lipgloss.Width(p)
-	}
-
-	available := width - fixedWidth - 1
-	if available < 4 {
-		available = 4
-	}
-
-	var statusPart string
-	if m.statusText != "" {
-		text := m.statusText
-		if ansi.StringWidth(text) > available {
-			text = ansi.Cut(text, 0, available-1) + "…"
-		}
-		statusPart = m.styles.StatusBar.Render(fmt.Sprintf(" %s ", text))
-	} else {
-		statusPart = m.styles.StatusBar.Render(fmt.Sprintf("[%s]", stateStr))
-	}
-
-	parts := make([]string, 0, 5)
-	parts = append(parts, fixedParts[0]) // model name
-	parts = append(parts, statusPart)
-	parts = append(parts, fixedParts[1:]...)
-
-	bar := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
-	return m.styles.StatusBar.Width(width).Render(bar)
+	m.footer.SetSize(m.contentWidth())
+	m.footer.SetData(footer.Data{
+		ModelName:   modelName,
+		Mode:        approvalMode,
+		State:       state,
+		StatusText:  statusText,
+		CWD:         cwd,
+		ContextUsed: contextUsed,
+		ContextMax:  contextMax,
+		ToolCount:   toolCount,
+		GitBranch:   gitBranch,
+		GitDirty:    gitDirty,
+	})
 }
 
-func (m *Model) updateLayout() {
-	l := m.layout()
-	m.applyLayoutSizes(l)
-
-	// If the layout geometry has not changed, the transcript is still valid.
-	if l.eq(m.lastLayout) {
-		return
+func (m *Model) updateWelcomeData() {
+	// This method is called from layout() and View(), both of which run on the
+	// Bubble Tea main goroutine, so direct field access is safe without locking.
+	sessionID := ""
+	directory := ""
+	if m.session != nil {
+		sessionID = m.session.ID
+		directory = m.session.Path
 	}
 
+	m.welcome.SetData(welcome.Data{
+		Directory: directory,
+		SessionID: sessionID,
+		ModelName: m.modelName,
+		Version:   welcome.Version,
+	})
+}
+
+// updateActivity builds the activity panel data from the current turn state and
+// pending tool calls. It is safe to call from the Bubble Tea main goroutine.
+func (m *Model) updateActivity() {
+	m.mu.RLock()
+	state := m.state
+	statusText := m.statusText
+	toolProgress := maps.Clone(m.toolProgress)
+	m.mu.RUnlock()
+	m.activity.SetData(activity.Data{
+		State:       state,
+		StatusText:  statusText,
+		ToolCalls:   m.pendingToolCalls(),
+		ToolOutputs: toolProgress,
+	})
+}
+
+// appendToolProgress appends a chunk to the live output for the given call ID,
+// capping the stored output to maxToolProgressLen bytes.
+func (m *Model) appendToolProgress(callID, chunk string) {
 	m.mu.Lock()
-	for _, msg := range m.messages {
-		msg.SetWidth(l.vpWidth)
+	defer m.mu.Unlock()
+	m.toolProgress[callID] += chunk
+	if len(m.toolProgress[callID]) > maxToolProgressLen {
+		m.toolProgress[callID] = "…" + m.toolProgress[callID][len(m.toolProgress[callID])-maxToolProgressLen+1:]
 	}
-	m.mu.Unlock()
-	m.rebuildRenderedContent()
-	m.lastLayout = l
 }
 
-// applyLayoutSizes updates child component sizes without rebuilding the transcript.
-func (m *Model) applyLayoutSizes(l layoutRect) {
-	m.sidebar.SetSize(l.sbWidth, m.height-1)
-	m.vp.SetSize(l.contentWidth, l.vpHeight)
-	m.input.SetWidth(l.contentWidth)
-}
-
-func (m *Model) contentWidth() int {
-	return m.layout().contentWidth
+// pendingToolCalls returns the tool calls that should be shown in the activity
+// panel. During TurnToolCalls this is the most recent batch of tool-call
+// messages that have not yet received a result.
+func (m *Model) pendingToolCalls() []api.ToolCall {
+	if m.state != api.TurnToolCalls {
+		return nil
+	}
+	var calls []api.ToolCall
+	for _, msg := range m.messages {
+		if msg.Type == msgcomp.TypeToolCall && msg.ToolResult == nil {
+			calls = append(calls, msg.ToolCall)
+		}
+	}
+	return calls
 }
 
 func (m *Model) vpWidth() int {
-	return m.layout().vpWidth
+	contentWidth := m.width
+	if contentWidth < minContentWidth {
+		contentWidth = minContentWidth
+	}
+	return contentWidth - viewportWidthPadding
+}
+
+// shellQuote returns s unchanged if it contains no shell-special characters;
+// otherwise it returns the string wrapped in single quotes with embedded
+// single quotes escaped for POSIX shells.
+func shellQuote(s string) string {
+	if strings.ContainsAny(s, " \"'`)&|;<>{}[]*?#!$\\") {
+		return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+	}
+	return s
 }

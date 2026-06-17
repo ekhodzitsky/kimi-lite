@@ -9,8 +9,8 @@ A single-terminal AI assistant with no Node, Python runtime, or Electron depende
 
 ## Features
 
-- **Streaming TUI chat** — native Bubble Tea interface with multi-line input, history, and sidebar file browser.
-- **Built-in tools** — `read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, and `read_video` (ffmpeg/ffprobe) with sandboxed file access.
+- **Streaming TUI chat** — native Bubble Tea interface with multi-line input, history, `@`-mention file completion, and a two-line footer showing model, git, and context status.
+- **Built-in tools** — `read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `dispatch_subagent`, and `TodoList` with sandboxed file access.
 - **Subagents** — delegate focused work to `coder`, `explore`, and `plan` subagents via `dispatch_subagent`.
 - **Lifecycle hooks** — run local commands at `session_start`, `turn_start`, `turn_end`, `tool_call`, `tool_result`, `approval_request`, and `approval_decision`.
 - **ACP server** — `kimi-lite acp` speaks JSON-RPC 2.0 over stdio for external agent integration.
@@ -60,9 +60,15 @@ message = "shell commands always require approval"
 [behavior]
 # Load specific skills by name, or leave empty to load every .md file in ~/.config/kimi-lite/skills/.
 skills = ["go", "python"]
+
+[ui]
+# Built-in "dark" or "light", or a custom JSON theme file name from ~/.config/kimi-lite/themes/.
+theme = "dark"
 ```
 
 Drop skill files into `~/.config/kimi-lite/skills/` (e.g. `go.md`, `python.md`); their contents are appended to the system prompt.
+
+Custom themes are JSON files placed in `~/.config/kimi-lite/themes/`; set `ui.theme` to the file name (without `.json`) to use them. A theme defines colors such as `background`, `foreground`, `primary`, `success`, `error`, and `highlight`.
 
 ## Usage
 
@@ -105,7 +111,7 @@ make bench   # run benchmarks
 
 ## Status
 
-This is a Go reimplementation of the [original Python client](https://github.com/MoonshotAI/kimi-code), rewritten with dependency injection, context cancellation, and zero global state. The core feature set is implemented and the API is stabilizing; see [CHANGELOG.md](CHANGELOG.md) for recent additions.
+This is a Go reimplementation of the [original TypeScript client](https://github.com/MoonshotAI/kimi-code), rewritten with dependency injection, context cancellation, and zero global state. The core feature set is implemented and the API is stabilizing; see [CHANGELOG.md](CHANGELOG.md) for recent additions.
 
 ## License
 

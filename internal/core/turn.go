@@ -16,6 +16,11 @@ import (
 
 const maxStreamResponseSize = 10 * 1024 * 1024 // 10 MB
 
+// ErrSteered is returned by consumeStream when the user sends a mid-stream
+// steering instruction. It is not a failure; the turn restarts from the
+// current state with the new instruction appended.
+var ErrSteered = errors.New("turn steered")
+
 // approvalPayload carries approval decisions together with the requestID
 // they are intended for, preventing stale approvals from affecting the
 // wrong tool round.
@@ -48,6 +53,15 @@ type TurnManager struct {
 
 	cancelMu     sync.Mutex
 	activeCancel context.CancelFunc
+
+	planMu         sync.Mutex
+	planPending    bool
+	planInput      string
+	planSessionID  string
+	planApprovalCh chan bool
+	planResult     string
+
+	steerCh chan string
 }
 
 // NewTurnManager creates a new TurnManager. It returns an error if any required
@@ -66,13 +80,15 @@ func NewTurnManager(llm api.LLMClient, tools api.ToolExecutor, approval api.Appr
 		return nil, fmt.Errorf("store is required")
 	}
 	return &TurnManager{
-		llm:        llm,
-		tools:      tools,
-		approval:   approval,
-		store:      store,
-		cfg:        cfg,
-		metrics:    api.NoopMetricsCollector{},
-		approvalCh: make(chan approvalPayload, 1),
+		llm:            llm,
+		tools:          tools,
+		approval:       approval,
+		store:          store,
+		cfg:            cfg,
+		metrics:        api.NoopMetricsCollector{},
+		approvalCh:     make(chan approvalPayload, 1),
+		planApprovalCh: make(chan bool, 1),
+		steerCh:        make(chan string, 1),
 	}, nil
 }
 
@@ -171,6 +187,62 @@ func (tm *TurnManager) ResumeWithApproval(ctx context.Context, sessionID string,
 	}
 }
 
+// ResumeWithPlan resumes a plan-mode turn after the user approves or rejects
+// the generated plan.
+func (tm *TurnManager) ResumeWithPlan(ctx context.Context, sessionID string, approved bool) error {
+	tm.planMu.Lock()
+	defer tm.planMu.Unlock()
+	if !tm.planPending {
+		return fmt.Errorf("no plan pending")
+	}
+	if tm.planSessionID != sessionID {
+		return fmt.Errorf("sessionID mismatch: got %q, want %q", sessionID, tm.planSessionID)
+	}
+	select {
+	case tm.planApprovalCh <- approved:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return fmt.Errorf("plan approval channel busy")
+	}
+}
+
+// Steer sends a mid-stream follow-up instruction to the active turn.
+// The turn must be streaming or thinking and the sessionID must match.
+func (tm *TurnManager) Steer(ctx context.Context, sessionID string, input string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tm.mu.RLock()
+	turn := tm.turn
+	currentSessionID := tm.currentSessionID
+	tm.mu.RUnlock()
+	if turn == nil {
+		return fmt.Errorf("no active turn")
+	}
+	if currentSessionID != sessionID {
+		return fmt.Errorf("sessionID mismatch: got %q, want %q", sessionID, currentSessionID)
+	}
+	if strings.TrimSpace(input) == "" {
+		return fmt.Errorf("steer input is empty")
+	}
+	tm.mu.RLock()
+	state := turn.State
+	tm.mu.RUnlock()
+	if state != api.TurnStreaming && state != api.TurnThinking {
+		return fmt.Errorf("cannot steer in state %s", state.String())
+	}
+	select {
+	case tm.steerCh <- input:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return fmt.Errorf("steer channel busy")
+	}
+}
+
 // Wait blocks until all in-flight turns complete.
 func (tm *TurnManager) Wait() {
 	tm.wg.Wait()
@@ -198,6 +270,27 @@ func (tm *TurnManager) CancelAll() {
 // It returns a channel that streams turn events (content, done, error).
 // Returns an error if a turn is already in progress.
 func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return tm.runTurnInternal(ctx, sessionID, input, nil, false)
+}
+
+// RunTurnWithContentParts executes a normal turn with multimodal content parts.
+func (tm *TurnManager) RunTurnWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return tm.runTurnInternal(ctx, sessionID, input, parts, false)
+}
+
+// RunTurnWithPlan executes a turn in plan mode. The assistant first produces a
+// plan, then waits for approval before executing it.
+func (tm *TurnManager) RunTurnWithPlan(ctx context.Context, sessionID string, input string) (<-chan api.TurnEvent, error) {
+	return tm.runTurnInternal(ctx, sessionID, input, nil, true)
+}
+
+// RunTurnWithPlanWithContentParts executes a plan-mode turn with multimodal
+// content parts.
+func (tm *TurnManager) RunTurnWithPlanWithContentParts(ctx context.Context, sessionID string, input string, parts []api.ContentPart) (<-chan api.TurnEvent, error) {
+	return tm.runTurnInternal(ctx, sessionID, input, parts, true)
+}
+
+func (tm *TurnManager) runTurnInternal(ctx context.Context, sessionID string, input string, parts []api.ContentPart, planMode bool) (<-chan api.TurnEvent, error) {
 	if !tm.running.CompareAndSwap(false, true) {
 		return nil, fmt.Errorf("turn already in progress")
 	}
@@ -205,7 +298,7 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 	tm.cancelMu.Lock()
 	tm.activeCancel = runCancel
 	tm.cancelMu.Unlock()
-	outCh, err := tm.startTurn(runCtx, runCancel, sessionID, input)
+	outCh, err := tm.startTurn(runCtx, runCancel, sessionID, input, parts, planMode)
 	if err != nil {
 		tm.running.Store(false)
 		runCancel()
@@ -217,7 +310,7 @@ func (tm *TurnManager) RunTurn(ctx context.Context, sessionID string, input stri
 	return outCh, nil
 }
 
-func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFunc, sessionID string, input string) (<-chan api.TurnEvent, error) {
+func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFunc, sessionID string, input string, parts []api.ContentPart, planMode bool) (<-chan api.TurnEvent, error) {
 	if tm.cfg != nil && tm.cfg.Get() != nil {
 		maxTurns := tm.cfg.Get().Behavior.MaxTurns
 		if maxTurns > 0 {
@@ -243,6 +336,23 @@ func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFu
 	tm.pendingCalls = nil
 	tm.pendingMu.Unlock()
 
+	// Drain any stale plan approval from previous plan-mode turns.
+	select {
+	case <-tm.planApprovalCh:
+	default:
+	}
+	// Drain any stale steer input from previous turns.
+	select {
+	case <-tm.steerCh:
+	default:
+	}
+	tm.planMu.Lock()
+	tm.planPending = planMode
+	tm.planInput = input
+	tm.planSessionID = sessionID
+	tm.planResult = ""
+	tm.planMu.Unlock()
+
 	turn := &api.Turn{
 		ID:        idgen.GenerateID(),
 		State:     api.TurnStreaming,
@@ -261,10 +371,11 @@ func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFu
 	}
 
 	userMsg := api.Message{
-		ID:        idgen.GenerateID(),
-		Role:      api.RoleUser,
-		Content:   input,
-		CreatedAt: time.Now().UTC(),
+		ID:           idgen.GenerateID(),
+		Role:         api.RoleUser,
+		Content:      input,
+		ContentParts: parts,
+		CreatedAt:    time.Now().UTC(),
 	}
 	if err := tm.store.AppendMessage(ctx, sessionID, userMsg); err != nil {
 		return nil, fmt.Errorf("append user message: %w", err)
@@ -290,12 +401,12 @@ func (tm *TurnManager) startTurn(ctx context.Context, runCancel context.CancelFu
 	}
 
 	tm.wg.Add(1)
-	go tm.run(ctx, runCancel, sessionID, turn, tools, streamCh, eventCh, msgLimit)
+	go tm.run(ctx, runCancel, sessionID, turn, tools, streamCh, eventCh, msgLimit, planMode)
 
 	return eventCh, nil
 }
 
-func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, sessionID string, turn *api.Turn, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int) {
+func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, sessionID string, turn *api.Turn, tools []api.ToolDefinition, firstStream <-chan api.StreamChunk, eventCh chan api.TurnEvent, msgLimit int, planMode bool) {
 	defer tm.wg.Done()
 	defer close(eventCh)
 	defer tm.running.Store(false)
@@ -305,12 +416,116 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 		tm.activeCancel = nil
 		tm.cancelMu.Unlock()
 	}()
+	defer func() {
+		tm.planMu.Lock()
+		tm.planPending = false
+		tm.planMu.Unlock()
+	}()
 
-	content, toolCalls, err := tm.consumeStream(ctx, sessionID, turn, firstStream, eventCh)
-	if err != nil {
-		tm.persistPartialResponse(ctx, sessionID, turn, content)
-		tm.setError(ctx, sessionID, turn, err, eventCh)
-		return
+	planModeActive := planMode
+	var content string
+	var toolCalls []api.ToolCall
+	var steerInput string
+	var err error
+
+streamLoop:
+	for {
+		content, toolCalls, steerInput, err = tm.consumeStream(ctx, sessionID, turn, firstStream, eventCh, tm.steerCh)
+		if err != nil {
+			if errors.Is(err, ErrSteered) {
+				if planModeActive {
+					planModeActive = false
+					tm.planMu.Lock()
+					tm.planPending = false
+					tm.planMu.Unlock()
+				}
+				firstStream, err = tm.applySteer(ctx, sessionID, turn, content, steerInput, tools, eventCh, msgLimit)
+				if err != nil {
+					tm.setError(ctx, sessionID, turn, err, eventCh)
+					return
+				}
+				continue streamLoop
+			}
+			tm.persistPartialResponse(ctx, sessionID, turn, content)
+			tm.setError(ctx, sessionID, turn, err, eventCh)
+			return
+		}
+
+		if planModeActive && len(toolCalls) > 0 {
+			err := fmt.Errorf("plan mode produced tool calls")
+			tm.persistPartialResponse(ctx, sessionID, turn, content)
+			tm.setError(ctx, sessionID, turn, err, eventCh)
+			return
+		}
+
+		if planModeActive && len(toolCalls) == 0 {
+			planText := content
+			tm.mu.Lock()
+			turn.Response = planText
+			turn.State = api.TurnWaitingPlan
+			tm.mu.Unlock()
+			if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
+				slog.Error("failed to save turn", "error", err)
+			}
+
+			select {
+			case eventCh <- api.TurnEvent{Type: api.TurnEventPlanRequest, Content: planText}:
+			case <-ctx.Done():
+				tm.setError(ctx, sessionID, turn, ctx.Err(), eventCh)
+				return
+			}
+
+			var approved bool
+			select {
+			case approved = <-tm.planApprovalCh:
+			case <-ctx.Done():
+				tm.setError(ctx, sessionID, turn, ctx.Err(), eventCh)
+				return
+			}
+			if !approved {
+				tm.setError(ctx, sessionID, turn, fmt.Errorf("plan rejected by user"), eventCh)
+				return
+			}
+
+			tm.planMu.Lock()
+			tm.planPending = false
+			tm.planResult = planText
+			tm.planMu.Unlock()
+
+			if err := tm.store.AppendMessage(ctx, sessionID, api.Message{
+				ID:        idgen.GenerateID(),
+				Role:      api.RoleAssistant,
+				Content:   planText,
+				CreatedAt: time.Now().UTC(),
+			}); err != nil {
+				tm.setError(ctx, sessionID, turn, fmt.Errorf("append plan message: %w", err), eventCh)
+				return
+			}
+			if err := tm.store.AppendMessage(ctx, sessionID, api.Message{
+				ID:        idgen.GenerateID(),
+				Role:      api.RoleSystem,
+				Content:   "The user approved the plan. Proceed with execution.",
+				CreatedAt: time.Now().UTC(),
+			}); err != nil {
+				tm.setError(ctx, sessionID, turn, fmt.Errorf("append continuation prompt: %w", err), eventCh)
+				return
+			}
+
+			messages, err := tm.store.GetMessages(ctx, sessionID, msgLimit)
+			if err != nil {
+				tm.setError(ctx, sessionID, turn, fmt.Errorf("get messages: %w", err), eventCh)
+				return
+			}
+			firstStream, err = tm.llm.ChatStream(ctx, messages, tools)
+			if err != nil {
+				tm.setError(ctx, sessionID, turn, fmt.Errorf("chat stream: %w", err), eventCh)
+				return
+			}
+			planModeActive = false
+			continue streamLoop
+		}
+
+		break streamLoop
 	}
 
 	tm.mu.Lock()
@@ -318,6 +533,8 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 	turn.ToolCalls = toolCalls
 	if len(toolCalls) > 0 {
 		turn.State = api.TurnToolCalls
+	} else {
+		turn.State = api.TurnStreaming
 	}
 	tm.mu.Unlock()
 	if err := tm.store.SaveTurn(ctx, sessionID, *turn); err != nil {
@@ -524,11 +741,23 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 			return
 		}
 
-		content, toolCalls, err = tm.consumeStream(ctx, sessionID, turn, streamCh, eventCh)
-		if err != nil {
-			tm.persistPartialResponse(ctx, sessionID, turn, content)
-			tm.setError(ctx, sessionID, turn, err, eventCh)
-			return
+		for {
+			var steerInput string
+			content, toolCalls, steerInput, err = tm.consumeStream(ctx, sessionID, turn, streamCh, eventCh, tm.steerCh)
+			if err != nil {
+				if errors.Is(err, ErrSteered) {
+					streamCh, err = tm.applySteer(ctx, sessionID, turn, content, steerInput, tools, eventCh, msgLimit)
+					if err != nil {
+						tm.setError(ctx, sessionID, turn, err, eventCh)
+						return
+					}
+					continue
+				}
+				tm.persistPartialResponse(ctx, sessionID, turn, content)
+				tm.setError(ctx, sessionID, turn, err, eventCh)
+				return
+			}
+			break
 		}
 
 		tm.mu.Lock()
@@ -578,9 +807,9 @@ func (tm *TurnManager) run(ctx context.Context, runCancel context.CancelFunc, se
 
 // consumeStream reads chunks from a stream channel, forwards content as TurnEvents,
 // and returns the accumulated text plus any tool calls from the final chunk.
-// It is interruptible via ctx.Done() and drains any remaining streamCh items
-// before returning an error so the producer goroutine can exit cleanly.
-func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn, streamCh <-chan api.StreamChunk, eventCh chan api.TurnEvent) (string, []api.ToolCall, error) {
+// It is interruptible via ctx.Done() and the steer channel. When a steer input
+// arrives, it drains the remaining streamCh items and returns ErrSteered.
+func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn, streamCh <-chan api.StreamChunk, eventCh chan api.TurnEvent, steerCh <-chan string) (string, []api.ToolCall, string, error) {
 	var content strings.Builder
 	var toolCalls []api.ToolCall
 
@@ -598,7 +827,13 @@ func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn,
 			case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: ctx.Err()}:
 			case <-ctx.Done():
 			}
-			return content.String(), nil, ctx.Err()
+			return content.String(), nil, "", ctx.Err()
+		case steerInput, ok := <-steerCh:
+			if !ok {
+				continue
+			}
+			drain()
+			return content.String(), nil, steerInput, ErrSteered
 		case chunk, ok := <-streamCh:
 			if !ok {
 				if err := ctx.Err(); err != nil {
@@ -606,9 +841,9 @@ func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn,
 					case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: err}:
 					case <-ctx.Done():
 					}
-					return content.String(), nil, err
+					return content.String(), nil, "", err
 				}
-				return content.String(), toolCalls, nil
+				return content.String(), toolCalls, "", nil
 			}
 
 			if chunk.Error != nil {
@@ -617,7 +852,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn,
 				case <-ctx.Done():
 				}
 				drain()
-				return content.String(), nil, chunk.Error
+				return content.String(), nil, "", chunk.Error
 			}
 
 			if chunk.Content != "" {
@@ -628,7 +863,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn,
 					case <-ctx.Done():
 					}
 					drain()
-					return content.String(), nil, errors.New(msg)
+					return content.String(), nil, "", errors.New(msg)
 				}
 				content.WriteString(chunk.Content)
 				select {
@@ -639,7 +874,7 @@ func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn,
 					case <-ctx.Done():
 					}
 					drain()
-					return content.String(), nil, ctx.Err()
+					return content.String(), nil, "", ctx.Err()
 				}
 			}
 
@@ -651,12 +886,42 @@ func (tm *TurnManager) consumeStream(ctx context.Context, _ string, _ *api.Turn,
 					case eventCh <- api.TurnEvent{Type: api.TurnEventError, Error: err}:
 					case <-ctx.Done():
 					}
-					return content.String(), nil, err
+					return content.String(), nil, "", err
 				}
-				return content.String(), toolCalls, nil
+				return content.String(), toolCalls, "", nil
 			}
 		}
 	}
+}
+
+// applySteer persists the partial assistant response, appends the steering
+// instruction as a user message, fetches the updated context, emits a steering
+// event, and starts a new LLM stream. It returns the new stream or an error.
+func (tm *TurnManager) applySteer(ctx context.Context, sessionID string, turn *api.Turn, content string, steerInput string, tools []api.ToolDefinition, eventCh chan api.TurnEvent, msgLimit int) (<-chan api.StreamChunk, error) {
+	tm.persistPartialResponse(ctx, sessionID, turn, content)
+	userMsg := api.Message{
+		ID:        idgen.GenerateID(),
+		Role:      api.RoleUser,
+		Content:   steerInput,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := tm.store.AppendMessage(ctx, sessionID, userMsg); err != nil {
+		return nil, fmt.Errorf("append steer message: %w", err)
+	}
+	messages, err := tm.store.GetMessages(ctx, sessionID, msgLimit)
+	if err != nil {
+		return nil, fmt.Errorf("get messages: %w", err)
+	}
+	select {
+	case eventCh <- api.TurnEvent{Type: api.TurnEventSteered, Content: steerInput}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	streamCh, err := tm.llm.ChatStream(ctx, messages, tools)
+	if err != nil {
+		return nil, fmt.Errorf("chat stream: %w", err)
+	}
+	return streamCh, nil
 }
 
 // executeToolCalls runs each tool call after checking the approval gate.
@@ -727,8 +992,26 @@ func (tm *TurnManager) executeToolCalls(ctx context.Context, sessionID string, t
 // executeToolCall runs a single tool call and recovers from panics, converting
 // them into a ToolResult with an error message so one bad tool cannot crash the
 // whole turn. For non-trivial tools, it emits a transient status event in the
-// user's language before execution.
+// user's language before execution. When an event channel is provided, shell
+// output is streamed as TurnEventToolProgress events via a context callback.
 func (tm *TurnManager) executeToolCall(ctx context.Context, call api.ToolCall, eventCh chan api.TurnEvent) (result api.ToolResult, err error) {
+	progressCtx := ctx
+	if eventCh != nil {
+		cb := func(callID, chunk string) {
+			select {
+			case eventCh <- api.TurnEvent{Type: api.TurnEventToolProgress, CallID: callID, Content: chunk}:
+			case <-ctx.Done():
+			default:
+				// drop chunk if TUI cannot keep up
+			}
+		}
+		progressCtx = WithToolProgress(ctx, cb)
+	}
+	return tm.executeToolCallWithCtx(progressCtx, call, eventCh)
+}
+
+// executeToolCallWithCtx is the inner implementation of executeToolCall.
+func (tm *TurnManager) executeToolCallWithCtx(ctx context.Context, call api.ToolCall, eventCh chan api.TurnEvent) (result api.ToolResult, err error) {
 	if IsStatusWorthyTool(call.Name) && eventCh != nil {
 		tm.mu.RLock()
 		input := ""
@@ -767,6 +1050,9 @@ func (tm *TurnManager) setError(ctx context.Context, sessionID string, turn *api
 	tm.pendingMu.Lock()
 	tm.pendingCalls = nil
 	tm.pendingMu.Unlock()
+	tm.planMu.Lock()
+	tm.planPending = false
+	tm.planMu.Unlock()
 	if saveErr := tm.store.SaveTurn(ctx, sessionID, *turn); saveErr != nil {
 		slog.Error("failed to save turn", "error", saveErr)
 	}

@@ -51,6 +51,18 @@ var (
 	errOutputLimitReached = errors.New("output limit reached")
 )
 
+type toolProgressKey struct{}
+
+// WithToolProgress attaches a progress callback to the context.
+func WithToolProgress(ctx context.Context, cb api.ToolProgressCallback) context.Context {
+	return context.WithValue(ctx, toolProgressKey{}, cb)
+}
+
+func toolProgressFromContext(ctx context.Context) api.ToolProgressCallback {
+	cb, _ := ctx.Value(toolProgressKey{}).(api.ToolProgressCallback)
+	return cb
+}
+
 // limitedWriter wraps a bytes.Buffer and stops storing bytes after limit,
 // while still counting the total bytes written.
 type limitedWriter struct {
@@ -73,6 +85,23 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 		n = len(p)
 	}
 	w.buf.Write(p[:n])
+	return len(p), nil
+}
+
+// progressWriter forwards written bytes to a callback in chunks.
+type progressWriter struct {
+	cb func([]byte)
+}
+
+func newProgressWriter(cb func([]byte)) *progressWriter {
+	return &progressWriter{cb: cb}
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	if w.cb == nil || len(p) == 0 {
+		return len(p), nil
+	}
+	w.cb(p)
 	return len(p), nil
 }
 
@@ -826,7 +855,7 @@ func (e *BuiltInToolExecutor) Execute(ctx context.Context, call api.ToolCall) (a
 		if err != nil {
 			result.Error = err.Error()
 		} else {
-			result.Output, err = e.execShell(ctx, args)
+			result.Output, err = e.execShell(ctx, call.ID, args)
 			if err != nil {
 				result.Error = err.Error()
 			}
@@ -1871,15 +1900,16 @@ func shellCommandContext(ctx context.Context, command string) *exec.Cmd {
 // runCommandWithContext runs cmd and kills its whole process group when ctx is
 // cancelled or reaches its deadline. This ensures child processes spawned by a
 // shell (e.g. "sleep 5") are terminated along with the parent.
-func runCommandWithContext(ctx context.Context, cmd *exec.Cmd) (*limitedWriter, error) {
+func runCommandWithContext(ctx context.Context, cmd *exec.Cmd, onProgress func([]byte)) (*limitedWriter, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("context cancelled: %w", err)
 	}
 	setProcessGroup(cmd)
 
 	out := newLimitedWriter(maxShellOutputSize)
-	cmd.Stdout = out
-	cmd.Stderr = out
+	pw := newProgressWriter(onProgress)
+	cmd.Stdout = io.MultiWriter(out, pw)
+	cmd.Stderr = io.MultiWriter(out, pw)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start command: %w", err)
@@ -1910,7 +1940,7 @@ func runCommandWithContext(ctx context.Context, cmd *exec.Cmd) (*limitedWriter, 
 	return out, nil
 }
 
-func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (string, error) {
+func (e *BuiltInToolExecutor) execShell(ctx context.Context, callID string, args shellArgs) (string, error) {
 	if args.Command == "" {
 		return "", fmt.Errorf("command is required")
 	}
@@ -1951,7 +1981,12 @@ func (e *BuiltInToolExecutor) execShell(ctx context.Context, args shellArgs) (st
 	} else {
 		cmd.Env = append(curatedEnv(), "PWD="+e.sandboxRoot)
 	}
-	out, err := runCommandWithContext(ctx, cmd)
+	cb := toolProgressFromContext(ctx)
+	var onProgress func([]byte)
+	if cb != nil {
+		onProgress = func(p []byte) { cb(callID, string(p)) }
+	}
+	out, err := runCommandWithContext(ctx, cmd, onProgress)
 	outStr := out.buf.String()
 	if out.written > maxShellOutputSize {
 		outStr = strings.ToValidUTF8(outStr, "")

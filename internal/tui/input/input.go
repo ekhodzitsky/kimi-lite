@@ -3,6 +3,7 @@ package input
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/clipboard"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
@@ -22,7 +24,18 @@ const inputWidthPadding = 4
 
 // SendMsg is emitted when the user wants to send the current input.
 type SendMsg struct {
-	Content string
+	Content      string
+	ContentParts []api.ContentPart
+}
+
+// PasteMsg is emitted when a paste operation completed and produced attachments.
+type PasteMsg struct {
+	Parts []api.ContentPart
+}
+
+// PasteErrorMsg is emitted when a paste operation failed.
+type PasteErrorMsg struct {
+	Err error
 }
 
 // KeyMap defines keybindings for the input component.
@@ -30,6 +43,7 @@ type KeyMap struct {
 	Send           key.Binding
 	Newline        key.Binding
 	ExternalEditor key.Binding
+	Paste          key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings.
@@ -47,6 +61,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+g"),
 			key.WithHelp("ctrl+g", "external editor"),
 		),
+		Paste: key.NewBinding(
+			key.WithKeys("ctrl+v", "alt+v"),
+			key.WithHelp("ctrl+v/alt+v", "paste image or file"),
+		),
 	}
 }
 
@@ -62,7 +80,29 @@ func ConfigurableKeyMap(cfg api.KeybindingConfig) KeyMap {
 	if cfg.ExternalEditor != "" {
 		km.ExternalEditor = key.NewBinding(key.WithKeys(cfg.ExternalEditor), key.WithHelp(cfg.ExternalEditor, "external editor"))
 	}
+	if cfg.Paste != "" {
+		km.Paste = key.NewBinding(key.WithKeys(cfg.Paste), key.WithHelp(cfg.Paste, "paste image or file"))
+	}
 	return km
+}
+
+// SlashCommand describes a single slash command available for autocompletion.
+type SlashCommand struct {
+	Name        string
+	Description string
+}
+
+// DefaultSlashCommands is the built-in list of slash commands.
+var DefaultSlashCommands = []SlashCommand{
+	{Name: "/compact", Description: "Summarize older messages to free context"},
+	{Name: "/clear", Description: "Clear the current transcript"},
+	{Name: "/sessions", Description: "Switch to another session"},
+	{Name: "/checkpoint", Description: "Create a git checkpoint commit"},
+	{Name: "/diff", Description: "Show git diff for a path"},
+	{Name: "/mcp", Description: "List connected MCP tools"},
+	{Name: "/title", Description: "Rename the current session"},
+	{Name: "/fork", Description: "Fork the current session"},
+	{Name: "/help", Description: "Show keyboard shortcuts and commands"},
 }
 
 // mentionState tracks an active @-mention completion session.
@@ -72,6 +112,27 @@ type mentionState struct {
 	query      string   // lower-cased text after '@'
 	candidates []string // matching candidate paths
 	selected   int      // index of the selected candidate
+}
+
+// slashState tracks an active /-command completion session.
+type slashState struct {
+	start      int            // absolute byte position of '/' in the value
+	end        int            // absolute byte position after the current word
+	query      string         // lower-cased text after '/'
+	candidates []SlashCommand // matching slash commands
+	selected   int            // index of the selected candidate
+}
+
+// Attachment holds a pasted file attachment.
+type Attachment struct {
+	Path     string
+	MIMEType string
+}
+
+// CandidatesRefreshedMsg is emitted when the asynchronous candidate refresh
+// completes.
+type CandidatesRefreshedMsg struct {
+	Candidates []string
 }
 
 // Model is the input component model.
@@ -85,9 +146,15 @@ type Model struct {
 	width          int
 	maxHistory     int
 	editor         string // configured editor; env vars used as fallback
+	configDir      string // directory for temporary pasted files
 	fileCandidates []string
+	candidateFn    func() []string
 	mention        *mentionState
+	slashCmds      []SlashCommand
+	slash          *slashState
 	ctx            context.Context
+	planMode       bool
+	attachments    []Attachment
 	mu             sync.RWMutex
 }
 
@@ -167,6 +234,40 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			}
 		}
 
+		// /-command completion navigation.
+		if m.slash != nil {
+			switch msg.String() {
+			case "tab", "down":
+				m.slash.selected++
+				if m.slash.selected >= len(m.slash.candidates) {
+					m.slash.selected = 0
+				}
+				return nil
+			case "shift+tab", "up":
+				m.slash.selected--
+				if m.slash.selected < 0 {
+					m.slash.selected = len(m.slash.candidates) - 1
+				}
+				return nil
+			case "enter":
+				m.insertSlashCandidate()
+				return nil
+			case "esc", "ctrl+c":
+				m.slash = nil
+				return nil
+			}
+		}
+
+		// Shift+Tab toggles plan mode when no completion popup is active.
+		if msg.String() == "shift+tab" || (msg.Mod == tea.ModShift && msg.Code == tea.KeyTab) {
+			m.planMode = !m.planMode
+			return nil
+		}
+
+		if key.Matches(msg, km.Paste) {
+			return m.pasteCmd()
+		}
+
 		if key.Matches(msg, km.Send) {
 			content := strings.TrimSpace(m.textarea.Value())
 			if content != "" {
@@ -180,10 +281,13 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				}
 				m.histIdx = -1
 				m.draft = ""
+				parts := m.attachmentContentParts()
 				m.textarea.Reset()
 				m.mention = nil
+				m.slash = nil
+				m.attachments = nil
 				return func() tea.Msg {
-					return SendMsg{Content: content}
+					return SendMsg{Content: content, ContentParts: parts}
 				}
 			}
 			return nil
@@ -192,6 +296,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		if key.Matches(msg, km.Newline) {
 			m.textarea.InsertString("\n")
 			m.detectMention()
+			m.detectSlash()
 			return nil
 		}
 
@@ -209,6 +314,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			m.textarea.SetValue(m.history[m.histIdx])
 			m.textarea.CursorEnd()
 			m.mention = nil
+			m.slash = nil
 			return tea.Batch(cmds...)
 		}
 
@@ -225,6 +331,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 			}
 			m.textarea.CursorEnd()
 			m.mention = nil
+			m.slash = nil
 			return tea.Batch(cmds...)
 		}
 
@@ -235,13 +342,32 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
 		m.detectMention()
+		m.detectSlash()
 		return tea.Batch(cmds...)
+
+	case PasteMsg:
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, part := range msg.Parts {
+			m.addContentPart(part)
+		}
+		return tea.Batch(cmds...)
+
+	case PasteErrorMsg:
+		return func() tea.Msg {
+			return PasteErrorMsg{Err: fmt.Errorf("paste failed: %w", msg.Err)}
+		}
 
 	case editorFinishedMsg:
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.handleEditorFinished(msg)
 		m.detectMention()
+		m.detectSlash()
+		return tea.Batch(cmds...)
+
+	case CandidatesRefreshedMsg:
+		m.SetFileCandidates(msg.Candidates)
 		return tea.Batch(cmds...)
 	}
 
@@ -252,6 +378,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	m.textarea, cmd = m.textarea.Update(msg)
 	cmds = append(cmds, cmd)
 	m.detectMention()
+	m.detectSlash()
 	return tea.Batch(cmds...)
 }
 
@@ -270,22 +397,36 @@ func (m *Model) openExternalEditorCmd() tea.Cmd {
 func (m *Model) View() tea.View {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	view := m.styles.InputBox.Render(m.textarea.View())
-	if comp := m.completionView(); comp != "" {
-		view += "\n" + comp
+	var b strings.Builder
+	if m.planMode {
+		b.WriteString(m.styles.PlanModeIndicator.Render("[PLAN] Press Shift+Tab to disable plan mode") + "\n")
 	}
-	return tea.NewView(view)
+	b.WriteString(m.styles.InputBox.Render(m.textarea.View()))
+	if att := m.attachmentView(); att != "" {
+		b.WriteString("\n" + att)
+	}
+	if comp := m.completionView(); comp != "" {
+		b.WriteString("\n" + comp)
+	}
+	return tea.NewView(b.String())
 }
 
 // Height returns the rendered height of the input component.
 func (m *Model) Height() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	view := m.styles.InputBox.Render(m.textarea.View())
-	if comp := m.completionView(); comp != "" {
-		view += "\n" + comp
+	var b strings.Builder
+	if m.planMode {
+		b.WriteString(m.styles.PlanModeIndicator.Render("[PLAN] Press Shift+Tab to disable plan mode") + "\n")
 	}
-	return lipgloss.Height(view)
+	b.WriteString(m.styles.InputBox.Render(m.textarea.View()))
+	if att := m.attachmentView(); att != "" {
+		b.WriteString("\n" + att)
+	}
+	if comp := m.completionView(); comp != "" {
+		b.WriteString("\n" + comp)
+	}
+	return lipgloss.Height(b.String())
 }
 
 // SetWidth sets the component width.
@@ -315,8 +456,10 @@ func (m *Model) Reset() {
 	defer m.mu.Unlock()
 	m.textarea.Reset()
 	m.mention = nil
+	m.slash = nil
 	m.draft = ""
 	m.histIdx = -1
+	m.attachments = nil
 }
 
 // SetValue sets the input value.
@@ -332,6 +475,27 @@ func (m *Model) SetEditor(editor string) {
 	m.editor = editor
 }
 
+// SetCandidateFunc sets a function that returns fresh file candidates on demand.
+func (m *Model) SetCandidateFunc(fn func() []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.candidateFn = fn
+}
+
+// RefreshCandidatesCmd returns a command that loads file candidates from the
+// configured candidate function and emits a CandidatesRefreshedMsg.
+func (m *Model) RefreshCandidatesCmd() tea.Cmd {
+	m.mu.RLock()
+	fn := m.candidateFn
+	m.mu.RUnlock()
+	return func() tea.Msg {
+		if fn == nil {
+			return CandidatesRefreshedMsg{}
+		}
+		return CandidatesRefreshedMsg{Candidates: fn()}
+	}
+}
+
 // SetContext sets the context used to control the external editor subprocess.
 // When the context is cancelled, the running editor process is terminated.
 func (m *Model) SetContext(ctx context.Context) {
@@ -340,9 +504,22 @@ func (m *Model) SetContext(ctx context.Context) {
 	m.ctx = ctx
 }
 
+// SetConfigDir sets the directory used to store temporary pasted files.
+func (m *Model) SetConfigDir(dir string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.configDir = dir
+}
+
+// Attachments returns the current pasted file attachments.
+func (m *Model) Attachments() []Attachment {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]Attachment(nil), m.attachments...)
+}
+
 // SetFileCandidates sets the list of file paths available for @-mention
-// completion. The caller is responsible for keeping the list in sync with the
-// sidebar tree.
+// completion.
 func (m *Model) SetFileCandidates(paths []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -353,18 +530,48 @@ func (m *Model) SetFileCandidates(paths []string) {
 	}
 }
 
-// Completing reports whether an @-mention completion popup is currently open.
+// SetSlashCommands sets the list of commands shown for /-completion.
+func (m *Model) SetSlashCommands(cmds []SlashCommand) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.slashCmds = make([]SlashCommand, len(cmds))
+	copy(m.slashCmds, cmds)
+}
+
+// Completing reports whether a completion popup is currently open.
 func (m *Model) Completing() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.mention != nil
+	return m.mention != nil || m.slash != nil
 }
 
-// CloseCompletion dismisses any open @-mention completion popup.
+// CloseCompletion dismisses any open completion popup.
 func (m *Model) CloseCompletion() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.mention = nil
+	m.slash = nil
+}
+
+// TogglePlanMode toggles plan mode on/off.
+func (m *Model) TogglePlanMode() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.planMode = !m.planMode
+}
+
+// PlanMode reports whether plan mode is active.
+func (m *Model) PlanMode() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.planMode
+}
+
+// SetPlanMode sets plan mode explicitly.
+func (m *Model) SetPlanMode(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.planMode = v
 }
 
 // cursorPosition returns the absolute byte position of the cursor in the
@@ -511,9 +718,69 @@ func (m *Model) insertCandidate() {
 	m.mention = nil
 }
 
+// detectSlash updates the active slash state based on the current word at the
+// cursor.
+func (m *Model) detectSlash() {
+	word, start, end := m.wordAtCursor()
+	if !strings.HasPrefix(word, "/") {
+		m.slash = nil
+		return
+	}
+	query := strings.ToLower(word[1:])
+	candidates := m.filterSlashCandidates(query)
+	if len(candidates) == 0 {
+		m.slash = nil
+		return
+	}
+	m.slash = &slashState{
+		start:      start,
+		end:        end,
+		query:      query,
+		candidates: candidates,
+		selected:   0,
+	}
+}
+
+// filterSlashCandidates returns slash commands matching the lower-cased query.
+func (m *Model) filterSlashCandidates(query string) []SlashCommand {
+	query = strings.ToLower(query)
+	var matches []SlashCommand
+	for _, c := range m.slashCmds {
+		name := strings.ToLower(c.Name)
+		if strings.HasPrefix(name, query) || strings.Contains(name, query) {
+			matches = append(matches, c)
+		}
+	}
+	return matches
+}
+
+// insertSlashCandidate replaces the active slash word with the selected command
+// followed by a trailing space.
+func (m *Model) insertSlashCandidate() {
+	if m.slash == nil {
+		return
+	}
+	value := m.textarea.Value()
+	replacement := m.slash.candidates[m.slash.selected].Name + " "
+	newValue := value[:m.slash.start] + replacement
+	if m.slash.end <= len(value) {
+		newValue += value[m.slash.end:]
+	}
+	m.textarea.SetValue(newValue)
+	m.slash = nil
+}
+
 // completionView renders the completion popup or an empty string if none is
 // active.
 func (m *Model) completionView() string {
+	if comp := m.mentionCompletionView(); comp != "" {
+		return comp
+	}
+	return m.slashCompletionView()
+}
+
+// mentionCompletionView renders the @-mention completion popup.
+func (m *Model) mentionCompletionView() string {
 	if m.mention == nil || len(m.mention.candidates) == 0 || m.styles == nil {
 		return ""
 	}
@@ -536,6 +803,33 @@ func (m *Model) completionView() string {
 	return m.styles.MentionPopup.Render(content)
 }
 
+// slashCompletionView renders the /-command completion popup.
+func (m *Model) slashCompletionView() string {
+	if m.slash == nil || len(m.slash.candidates) == 0 || m.styles == nil {
+		return ""
+	}
+	var b strings.Builder
+	const maxItems = 8
+	for i, c := range m.slash.candidates {
+		if i >= maxItems {
+			break
+		}
+		prefix := "  "
+		if i == m.slash.selected {
+			prefix = "> "
+		}
+		line1 := prefix + c.Name
+		line2 := "    " + c.Description
+		b.WriteString(m.styles.SlashCommandName.Render(line1) + "\n")
+		b.WriteString(m.styles.SlashCommandDesc.Render(line2) + "\n")
+	}
+	content := strings.TrimSuffix(b.String(), "\n")
+	if content == "" {
+		return ""
+	}
+	return m.styles.SlashPopup.Render(content)
+}
+
 func (m *Model) updateStyles() {
 	if m.styles == nil {
 		return
@@ -549,4 +843,140 @@ func (m *Model) updateStyles() {
 		Background(m.styles.Theme.InputBg).
 		Foreground(m.styles.Theme.Muted)
 	m.textarea.SetStyles(s)
+}
+
+// clipboardReaderFn is a test seam for clipboard access.
+var (
+	readImageFn      = clipboard.ReadImage
+	readFilePathsFn  = clipboard.ReadFilePaths
+	copyFileToTempFn = clipboard.CopyFileToTemp
+	saveDataFn       = clipboard.SaveData
+)
+
+// pasteCmd reads the clipboard asynchronously and returns a PasteMsg with any
+// image or file attachments. It runs outside the model lock because clipboard
+// I/O may block.
+func (m *Model) pasteCmd() tea.Cmd {
+	m.mu.RLock()
+	ctx := m.ctx
+	configDir := m.configDir
+	m.mu.RUnlock()
+	if configDir == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		parts, err := readClipboardAttachments(ctx, configDir)
+		if err != nil {
+			return PasteErrorMsg{Err: err}
+		}
+		return PasteMsg{Parts: parts}
+	}
+}
+
+// readClipboardAttachments attempts to read an image or file list from the
+// clipboard and returns them as content parts. File-path attachments are copied
+// into configDir/tmp so they stay within the LLM attachment sandbox.
+func readClipboardAttachments(ctx context.Context, configDir string) ([]api.ContentPart, error) {
+	data, mime, err := readImageFn(ctx)
+	if err == nil && len(data) > 0 {
+		path, saveErr := saveDataFn(data, clipboard.ExtensionForMIME(mime), configDir)
+		if saveErr == nil {
+			return []api.ContentPart{{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: path}}}, nil
+		}
+		return nil, saveErr
+	}
+
+	paths, err := readFilePathsFn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	parts := make([]api.ContentPart, 0, len(paths))
+	for _, path := range paths {
+		mime := clipboard.MIMEForPath(path)
+		tmpPath, copyErr := copyFileToTempFn(path, configDir)
+		if copyErr != nil {
+			return nil, copyErr
+		}
+		if strings.HasPrefix(mime, "image/") {
+			parts = append(parts, api.ContentPart{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: tmpPath}})
+		} else {
+			parts = append(parts, api.ContentPart{Type: api.ContentPartText, Text: "[Attached file: " + tmpPath + "]"})
+		}
+	}
+	return parts, nil
+}
+
+// addContentPart stores a pasted content part as a file attachment if it
+// references a local path. For text markers that encode an attached file path,
+// the path is extracted and stored so the marker is re-emitted on send.
+func (m *Model) addContentPart(part api.ContentPart) {
+	switch part.Type {
+	case api.ContentPartImageURL:
+		if part.ImageURL != nil && part.ImageURL.URL != "" {
+			mime := clipboard.MIMEForPath(part.ImageURL.URL)
+			m.attachments = append(m.attachments, Attachment{Path: part.ImageURL.URL, MIMEType: mime})
+		}
+	case api.ContentPartText:
+		if part.Text == "" {
+			return
+		}
+		if path, ok := parseAttachedFileMarker(part.Text); ok {
+			mime := clipboard.MIMEForPath(path)
+			m.attachments = append(m.attachments, Attachment{Path: path, MIMEType: mime})
+		} else {
+			m.attachments = append(m.attachments, Attachment{Path: "", MIMEType: "text/plain"})
+		}
+	}
+}
+
+// parseAttachedFileMarker extracts the file path from a marker like
+// "[Attached file: /path/to/file]".
+func parseAttachedFileMarker(text string) (string, bool) {
+	const prefix = "[Attached file: "
+	const suffix = "]"
+	if !strings.HasPrefix(text, prefix) || !strings.HasSuffix(text, suffix) {
+		return "", false
+	}
+	path := strings.TrimSuffix(strings.TrimPrefix(text, prefix), suffix)
+	return path, path != ""
+}
+
+// attachmentContentParts converts stored attachments to content parts.
+func (m *Model) attachmentContentParts() []api.ContentPart {
+	if len(m.attachments) == 0 {
+		return nil
+	}
+	parts := make([]api.ContentPart, 0, len(m.attachments))
+	for _, att := range m.attachments {
+		if strings.HasPrefix(att.MIMEType, "image/") {
+			parts = append(parts, api.ContentPart{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: att.Path}})
+		} else if att.Path != "" {
+			parts = append(parts, api.ContentPart{Type: api.ContentPartText, Text: "[Attached file: " + att.Path + "]"})
+		}
+	}
+	return parts
+}
+
+// attachmentView renders a one-line indicator for pasted attachments.
+func (m *Model) attachmentView() string {
+	if len(m.attachments) == 0 || m.styles == nil {
+		return ""
+	}
+	var b strings.Builder
+	for i, att := range m.attachments {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		name := att.Path
+		if name == "" {
+			name = "attachment"
+		} else {
+			name = filepath.Base(name)
+		}
+		b.WriteString("📎 " + name)
+	}
+	return lipgloss.NewStyle().Foreground(m.styles.Theme.Muted).Render(b.String())
 }

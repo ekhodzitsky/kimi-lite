@@ -69,7 +69,6 @@ func NewLoader() *Loader {
 	v.SetDefault("keybindings.cancel", defaults.Keybindings.Cancel)
 	v.SetDefault("keybindings.quit", defaults.Keybindings.Quit)
 	v.SetDefault("keybindings.yolo", defaults.Keybindings.Yolo)
-	v.SetDefault("keybindings.toggle_sidebar", defaults.Keybindings.ToggleSidebar)
 	v.SetDefault("keybindings.focus_next", defaults.Keybindings.FocusNext)
 	v.SetDefault("keybindings.focus_prev", defaults.Keybindings.FocusPrev)
 	v.SetDefault("keybindings.approve_yes", defaults.Keybindings.ApproveYes)
@@ -77,6 +76,8 @@ func NewLoader() *Loader {
 	v.SetDefault("keybindings.approve_always", defaults.Keybindings.ApproveAlways)
 	v.SetDefault("keybindings.approve_diff", defaults.Keybindings.ApproveDiff)
 	v.SetDefault("keybindings.external_editor", defaults.Keybindings.ExternalEditor)
+	v.SetDefault("keybindings.steer", defaults.Keybindings.Steer)
+	v.SetDefault("keybindings.paste", defaults.Keybindings.Paste)
 	v.SetDefault("permission.rules", []api.PermissionRule{})
 	v.SetDefault("permission.risk_threshold", defaults.Permission.RiskThreshold)
 	v.SetDefault("permission.risk_rules", []api.RiskRule{})
@@ -428,7 +429,6 @@ newline = "alt+enter"
 cancel = "esc"
 quit = "ctrl+c"
 yolo = "ctrl+y"
-toggle_sidebar = "ctrl+b"
 focus_next = "tab"
 focus_prev = "shift+tab"
 approve_yes = "y"
@@ -436,6 +436,8 @@ approve_no = "n"
 approve_always = "a"
 approve_diff = "d"
 external_editor = "ctrl+g"
+steer = "ctrl+s"
+paste = "ctrl+v"
 `
 	tmp, err := os.CreateTemp(dir, "config.toml.tmp-*")
 	if err != nil {

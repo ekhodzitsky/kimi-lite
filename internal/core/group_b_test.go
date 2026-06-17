@@ -270,7 +270,7 @@ func TestTurnManager_ConsumeStream_MaxSizeExceeded(t *testing.T) {
 	close(streamCh)
 
 	eventCh := make(chan api.TurnEvent, 4)
-	content, _, err := tm.consumeStream(ctx, "sess", &api.Turn{}, streamCh, eventCh)
+	content, _, _, err := tm.consumeStream(ctx, "sess", &api.Turn{}, streamCh, eventCh, nil)
 	if err == nil {
 		t.Fatal("expected error for max size exceeded")
 	}
@@ -297,7 +297,7 @@ func TestTurnManager_ConsumeStream_ContextCancelledAfterClose(t *testing.T) {
 	cancel()
 
 	eventCh := make(chan api.TurnEvent, 4)
-	_, _, err := tm.consumeStream(ctx, "sess", &api.Turn{}, streamCh, eventCh)
+	_, _, _, err := tm.consumeStream(ctx, "sess", &api.Turn{}, streamCh, eventCh, nil)
 	if err != context.Canceled {
 		t.Errorf("error = %v, want context.Canceled", err)
 	}
@@ -373,7 +373,7 @@ func TestTurnManager_StartTurn_CountTurnsError(t *testing.T) {
 	cfg := &mockConfigProvider{cfg: &api.Config{Behavior: api.BehaviorConfig{MaxTurns: 10}}}
 	tm := newTestTurnManager(t, nil, nil, nil, store, cfg)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for CountTurns failure")
 	}
@@ -398,7 +398,7 @@ func TestTurnManager_StartTurn_SaveTurnError(t *testing.T) {
 
 	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for SaveTurn failure")
 	}
@@ -415,7 +415,7 @@ func TestTurnManager_StartTurn_AppendMessageError(t *testing.T) {
 
 	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for AppendMessage failure")
 	}
@@ -432,7 +432,7 @@ func TestTurnManager_StartTurn_GetMessagesError(t *testing.T) {
 
 	tm := newTestTurnManager(t, nil, nil, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for GetMessages failure")
 	}
@@ -462,7 +462,7 @@ func TestTurnManager_StartTurn_ChatStreamError(t *testing.T) {
 	}
 	tm := newTestTurnManager(t, llm, &mockToolExecutor{}, nil, store, nil)
 
-	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi")
+	_, err := tm.startTurn(ctx, func() {}, sess.ID, "hi", nil, false)
 	if err == nil {
 		t.Fatal("expected error for ChatStream failure")
 	}
@@ -1891,7 +1891,7 @@ func TestTurnManager_ConsumeStream_ErrorChunk(t *testing.T) {
 	close(streamCh)
 
 	eventCh := make(chan api.TurnEvent, 4)
-	_, _, err := tm.consumeStream(ctx, "", &api.Turn{}, streamCh, eventCh)
+	_, _, _, err := tm.consumeStream(ctx, "", &api.Turn{}, streamCh, eventCh, nil)
 	if err == nil || !strings.Contains(err.Error(), "chunk error") {
 		t.Fatalf("expected chunk error, got %v", err)
 	}
@@ -1911,7 +1911,7 @@ func TestTurnManager_ConsumeStream_MaxSizeCtxCanceled(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tm.consumeStream(ctx, "", &api.Turn{}, streamCh, eventCh)
+		tm.consumeStream(ctx, "", &api.Turn{}, streamCh, eventCh, nil)
 	}()
 
 	time.Sleep(20 * time.Millisecond)
@@ -1938,7 +1938,7 @@ func TestTurnManager_ConsumeStream_ContentCtxCanceled(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tm.consumeStream(ctx, "", &api.Turn{}, streamCh, eventCh)
+		tm.consumeStream(ctx, "", &api.Turn{}, streamCh, eventCh, nil)
 	}()
 
 	time.Sleep(20 * time.Millisecond)

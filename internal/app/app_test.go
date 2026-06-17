@@ -2386,6 +2386,8 @@ func (f *fakeGitProvider) IsRepo(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
+func (f *fakeGitProvider) Branch(ctx context.Context) (string, error) { return "main", nil }
+
 func TestApp_Run_GitStatusError(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
