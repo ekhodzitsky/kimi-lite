@@ -1,0 +1,12 @@
+# Graphify ignore patterns — keep code-only extraction API-key-free.
+docs/
+.specs/
+.github/
+bin/
+dist/
+coverage.out
+cov.out
+*.md
+*.log
+.git/
+.venv*/
