@@ -1,4 +1,4 @@
-.PHONY: all build test coverage lint lint-fix install clean cross-compile deps fmt fmt-check vet generate vuln tidy-check bench
+.PHONY: all build test coverage lint lint-fix install clean cross-compile deps fmt fmt-check vet generate vuln tidy-check bench graphify-install graphify-build graphify-watch graphify-serve graphify-query graphify-explain graphify-path
 
 BINARY_NAME := kimi-lite
 BIN_DIR := bin
@@ -85,3 +85,42 @@ bench-regression:
 fuzz:
 	go test -run=^$$ -fuzz=FuzzHeuristicTokenEstimator -fuzztime=5s ./internal/core
 	go test -run=^$$ -fuzz=FuzzRiskEvaluator -fuzztime=5s ./internal/core
+
+# Graphify dev tooling
+GRAPHIFY_VENV ?= .venv-graphify
+GRAPHIFY_OUT  ?= graphify-out
+GRAPHIFY_BIN  ?= $(GRAPHIFY_VENV)/bin/graphify
+
+.PHONY: graphify-install
+graphify-install: ## install graphify into a local venv
+	@if ! command -v python3 >/dev/null 2>&1; then \
+		echo "python3 is required for graphify-install"; \
+		exit 1; \
+	fi
+	python3 -m venv $(GRAPHIFY_VENV)
+	$(GRAPHIFY_VENV)/bin/pip install --upgrade pip
+	$(GRAPHIFY_VENV)/bin/pip install "graphifyy[mcp]"
+
+.PHONY: graphify-build
+graphify-build: ## build knowledge graph for this repo
+	$(GRAPHIFY_BIN) . --no-viz
+
+.PHONY: graphify-watch
+graphify-watch: ## watch files and rebuild graph incrementally
+	$(GRAPHIFY_BIN) . --watch
+
+.PHONY: graphify-serve
+graphify-serve: ## serve graph.json as an MCP stdio server
+	$(GRAPHIFY_VENV)/bin/python -m graphify.serve $(GRAPHIFY_OUT)/graph.json
+
+.PHONY: graphify-query
+graphify-query: ## usage: make graphify-query QUESTION="..."
+	$(GRAPHIFY_BIN) query "$(QUESTION)"
+
+.PHONY: graphify-explain
+graphify-explain: ## usage: make graphify-explain ENTITY="..."
+	$(GRAPHIFY_BIN) explain "$(ENTITY)"
+
+.PHONY: graphify-path
+graphify-path: ## usage: make graphify-path FROM="..." TO="..."
+	$(GRAPHIFY_BIN) path "$(FROM)" "$(TO)"
