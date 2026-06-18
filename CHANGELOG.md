@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Registered `kimi-k2.7-code` and `kimi-for-coding` in the LLM model registry
   with a 256K context window.
+- Dev-time Graphify integration: Makefile targets, `docs/dev/graphify.md`,
+  `AGENTS.md` guidance, `.graphifyignore`, and a CI workflow that builds the
+  repo knowledge graph as an artifact.
 
 ### Changed
 
