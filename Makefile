@@ -87,40 +87,50 @@ fuzz:
 	go test -run=^$$ -fuzz=FuzzRiskEvaluator -fuzztime=5s ./internal/core
 
 # Graphify dev tooling
+PYTHON        ?= python3
 GRAPHIFY_VENV ?= .venv-graphify
 GRAPHIFY_OUT  ?= graphify-out
 GRAPHIFY_BIN  ?= $(GRAPHIFY_VENV)/bin/graphify
 
-.PHONY: graphify-install
 graphify-install: ## install graphify into a local venv
-	@if ! command -v python3 >/dev/null 2>&1; then \
-		echo "python3 is required for graphify-install"; \
+	@if ! command -v $(PYTHON) >/dev/null 2>&1; then \
+		echo "$(PYTHON) is required for graphify-install"; \
 		exit 1; \
 	fi
-	python3 -m venv $(GRAPHIFY_VENV)
+	$(PYTHON) -m venv $(GRAPHIFY_VENV)
 	$(GRAPHIFY_VENV)/bin/pip install --upgrade pip
 	$(GRAPHIFY_VENV)/bin/pip install "graphifyy[mcp]"
 
-.PHONY: graphify-build
 graphify-build: ## build knowledge graph for this repo
+	@if [ ! -x $(GRAPHIFY_BIN) ]; then \
+		echo "graphify not found; run 'make graphify-install' first"; \
+		exit 1; \
+	fi
 	$(GRAPHIFY_BIN) . --no-viz
 
-.PHONY: graphify-watch
 graphify-watch: ## watch files and rebuild graph incrementally
 	$(GRAPHIFY_BIN) . --watch
 
-.PHONY: graphify-serve
 graphify-serve: ## serve graph.json as an MCP stdio server
 	$(GRAPHIFY_VENV)/bin/python -m graphify.serve $(GRAPHIFY_OUT)/graph.json
 
-.PHONY: graphify-query
 graphify-query: ## usage: make graphify-query QUESTION="..."
+	@if [ -z "$(QUESTION)" ]; then \
+		echo "QUESTION is required; usage: make graphify-query QUESTION=\"...\""; \
+		exit 1; \
+	fi
 	$(GRAPHIFY_BIN) query "$(QUESTION)"
 
-.PHONY: graphify-explain
 graphify-explain: ## usage: make graphify-explain ENTITY="..."
+	@if [ -z "$(ENTITY)" ]; then \
+		echo "ENTITY is required; usage: make graphify-explain ENTITY=\"...\""; \
+		exit 1; \
+	fi
 	$(GRAPHIFY_BIN) explain "$(ENTITY)"
 
-.PHONY: graphify-path
 graphify-path: ## usage: make graphify-path FROM="..." TO="..."
+	@if [ -z "$(FROM)" ] || [ -z "$(TO)" ]; then \
+		echo "FROM and TO are required; usage: make graphify-path FROM=\"...\" TO=\"...\""; \
+		exit 1; \
+	fi
 	$(GRAPHIFY_BIN) path "$(FROM)" "$(TO)"
