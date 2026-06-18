@@ -81,6 +81,25 @@ Public API contract rules live in `pkg/api/AGENTS.md`.
 | Tidy check | `make tidy-check` | Ensures `go.mod`/`go.sum` are clean. |
 | Benchmarks | `make bench` | All benchmarks with memory. |
 | Fuzz | `make fuzz` | Core fuzz targets. |
+| Build knowledge graph | `make graphify-build` | Requires `make graphify-install` first. |
+| Query graph | `make graphify-query QUESTION="..."` | Natural-language question against the repo graph. |
+| Explain node | `make graphify-explain ENTITY="..."` | Plain-language explanation of a graph node. |
+| Find path | `make graphify-path FROM="..." TO="..."` | Shortest path between two nodes. |
+| Watch graph | `make graphify-watch` | Auto-rebuild on file changes. |
+| Serve graph via MCP | `make graphify-serve` | MCP stdio server for kimi-lite or other clients. |
+
+### Graphify (optional)
+
+When working on cross-cutting or architectural changes, prefer querying the
+knowledge graph before grepping the whole repo:
+
+1. Build the graph: `make graphify-build` (one-time per significant change).
+2. Ask questions: `make graphify-query QUESTION="how does X relate to Y?"`.
+3. Trace dependencies: `make graphify-path FROM="X" TO="Y"`.
+4. Explain a component: `make graphify-explain ENTITY="X"`.
+
+If Graphify is not installed, fall back to the built-in `grep`, `read_file`,
+and `list_directory` tools as usual.
 
 ## Process Rules
 
@@ -216,3 +235,4 @@ See `docs/adr/005-human-branch-and-commit-conventions.md`.
 - `internal/mcp/AGENTS.md` — MCP integration details.
 - `pkg/api/AGENTS.md` — public API contract rules.
 - `docs/adr/005-human-branch-and-commit-conventions.md` — branch/commit rules.
+- `docs/dev/graphify.md` — Graphify setup, query commands, and MCP server config.
