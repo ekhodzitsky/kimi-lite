@@ -43,3 +43,6 @@ docs/superpowers/
 .specs/
 .omc/
 .venv*/
+
+# Graphify generated graph
+graphify-out/
