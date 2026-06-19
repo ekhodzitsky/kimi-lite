@@ -239,11 +239,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
-	// External editor performs file I/O and subprocess lookup; handle it outside
-	// the critical section so the lock is not held during I/O.
+	// External editor and paste perform file I/O and subprocess lookup; handle
+	// them outside the critical section so the lock is not held during I/O.
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		if key.Matches(keyMsg, m.keyMap.ExternalEditor) {
 			return m.openExternalEditorCmd()
+		}
+		if key.Matches(keyMsg, m.keyMap.Paste) {
+			return m.pasteCmd()
 		}
 	}
 
@@ -337,10 +340,6 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				m.slash = nil
 				return nil
 			}
-		}
-
-		if key.Matches(msg, km.Paste) {
-			return m.pasteCmd()
 		}
 
 		if key.Matches(msg, km.Send) {

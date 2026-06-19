@@ -899,3 +899,34 @@ func TestViewportFocusDoesNotSendKeysToInput(t *testing.T) {
 		t.Errorf("input value changed to %q while viewport is focused", model.input.Value())
 	}
 }
+
+func TestTabNavigatesCompletionWhenPopupOpen(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.input.SetFileCandidates([]string{"a.go", "b.go", "c.go"})
+
+	// Type "@" to open the mention completion popup.
+	updated, _ := m.Update(tea.KeyPressMsg{Code: '@', Text: "@"})
+	m = updated.(*Model)
+	if !m.input.Completing() {
+		t.Fatal("expected completion popup to be open after typing @")
+	}
+
+	// Tab should navigate the popup, not cycle focus.
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	model := updated.(*Model)
+
+	if !model.input.Completing() {
+		t.Error("Tab should navigate completion, not change focus")
+	}
+	if model.focused != focusInput {
+		t.Errorf("focus should remain on input, got %d", model.focused)
+	}
+}

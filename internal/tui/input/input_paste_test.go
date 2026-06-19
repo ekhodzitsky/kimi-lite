@@ -193,6 +193,37 @@ func TestReadClipboardAttachmentsCopiesFileToTemp(t *testing.T) {
 	}
 }
 
+func TestPasteKeyDoesNotDeadlock(t *testing.T) {
+	// Not parallel because this test mutates package-level clipboard test seams
+	// that other parallel tests also mutate.
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 100)
+	m.SetWidth(80)
+	m.SetConfigDir(t.TempDir())
+
+	origReadImage := readImageFn
+	origReadFilePaths := readFilePathsFn
+	defer func() {
+		readImageFn = origReadImage
+		readFilePathsFn = origReadFilePaths
+	}()
+	readImageFn = func(context.Context) ([]byte, string, error) {
+		return nil, "", os.ErrNotExist
+	}
+	readFilePathsFn = func(context.Context) ([]string, error) {
+		return nil, nil
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("expected paste command")
+	}
+	inp := updated.(*Model)
+	if len(inp.Attachments()) != 0 {
+		t.Error("empty clipboard should not create attachments")
+	}
+}
+
 func TestPasteMsgPlainTextInsertsIntoValue(t *testing.T) {
 	t.Parallel()
 

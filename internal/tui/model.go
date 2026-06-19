@@ -630,7 +630,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		keyStr := keyMsg.String()
 		isTab := keyStr == m.config.Keybindings.FocusNext || keyStr == m.config.Keybindings.FocusPrev
-		if !isTab {
+		// Tab/Shift+Tab are normally focus-cycle keys, but when a completion popup
+		// is open they must reach the input for completion navigation.
+		if !isTab || m.input.Completing() {
 			switch m.focused {
 			case focusInput:
 				cmds = append(cmds, m.input.UpdateMsg(msg))
