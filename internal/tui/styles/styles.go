@@ -146,9 +146,7 @@ type Styles struct {
 	ActivityTool        lipgloss.Style
 	ActivityOutput      lipgloss.Style
 
-	Highlight          lipgloss.Style
 	Attachment         lipgloss.Style
-	SelectedItem       lipgloss.Style
 	CompletionSelected lipgloss.Style
 	InputBoxFocused    lipgloss.Style
 
@@ -180,16 +178,6 @@ func NewFromTheme(t *Theme) *Styles {
 	s := &Styles{Theme: *t}
 	s.init()
 	return s
-}
-
-// setThemeDefaults fills in optional theme fields for backward compatibility.
-func setThemeDefaults(t *Theme) {
-	if t.UserMessageFg == "" {
-		t.UserMessageFg = t.Primary
-	}
-	if t.UserMessageBorder == "" {
-		t.UserMessageBorder = t.Border
-	}
 }
 
 func (s *Styles) init() {
@@ -351,15 +339,9 @@ func (s *Styles) init() {
 		Foreground(t.Muted).
 		MarginLeft(2)
 
-	s.Highlight = lipgloss.NewStyle().
-		Foreground(t.Highlight).
-		Bold(true)
 	s.Attachment = lipgloss.NewStyle().
 		Foreground(t.Primary).
 		Background(t.Background)
-	s.SelectedItem = lipgloss.NewStyle().
-		Background(t.Highlight).
-		Foreground(t.Background)
 	s.CompletionSelected = lipgloss.NewStyle().
 		Background(t.Highlight).
 		Foreground(t.Background)

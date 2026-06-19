@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 )
 
@@ -55,8 +56,8 @@ func LoadTheme(name, configDir string) (*Theme, error) {
 		return nil, fmt.Errorf("parse theme %q: %w", path, err)
 	}
 
-	// Backward-compatible defaults for optional fields introduced after the
-	// initial theme format.
+	// Backward-compatible defaults: any missing color fields are filled from the
+	// built-in dark theme so existing partial custom themes keep loading.
 	setThemeDefaults(&t)
 
 	if err := validateTheme(&t); err != nil {
@@ -70,12 +71,34 @@ func LoadTheme(name, configDir string) (*Theme, error) {
 }
 
 // isWithinDir reports whether path is equal to dir or contained within it.
+// On case-insensitive filesystems (Windows, macOS) the comparison is
+// case-insensitive; on other systems it is exact.
 func isWithinDir(path, dir string) bool {
-	if path == dir {
-		return true
-	}
 	sep := string(filepath.Separator)
-	return strings.HasPrefix(path, dir+sep)
+	prefix := dir + sep
+
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.EqualFold(path, dir) ||
+			strings.HasPrefix(strings.ToLower(path), strings.ToLower(prefix))
+	}
+	return path == dir || strings.HasPrefix(path, prefix)
+}
+
+// setThemeDefaults fills any empty Color fields in t with the corresponding
+// values from the built-in dark theme. This keeps older partial custom themes
+// loadable while still allowing explicit overrides.
+func setThemeDefaults(t *Theme) {
+	tv := reflect.ValueOf(t).Elem()
+	dv := reflect.ValueOf(&darkTheme).Elem()
+	colorType := reflect.TypeOf(Color(""))
+	for i := 0; i < tv.NumField(); i++ {
+		if tv.Type().Field(i).Type != colorType {
+			continue
+		}
+		if tv.Field(i).String() == "" {
+			tv.Field(i).Set(dv.Field(i))
+		}
+	}
 }
 
 // validateTheme returns a structured error listing any required colors that are

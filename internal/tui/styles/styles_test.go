@@ -92,32 +92,23 @@ func TestUserMessageUsesThemeTokens(t *testing.T) {
 	}
 }
 
-func TestNewFromThemeDefaultsUserMessageColors(t *testing.T) {
+func TestNewFromThemeDefaultsMissingColors(t *testing.T) {
 	t.Parallel()
 
 	theme := Theme{
-		Name:            "minimal",
-		Background:      "#111111",
-		Foreground:      "#eeeeee",
-		Primary:         "#ff0000",
-		Secondary:       "#00ff00",
-		Success:         "#00ff00",
-		Warning:         "#ffff00",
-		Error:           "#ff0000",
-		Muted:           "#888888",
-		Border:          "#333333",
-		UserBubble:      "#222222",
-		AssistantBubble: "#111111",
-		ToolBubble:      "#333333",
-		StatusBarBg:     "#000000",
-		InputBg:         "#222222",
-		Highlight:       "#ff0000",
+		Name:       "minimal",
+		Background: "#111111",
+		Foreground: "#eeeeee",
+		Primary:    "#ff0000",
 	}
 	s := NewFromTheme(&theme)
-	if s.UserMessage.GetForeground() != theme.Primary {
-		t.Errorf("expected default UserMessageFg to fall back to primary, got %v", s.UserMessage.GetForeground())
+	if s.UserMessage.GetForeground() != darkTheme.UserMessageFg {
+		t.Errorf("expected default UserMessageFg to fall back to dark theme, got %v", s.UserMessage.GetForeground())
 	}
-	if s.UserMessage.GetBorderLeftForeground() != theme.Border {
-		t.Errorf("expected default UserMessageBorder to fall back to border, got %v", s.UserMessage.GetBorderLeftForeground())
+	if s.UserMessage.GetBorderLeftForeground() != darkTheme.UserMessageBorder {
+		t.Errorf("expected default UserMessageBorder to fall back to dark theme, got %v", s.UserMessage.GetBorderLeftForeground())
+	}
+	if s.Theme.Secondary != darkTheme.Secondary {
+		t.Errorf("expected missing Secondary to fall back to dark theme, got %v", s.Theme.Secondary)
 	}
 }

@@ -83,11 +83,11 @@ func TestLoadThemeCustom(t *testing.T) {
 	if theme.Primary != Color("#ff0000") {
 		t.Errorf("expected primary %q, got %q", "#ff0000", theme.Primary)
 	}
-	if theme.UserMessageFg != theme.Primary {
-		t.Errorf("expected default UserMessageFg to fall back to primary, got %q", theme.UserMessageFg)
+	if theme.UserMessageFg != darkTheme.UserMessageFg {
+		t.Errorf("expected default UserMessageFg to fall back to dark theme, got %q", theme.UserMessageFg)
 	}
-	if theme.UserMessageBorder != theme.Border {
-		t.Errorf("expected default UserMessageBorder to fall back to border, got %q", theme.UserMessageBorder)
+	if theme.UserMessageBorder != darkTheme.UserMessageBorder {
+		t.Errorf("expected default UserMessageBorder to fall back to dark theme, got %q", theme.UserMessageBorder)
 	}
 }
 
@@ -196,7 +196,7 @@ func TestLoadThemeInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestLoadThemeMissingRequiredColors(t *testing.T) {
+func TestLoadThemePartialDefaultsToDark(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -204,14 +204,34 @@ func TestLoadThemeMissingRequiredColors(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data := []byte(`{"name":"incomplete","background":"#111111","foreground":"#eeeeee"}`)
+	data := []byte(`{"name":"incomplete","background":"#111111","foreground":"#eeeeee","primary":"#ff0000"}`)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := LoadTheme("incomplete", dir)
+	theme, err := LoadTheme("incomplete", dir)
+	if err != nil {
+		t.Fatalf("expected partial theme to load with defaults, got error: %v", err)
+	}
+	if theme.Secondary != darkTheme.Secondary {
+		t.Errorf("expected missing Secondary to default to dark theme, got %q", theme.Secondary)
+	}
+	if theme.Error != darkTheme.Error {
+		t.Errorf("expected missing Error to default to dark theme, got %q", theme.Error)
+	}
+	if theme.UserMessageFg != darkTheme.UserMessageFg {
+		t.Errorf("expected missing UserMessageFg to default to dark theme, got %q", theme.UserMessageFg)
+	}
+}
+
+func TestValidateThemeReportsMissingColors(t *testing.T) {
+	t.Parallel()
+
+	// validateTheme operates before defaulting, so an empty theme reports all
+	// required color keys.
+	err := validateTheme(&Theme{})
 	if err == nil {
-		t.Fatal("expected error for incomplete theme")
+		t.Fatal("expected validation error for empty theme")
 	}
 	var validationErr *ThemeValidationError
 	if !errors.As(err, &validationErr) {
@@ -220,7 +240,7 @@ func TestLoadThemeMissingRequiredColors(t *testing.T) {
 	if len(validationErr.Missing) == 0 {
 		t.Error("expected missing keys to be reported")
 	}
-	for _, key := range []string{"primary", "secondary", "error"} {
+	for _, key := range []string{"background", "foreground", "primary"} {
 		found := false
 		for _, missing := range validationErr.Missing {
 			if missing == key {
