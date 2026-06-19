@@ -2278,6 +2278,11 @@ func TestMCPCommand_NilClientShowsDisconnected(t *testing.T) {
 	}
 }
 
+// fixedClock returns a deterministic time source for golden tests.
+func fixedClock() time.Time {
+	return time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+}
+
 // TestGoldenViewIdle is a smoke golden test for the deterministic TUI harness.
 func TestGoldenViewIdle(t *testing.T) {
 	cfg := config.DefaultConfig()
@@ -2286,6 +2291,7 @@ func TestGoldenViewIdle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	m.SetFooterClock(fixedClock)
 
 	m.width = 80
 	m.height = 24
@@ -2301,6 +2307,7 @@ func newGoldenModel(t *testing.T) *Model {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	m.SetFooterClock(fixedClock)
 	m.width = 80
 	m.height = 24
 	m.updateLayout()

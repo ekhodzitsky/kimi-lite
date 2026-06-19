@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
+	"github.com/ekhodzitsky/kimi-lite/internal/idgen"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/activity"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/clipboard"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/footer"
@@ -114,6 +115,8 @@ type Model struct {
 	contextMax  int
 	toolCount   int
 	statusText  string
+	goal        string
+	btwNote     string
 
 	gitBranch string
 	gitDirty  bool
@@ -168,6 +171,7 @@ type Model struct {
 	gitProvider    api.GitProvider
 	mcpClient      api.MCPClient
 	store          api.Store
+	llmClient      api.LLMClient
 
 	// Approval callbacks (wired by app layer)
 	autoApproveSetter  func(string)
@@ -316,6 +320,18 @@ func (m *Model) SetStore(st api.Store) {
 	m.store = st
 }
 
+// SetLLMClient wires the LLM client so the TUI can switch models at runtime.
+func (m *Model) SetLLMClient(c api.LLMClient) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.llmClient = c
+}
+
+// SetFooterClock sets the footer clock source; useful for deterministic tests.
+func (m *Model) SetFooterClock(fn func() time.Time) {
+	m.footer.SetClock(fn)
+}
+
 // SetProtectedPaths sets additional paths that must be blocked by diff previews.
 func (m *Model) SetProtectedPaths(paths []string) {
 	m.mu.Lock()
@@ -439,6 +455,12 @@ func (m *Model) helpData() help.Data {
 			{Name: "/mcp", Description: "List MCP tools"},
 			{Name: "/title", Description: "Rename session"},
 			{Name: "/fork", Description: "Fork session"},
+			{Name: "/export", Description: "Export session to JSON"},
+			{Name: "/import", Description: "Import session JSON snapshot"},
+			{Name: "/model", Description: "Switch active model"},
+			{Name: "/goal", Description: "Set a short-term goal"},
+			{Name: "/btw", Description: "Queue note for next message"},
+			{Name: "/version", Description: "Show build version"},
 			{Name: "/help", Description: "Show this help"},
 		},
 	}
@@ -584,6 +606,88 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.session = msg.Session
 		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Forked to session %q (%s).", m.session.Name, m.session.ID), m.styles))
+		m.setState(api.TurnIdle)
+
+	case ModelSwitchedMsg:
+		m.mu.Lock()
+		m.modelName = msg.Model
+		m.contextMax = msg.ContextMax
+		m.config.LLM.Model = msg.Model
+		m.config.DefaultModel = msg.Model
+		if m.llmClient != nil {
+			if setter, ok := m.llmClient.(interface{ SetModel(string) }); ok {
+				setter.SetModel(msg.Model)
+			}
+		}
+		m.mu.Unlock()
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Model switched to %q.", msg.Model), m.styles))
+		m.setState(api.TurnIdle)
+
+	case GoalSetMsg:
+		m.goal = msg.Goal
+		m.statusText = fmt.Sprintf("Goal: %s", msg.Goal)
+		m.mu.RLock()
+		store := m.store
+		var sessionID string
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+		cmds = append(cmds, func() tea.Msg {
+			if store == nil || sessionID == "" {
+				return nil
+			}
+			ctx, cancel := context.WithTimeout(appCtx, commandTimeout)
+			defer cancel()
+			if err := store.AppendMessage(ctx, sessionID, api.Message{
+				ID:        idgen.GenerateID(),
+				Role:      api.RoleSystem,
+				Content:   fmt.Sprintf("User goal: %s", msg.Goal),
+				CreatedAt: time.Now().UTC(),
+			}); err != nil {
+				return ErrorMsg{Err: fmt.Errorf("append goal message: %w", err)}
+			}
+			return nil
+		})
+		m.setState(api.TurnIdle)
+
+	case BTWMsg:
+		m.btwNote = msg.Note
+		m.statusText = fmt.Sprintf("BTW: %s", msg.Note)
+		m.setState(api.TurnIdle)
+
+	case ExportResultMsg:
+		if msg.Err != nil {
+			m.addMessage(msgcomp.NewErrorMessage(msg.Err, m.styles))
+			m.setState(api.TurnError)
+		} else {
+			m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Session exported to %q.", msg.Path), m.styles))
+			m.setState(api.TurnIdle)
+		}
+
+	case ImportResultMsg:
+		if msg.Err != nil {
+			m.addMessage(msgcomp.NewErrorMessage(msg.Err, m.styles))
+			m.setState(api.TurnError)
+			break
+		}
+		if msg.Session == nil {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("import returned no session"), m.styles))
+			m.setState(api.TurnError)
+			break
+		}
+		m.mu.Lock()
+		m.session = msg.Session
+		m.messages = nil
+		m.rb = newRenderBuffer()
+		m.mu.Unlock()
+		cmds = append(cmds, m.input.RefreshCandidatesCmd())
+		for _, sessMsg := range msg.Session.Messages {
+			m.appendSessionMessage(sessMsg)
+		}
+		m.updateLayout()
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Imported session %q from %q.", msg.Session.ID, msg.Path), m.styles))
 		m.setState(api.TurnIdle)
 
 	case ApprovalRequestMsg:

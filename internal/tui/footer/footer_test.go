@@ -1,6 +1,7 @@
 package footer
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -151,6 +152,21 @@ func TestFooterPlanBadge_WithManual(t *testing.T) {
 	}
 	if !strings.Contains(view, "MANUAL") {
 		t.Errorf("expected MANUAL badge alongside PLAN, got %q", view)
+	}
+}
+
+func TestFooterTime(t *testing.T) {
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80)
+	m.SetData(Data{ModelName: "m", ContextMax: 1})
+	view := m.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) < 1 {
+		t.Fatalf("expected at least one line, got %d", len(lines))
+	}
+	if !regexp.MustCompile(`\d{2}:\d{2}`).MatchString(lines[0]) {
+		t.Errorf("expected time on line 1, got %q", lines[0])
 	}
 }
 

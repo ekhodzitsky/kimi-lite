@@ -411,6 +411,7 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	model.SetCompressor(a.compressor)
 	model.SetMCPClient(a.mcpClient)
 	model.SetStore(a.store)
+	model.SetLLMClient(a.llmClient)
 	// Diff previews in the TUI must block the same protected paths as the
 	// built-in tool executor (config file and session database).
 	model.SetProtectedPaths(a.protectedPaths)

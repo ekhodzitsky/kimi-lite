@@ -134,6 +134,18 @@ func (c *FallbackClient) ChatStream(ctx context.Context, messages []api.Message,
 	}
 }
 
+// SetModel propagates the model change to underlying clients that support it.
+func (c *FallbackClient) SetModel(model string) {
+	if setter, ok := c.primary.(interface{ SetModel(string) }); ok {
+		setter.SetModel(model)
+	}
+	if c.fallback != nil {
+		if setter, ok := c.fallback.(interface{ SetModel(string) }); ok {
+			setter.SetModel(model)
+		}
+	}
+}
+
 // SetMetricsCollector propagates the collector to primary and fallback clients
 // that support metrics collection.
 func (c *FallbackClient) SetMetricsCollector(collector api.MetricsCollector) {

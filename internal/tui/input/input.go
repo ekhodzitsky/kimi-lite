@@ -107,6 +107,12 @@ var DefaultSlashCommands = []SlashCommand{
 	{Name: "/mcp", Description: "List connected MCP tools"},
 	{Name: "/title", Description: "Rename the current session", NoAutoSubmit: true},
 	{Name: "/fork", Description: "Fork the current session"},
+	{Name: "/export", Description: "Export the current session to JSON", NoAutoSubmit: true},
+	{Name: "/import", Description: "Import a session JSON snapshot", NoAutoSubmit: true},
+	{Name: "/model", Description: "Switch the active LLM model", NoAutoSubmit: true},
+	{Name: "/goal", Description: "Set a short-term goal for this session", NoAutoSubmit: true},
+	{Name: "/btw", Description: "Queue a note for the next message", NoAutoSubmit: true},
+	{Name: "/version", Description: "Show the build version"},
 	{Name: "/help", Description: "Show keyboard shortcuts and commands"},
 }
 

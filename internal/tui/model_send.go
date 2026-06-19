@@ -39,6 +39,14 @@ func (m *Model) handleSend(content string, parts []api.ContentPart) []tea.Cmd {
 		return nil
 	}
 
+	// Prepend any queued BTW note to the next outgoing message.
+	m.mu.Lock()
+	if m.btwNote != "" {
+		content = m.btwNote + "\n\n" + content
+		m.btwNote = ""
+	}
+	m.mu.Unlock()
+
 	m.toolCount = 0
 	m.statusText = ""
 	userMsg := msgcomp.NewUserMessage(content, m.styles)

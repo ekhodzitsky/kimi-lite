@@ -105,6 +105,14 @@ func (c *Client) SetHeaders(headers map[string]string) {
 	c.mu.Unlock()
 }
 
+// SetModel sets the model used for subsequent chat requests.
+// Safe for concurrent use with Chat/ChatStream.
+func (c *Client) SetModel(model string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.model = model
+}
+
 // SetAttachmentRoots sets the directories from which local image attachments
 // may be read. Paths outside these roots are left as URLs and not inlined.
 func (c *Client) SetAttachmentRoots(roots []string) {

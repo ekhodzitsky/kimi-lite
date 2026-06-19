@@ -46,11 +46,18 @@ type Model struct {
 	width  int
 	data   Data
 	tipIdx int
+	clock  func() time.Time
 }
 
 // New creates a footer model.
 func New(st *styles.Styles) *Model {
-	return &Model{styles: st}
+	return &Model{styles: st, clock: time.Now}
+}
+
+// SetClock sets the time source used to render the footer clock.
+// It is intended for tests that need deterministic output.
+func (m *Model) SetClock(fn func() time.Time) {
+	m.clock = fn
 }
 
 // SetSize sets the footer width.
@@ -113,12 +120,13 @@ func (m *Model) line1() string {
 	}
 
 	left := lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+	timeStr := m.timePart()
 	tip := m.styles.FooterTip.Render(m.rotatingTip())
-	padding := m.width - ansi.StringWidth(left) - ansi.StringWidth(tip)
+	padding := m.width - ansi.StringWidth(left) - ansi.StringWidth(timeStr) - ansi.StringWidth(tip)
 	if padding < 0 {
 		padding = 0
 	}
-	return left + strings.Repeat(" ", padding) + tip
+	return left + strings.Repeat(" ", padding) + timeStr + tip
 }
 
 func (m *Model) line2() string {
@@ -156,6 +164,10 @@ func (m *Model) modeBadge() string {
 		return plan
 	}
 	return badge
+}
+
+func (m *Model) timePart() string {
+	return m.styles.FooterTime.Render(" " + m.clock().Format("15:04") + " ")
 }
 
 func (m *Model) shortCWD() string {

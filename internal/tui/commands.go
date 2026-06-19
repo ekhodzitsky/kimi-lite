@@ -2,13 +2,18 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/llm"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/welcome"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -152,6 +157,35 @@ type SetTitleMsg struct {
 // ForkResultMsg carries the result of forking the current session.
 type ForkResultMsg struct {
 	Session *api.Session
+}
+
+// ModelSwitchedMsg carries the new active model and its context window size.
+type ModelSwitchedMsg struct {
+	Model      string
+	ContextMax int
+}
+
+// GoalSetMsg carries a user-defined short-term goal.
+type GoalSetMsg struct {
+	Goal string
+}
+
+// BTWMsg carries an out-of-band note to prepend to the next outgoing message.
+type BTWMsg struct {
+	Note string
+}
+
+// ExportResultMsg carries the result of exporting the current session.
+type ExportResultMsg struct {
+	Path string
+	Err  error
+}
+
+// ImportResultMsg carries the result of importing a session snapshot.
+type ImportResultMsg struct {
+	Session *api.Session
+	Path    string
+	Err     error
 }
 
 // debouncedResizeMsg is emitted after the terminal size has settled.
@@ -360,10 +394,177 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 			}
 			return ForkResultMsg{Session: sess}
 		}
+	case "/export":
+		path := strings.TrimSpace(strings.TrimPrefix(content, cmd))
+		if path == "" {
+			name := "session"
+			if m.session != nil && m.session.Name != "" {
+				name = m.session.Name
+			}
+			path = name + ".json"
+		}
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Exporting session to %q...", path), m.styles))
+
+		m.mu.RLock()
+		store := m.store
+		var sessionID string
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+
+		timeout := commandTimeout
+		return func() tea.Msg {
+			if store == nil || sessionID == "" {
+				return ExportResultMsg{Path: path, Err: fmt.Errorf("no session to export")}
+			}
+			ctx, cancel := context.WithTimeout(appCtx, timeout)
+			defer cancel()
+			sess, err := store.GetSession(ctx, sessionID)
+			if err != nil {
+				return ExportResultMsg{Path: path, Err: fmt.Errorf("get session: %w", err)}
+			}
+			msgs, err := store.GetMessages(ctx, sessionID, 0)
+			if err != nil {
+				return ExportResultMsg{Path: path, Err: fmt.Errorf("get messages: %w", err)}
+			}
+			turns, err := store.GetTurns(ctx, sessionID, 0)
+			if err != nil {
+				return ExportResultMsg{Path: path, Err: fmt.Errorf("get turns: %w", err)}
+			}
+			export := api.SessionExport{
+				Version:    api.SessionExportVersion,
+				ExportedAt: time.Now().UTC(),
+				Session:    *sess,
+				Messages:   msgs,
+				Turns:      turns,
+			}
+			data, err := json.MarshalIndent(export, "", "  ")
+			if err != nil {
+				return ExportResultMsg{Path: path, Err: fmt.Errorf("marshal export: %w", err)}
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				return ExportResultMsg{Path: path, Err: fmt.Errorf("write file: %w", err)}
+			}
+			return ExportResultMsg{Path: path}
+		}
+	case "/import":
+		path := strings.TrimSpace(strings.TrimPrefix(content, cmd))
+		if path == "" {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("usage: /import <path>"), m.styles))
+			return nil
+		}
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Importing session from %q...", path), m.styles))
+
+		m.mu.RLock()
+		store := m.store
+		appCtx := m.appCtx
+		m.mu.RUnlock()
+
+		timeout := commandTimeout
+		return func() tea.Msg {
+			if store == nil {
+				return ImportResultMsg{Path: path, Err: fmt.Errorf("no store available")}
+			}
+			data, err := os.ReadFile(filepath.Clean(path))
+			if err != nil {
+				return ImportResultMsg{Path: path, Err: fmt.Errorf("read file: %w", err)}
+			}
+			var export api.SessionExport
+			if err := json.Unmarshal(data, &export); err != nil {
+				return ImportResultMsg{Path: path, Err: fmt.Errorf("parse export: %w", err)}
+			}
+			if export.Version != "" && export.Version != api.SessionExportVersion {
+				return ImportResultMsg{Path: path, Err: fmt.Errorf("unsupported export version %q", export.Version)}
+			}
+			ctx, cancel := context.WithTimeout(appCtx, timeout)
+			defer cancel()
+			created, err := store.CreateSession(ctx, export.Session.Path)
+			if err != nil {
+				return ImportResultMsg{Path: path, Err: fmt.Errorf("create session: %w", err)}
+			}
+			cleanup := func() {
+				_ = store.DeleteSession(ctx, created.ID)
+				_ = store.ClearMessages(ctx, created.ID)
+			}
+			created.Name = export.Session.Name
+			if err := store.UpdateSession(ctx, created); err != nil {
+				cleanup()
+				return ImportResultMsg{Path: path, Err: fmt.Errorf("update session name: %w", err)}
+			}
+			for _, msg := range export.Messages {
+				if err := store.AppendMessage(ctx, created.ID, msg); err != nil {
+					cleanup()
+					return ImportResultMsg{Path: path, Err: fmt.Errorf("append message: %w", err)}
+				}
+			}
+			for _, turn := range export.Turns {
+				if err := store.SaveTurn(ctx, created.ID, turn); err != nil {
+					cleanup()
+					return ImportResultMsg{Path: path, Err: fmt.Errorf("save turn: %w", err)}
+				}
+			}
+			return ImportResultMsg{Path: path, Session: created}
+		}
+	case "/model":
+		name := strings.TrimSpace(strings.TrimPrefix(content, cmd))
+		if name == "" {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("usage: /model <model-name>"), m.styles))
+			return nil
+		}
+		resolved, err := m.resolveModel(name)
+		if err != nil {
+			m.addMessage(msgcomp.NewErrorMessage(err, m.styles))
+			return nil
+		}
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Switching model to %q...", resolved), m.styles))
+		return func() tea.Msg {
+			return ModelSwitchedMsg{Model: resolved, ContextMax: llm.LookupModel(resolved).ContextWindow}
+		}
+	case "/goal":
+		goal := strings.TrimSpace(strings.TrimPrefix(content, cmd))
+		if goal == "" {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("usage: /goal <text>"), m.styles))
+			return nil
+		}
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Goal set: %s", goal), m.styles))
+		return func() tea.Msg { return GoalSetMsg{Goal: goal} }
+	case "/btw":
+		note := strings.TrimSpace(strings.TrimPrefix(content, cmd))
+		if note == "" {
+			m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("usage: /btw <text>"), m.styles))
+			return nil
+		}
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Note queued for next message: %s", note), m.styles))
+		return func() tea.Msg { return BTWMsg{Note: note} }
+	case "/version":
+		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("kimi-lite version %s", welcome.Version()), m.styles))
+		return nil
 	case "/help":
 		return func() tea.Msg { return ShowHelpMsg{} }
 	default:
 		m.addMessage(msgcomp.NewErrorMessage(fmt.Errorf("unknown command: %s", cmd), m.styles))
 		return nil
 	}
+}
+
+// resolveModel validates a model name against the configured provider/model
+// registry and model aliases, returning the concrete model name to use.
+func (m *Model) resolveModel(name string) (string, error) {
+	if alias, ok := m.config.Models[name]; ok && alias.Model != "" {
+		return alias.Model, nil
+	}
+	if info := llm.LookupModel(name); info.Provider != "unknown" {
+		return name, nil
+	}
+	for _, p := range m.config.Providers {
+		if p.DefaultModel == name {
+			return name, nil
+		}
+	}
+	if m.config.LLM.Model == name {
+		return name, nil
+	}
+	return "", fmt.Errorf("unknown model %q", name)
 }

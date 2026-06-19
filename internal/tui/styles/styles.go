@@ -136,6 +136,7 @@ type Styles struct {
 	FooterTip           lipgloss.Style
 	FooterStatus        lipgloss.Style
 	FooterContext       lipgloss.Style
+	FooterTime          lipgloss.Style
 	ModeBadgeYolo       lipgloss.Style
 	ModeBadgeAuto       lipgloss.Style
 	ModeBadgeManual     lipgloss.Style
@@ -310,6 +311,7 @@ func (s *Styles) init() {
 	s.FooterTip = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Muted)
 	s.FooterStatus = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Foreground)
 	s.FooterContext = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Secondary)
+	s.FooterTime = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Muted)
 	s.ModeBadgeYolo = lipgloss.NewStyle().Background(t.Warning).Foreground(t.Background).Bold(true)
 	s.ModeBadgeAuto = lipgloss.NewStyle().Background(t.Primary).Foreground(t.Background).Bold(true)
 	s.ModeBadgeManual = lipgloss.NewStyle().Background(t.Muted).Foreground(t.Background).Bold(true)
