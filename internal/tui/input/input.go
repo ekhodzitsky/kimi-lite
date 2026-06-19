@@ -91,8 +91,9 @@ func ConfigurableKeyMap(cfg api.KeybindingConfig) KeyMap {
 
 // SlashCommand describes a single slash command available for autocompletion.
 type SlashCommand struct {
-	Name        string
-	Description string
+	Name         string
+	Description  string
+	NoAutoSubmit bool // when true, selecting the command leaves it in the input for argument entry
 }
 
 // DefaultSlashCommands is the built-in list of slash commands.
@@ -101,9 +102,9 @@ var DefaultSlashCommands = []SlashCommand{
 	{Name: "/clear", Description: "Clear the current transcript"},
 	{Name: "/sessions", Description: "Switch to another session"},
 	{Name: "/checkpoint", Description: "Create a git checkpoint commit"},
-	{Name: "/diff", Description: "Show git diff for a path"},
+	{Name: "/diff", Description: "Show git diff for a path", NoAutoSubmit: true},
 	{Name: "/mcp", Description: "List connected MCP tools"},
-	{Name: "/title", Description: "Rename the current session"},
+	{Name: "/title", Description: "Rename the current session", NoAutoSubmit: true},
 	{Name: "/fork", Description: "Fork the current session"},
 	{Name: "/help", Description: "Show keyboard shortcuts and commands"},
 }
@@ -334,7 +335,11 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				m.slash.clampScroll()
 				return nil
 			case "enter":
+				selected := m.slash.candidates[m.slash.selected]
 				m.insertSlashCandidate()
+				if selected.NoAutoSubmit {
+					return nil
+				}
 				return m.submitCurrentLocked()
 			case "esc", "ctrl+c":
 				m.slash = nil

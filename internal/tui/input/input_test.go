@@ -696,6 +696,30 @@ func TestSlashCloseWithEsc(t *testing.T) {
 	}
 }
 
+func TestSlashNoAutoSubmitLeavesInputForArgs(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+	m.SetSlashCommands(DefaultSlashCommands)
+	m.SetValue("/tit")
+	m.detectSlash()
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	inp := updated.(*Model)
+
+	if cmd != nil {
+		t.Error("selecting a NoAutoSubmit slash command should not send immediately")
+	}
+	if inp.Value() != "/title " {
+		t.Errorf("value = %q, want %q", inp.Value(), "/title ")
+	}
+	if inp.Completing() {
+		t.Error("completion should close after insertion")
+	}
+}
+
 func TestSlashViewContainsPopup(t *testing.T) {
 	t.Parallel()
 
