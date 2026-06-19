@@ -563,10 +563,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if len(msg.Sessions) == 0 {
 			m.addMessage(msgcomp.NewUserMessage("No sessions found.", m.styles))
 		} else {
+			m.mu.RLock()
 			var path string
 			if m.session != nil {
 				path = m.session.Path
 			}
+			m.mu.RUnlock()
 			m.sessionPicker = sessions.NewPicker(msg.Sessions, path, m.width, m.height, m.styles)
 		}
 

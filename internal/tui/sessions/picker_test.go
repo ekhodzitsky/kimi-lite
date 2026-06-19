@@ -181,7 +181,7 @@ func TestPicker_CopyKey(t *testing.T) {
 	}
 }
 
-func TestPicker_PuralizeSessionCount(t *testing.T) {
+func TestPicker_PluralizeSessionCount(t *testing.T) {
 	t.Parallel()
 
 	sessions := []api.Session{{ID: "s1", Path: "/tmp", UpdatedAt: time.Now()}}
