@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/help"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
@@ -49,16 +50,30 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	// Plan approval panel takes precedence while it is open.
 	if m.planPending {
 		switch msg.String() {
-		case "y":
+		case "enter", "y":
 			return append(cmds, func() tea.Msg { return PlanApprovalMsg{Approved: true} })
-		case "n":
+		case "esc", "n":
 			return append(cmds, func() tea.Msg { return PlanApprovalMsg{Approved: false} })
+		case "up":
+			m.planScrollOffset--
+		case "down":
+			m.planScrollOffset++
+		case "pgup":
+			m.planScrollOffset -= m.planPanelMaxHeight()
+		case "pgdown":
+			m.planScrollOffset += m.planPanelMaxHeight()
 		}
+		m.clampPlanScrollOffset()
 		return cmds
 	}
 
 	// Approval dialog takes precedence when waiting for approval.
 	if m.state == api.TurnWaitingApproval {
+		m.mu.RLock()
+		call, ok := m.approval.currentCall()
+		m.mu.RUnlock()
+		allowAlways := ok && !core.IsNeverAutoApprove(call.Name)
+
 		switch msg.String() {
 		case "1":
 			if resp, ok := m.approvalApproveCurrent(api.ApprovalYes); ok {
@@ -71,8 +86,10 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 			}
 			return cmds
 		case "3":
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
+			if allowAlways {
+				if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
+					cmds = append(cmds, func() tea.Msg { return resp })
+				}
 			}
 			return cmds
 		case "4", m.config.Keybindings.ApproveDiff:
@@ -91,8 +108,10 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 			}
 			return cmds
 		case m.config.Keybindings.ApproveAlways:
-			if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
-				cmds = append(cmds, func() tea.Msg { return resp })
+			if allowAlways {
+				if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
+					cmds = append(cmds, func() tea.Msg { return resp })
+				}
 			}
 			return cmds
 		case "ctrl+e":
@@ -100,12 +119,21 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 			call, ok := m.approval.currentCall()
 			session := m.session
 			protectedPaths := append([]string(nil), m.protectedPaths...)
+			cachedCallID := m.approvalDiffCallID
+			cachedDiff := m.approvalDiffContent
 			m.mu.RUnlock()
 			if !ok || session == nil {
 				return cmds
 			}
-			diff, err := toolCallDiff(call, session.Path, protectedPaths)
-			if err == nil && diff != "" {
+			diff := cachedDiff
+			if cachedCallID != call.ID || diff == "" {
+				computed, err := toolCallDiff(call, session.Path, protectedPaths)
+				if err != nil {
+					return cmds
+				}
+				diff = computed
+			}
+			if diff != "" {
 				m.approvalFullscreen = true
 				m.approvalDiffContent = diff
 			}
@@ -163,6 +191,8 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	if steerKey(msg, m.config.Keybindings.Steer) {
 		if m.state == api.TurnStreaming || m.state == api.TurnThinking {
 			m.steerOpen = true
+			m.steerInput = ""
+			m.steerCursor = 0
 		}
 	}
 
@@ -184,6 +214,7 @@ func (m *Model) handleSteerKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	case "esc", "ctrl+c":
 		m.steerOpen = false
 		m.steerInput = ""
+		m.steerCursor = 0
 		return nil
 	case "enter":
 		content := strings.TrimSpace(m.steerInput)
@@ -192,19 +223,105 @@ func (m *Model) handleSteerKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 		}
 		m.steerOpen = false
 		m.steerInput = ""
+		m.steerCursor = 0
 		return []tea.Cmd{func() tea.Msg { return SteerMsg{Content: content} }}
 	case "backspace", "ctrl+h":
-		if m.steerInput != "" {
-			runes := []rune(m.steerInput)
-			m.steerInput = string(runes[:len(runes)-1])
+		m.deleteSteerRuneBackward()
+		return nil
+	case "ctrl+u":
+		m.steerInput = ""
+		m.steerCursor = 0
+		return nil
+	case "ctrl+w":
+		m.deleteSteerWordBackward()
+		return nil
+	case "left":
+		if m.steerCursor > 0 {
+			m.steerCursor--
+		}
+		return nil
+	case "right":
+		if m.steerCursor < len([]rune(m.steerInput)) {
+			m.steerCursor++
 		}
 		return nil
 	}
 
 	if text := appendableKeyText(msg); text != "" {
-		m.steerInput += text
+		runes := []rune(m.steerInput)
+		cursor := m.steerCursor
+		if cursor < 0 {
+			cursor = 0
+		}
+		if cursor > len(runes) {
+			cursor = len(runes)
+		}
+		insert := []rune(text)
+		out := make([]rune, 0, len(runes)+len(insert))
+		out = append(out, runes[:cursor]...)
+		out = append(out, insert...)
+		out = append(out, runes[cursor:]...)
+		m.steerInput = string(out)
+		m.steerCursor = cursor + len(insert)
 	}
 	return nil
+}
+
+func (m *Model) deleteSteerRuneBackward() {
+	runes := []rune(m.steerInput)
+	cursor := m.steerCursor
+	if cursor <= 0 || cursor > len(runes) {
+		return
+	}
+	out := append(runes[:cursor-1], runes[cursor:]...)
+	m.steerInput = string(out)
+	m.steerCursor = cursor - 1
+}
+
+func (m *Model) deleteSteerWordBackward() {
+	runes := []rune(m.steerInput)
+	cursor := m.steerCursor
+	if cursor <= 0 || cursor > len(runes) {
+		return
+	}
+	end := cursor
+	for end > 0 && unicode.IsSpace(runes[end-1]) {
+		end--
+	}
+	start := end
+	for start > 0 && !unicode.IsSpace(runes[start-1]) {
+		start--
+	}
+	out := append(runes[:start], runes[end:]...)
+	if start == 0 {
+		trim := 0
+		for trim < len(out) && unicode.IsSpace(out[trim]) {
+			trim++
+		}
+		out = out[trim:]
+		start = 0
+	}
+	m.steerInput = string(out)
+	m.steerCursor = start
+}
+
+func (m *Model) clampPlanScrollOffset() {
+	innerW := m.width - 8
+	if innerW < minContentWidth {
+		innerW = minContentWidth
+	}
+	wrapped := wordWrap(m.planRequest, innerW)
+	totalLines := len(strings.Split(wrapped, "\n"))
+	maxOffset := totalLines - m.planPanelMaxHeight()
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	switch {
+	case m.planScrollOffset < 0:
+		m.planScrollOffset = 0
+	case m.planScrollOffset > maxOffset:
+		m.planScrollOffset = maxOffset
+	}
 }
 
 func appendableKeyText(msg tea.KeyPressMsg) string {

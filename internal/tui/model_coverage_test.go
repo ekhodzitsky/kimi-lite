@@ -82,17 +82,23 @@ func TestHandleKeyMsg_ApprovalKeys(t *testing.T) {
 
 	tests := []struct {
 		key      rune
+		tool     string
 		decision api.ApprovalDecision
 	}{
-		{'y', api.ApprovalYes},
-		{'n', api.ApprovalNo},
-		{'a', api.ApprovalAlways},
-		{'d', api.ApprovalDiff},
+		{'y', "read_file", api.ApprovalYes},
+		{'n', "read_file", api.ApprovalNo},
+		{'a', "read_file", api.ApprovalAlways},
+		{'d', "write_file", api.ApprovalDiff},
 	}
 
 	for _, tt := range tests {
 		t.Run(string(tt.key), func(t *testing.T) {
-			m2 := m // fresh controller state would be needed for each, reuse with care
+			m2, _ := New(cfg, session, context.Background(), "")
+			m2.width = 120
+			m2.height = 40
+			m2.updateLayout()
+			m2.Update(ApprovalRequestMsg{Calls: []api.ToolCall{{ID: "1", Name: tt.tool, Arguments: `{}`}}, RequestID: 1})
+
 			updated, cmd := m2.Update(tea.KeyPressMsg{Code: tt.key, Text: string(tt.key)})
 			model := updated.(*Model)
 			if cmd == nil {

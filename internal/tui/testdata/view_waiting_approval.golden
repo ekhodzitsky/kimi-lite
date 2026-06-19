@@ -4,17 +4,17 @@
 │  Send /help for help info.                                               │    
 │                                                                          │    
 │  Directory: /tmp                                                         │    
-│  Session:   t╔═══════════════════════════════════════════════╗           │    
-│  Model:     k║                                               ║           │    
-│  Version:   0║  Tool call requires approval                  ║           │    
-│              ║                                               ║           │    
-╰──────────────║  Tool: read_file                              ║───────────╯    
-               ║  Arguments: {"path":"foo.txt"}                ║                
-               ║                                               ║                
-               ║   1. yes  2. no  3. always  4. diff           ║                
-               ║  keys: 1/2/3/4 | y/n/a/d | ctrl+e fullscreen  ║                
-               ║                                               ║                
-               ╚═══════════════════════════════════════════════╝                
+│  Sess╔═══════════════════════════════════════════════════════════════╗   │    
+│  Mode║                                                               ║   │    
+│  Vers║  Tool call requires approval                                  ║   │    
+│      ║                                                               ║   │    
+╰──────║  Tool: read_file                                              ║───╯    
+       ║  Arguments: {"path":"foo.txt"}                                ║        
+       ║                                                               ║        
+       ║   1. Allow   2. Reject   3. Allow for this session   4. Diff  ║        
+       ║  keys: 1/2/3/4 | y/n/a/d | ctrl+e fullscreen                  ║        
+       ║                                                               ║        
+       ╚═══════════════════════════════════════════════════════════════╝        
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ ┃ Type a message... (Enter to send, Alt+Enter/Shift+Enter/Ctrl+J for         │
 │ ┃ newline)                                                                   │

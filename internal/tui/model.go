@@ -133,16 +133,25 @@ type Model struct {
 	// pending approval call.
 	approvalFullscreen  bool
 	approvalDiffContent string
+	// approvalDiffCallID identifies the call whose diff is cached in
+	// approvalDiffContent. An empty value means no diff has been cached yet.
+	approvalDiffCallID string
+	// approvalDiffErr holds the error from computing the cached diff, if any.
+	approvalDiffErr error
 
 	// planRequest holds the generated plan waiting for user approval.
 	planRequest string
 	// planPending is true when the plan approval panel is open.
 	planPending bool
+	// planScrollOffset is the first visible line of the wrapped plan text.
+	planScrollOffset int
 
 	// steerOpen is true when the steering input overlay is visible.
 	steerOpen bool
 	// steerInput holds the draft steering instruction.
 	steerInput string
+	// steerCursor is the cursor position in runes within steerInput.
+	steerCursor int
 	// steeredPending is true when a steer event was received and the next
 	// streamed assistant message must start a new block.
 	steeredPending bool
@@ -503,7 +512,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ApprovalRequestMsg:
 		m.approvalStartRequest(msg.Calls, msg.RequestID)
 		m.setState(api.TurnWaitingApproval)
-		cmds = append(cmds, m.readStreamChunk())
+		cmds = append(cmds, m.readStreamChunk(), m.approvalComputeDiffCmd())
 
 	case ApprovalResponseMsg:
 		cmds = append(cmds, m.handleApprovalResponse(msg)...)
@@ -512,9 +521,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addMessage(msgcomp.NewUserMessage(fmt.Sprintf("Diff preview for %s:\n%s", msg.CallID, msg.Diff), m.styles))
 		m.setState(api.TurnWaitingApproval)
 
+	case approvalDiffComputedMsg:
+		m.mu.Lock()
+		if call, ok := m.approval.currentCall(); ok && call.ID == msg.CallID {
+			m.approvalDiffCallID = msg.CallID
+			m.approvalDiffContent = msg.Diff
+			m.approvalDiffErr = msg.Err
+		}
+		m.mu.Unlock()
+
 	case PlanRequestMsg:
 		m.planRequest = msg.Plan
 		m.planPending = true
+		m.planScrollOffset = 0
 		m.setState(api.TurnWaitingPlan)
 
 	case ShowSteerInputMsg:
@@ -972,6 +991,7 @@ func (m *Model) handleApprovalResponse(resp ApprovalResponseMsg) []tea.Cmd {
 	}
 
 	if !done {
+		cmds = append(cmds, m.approvalComputeDiffCmd())
 		return cmds
 	}
 

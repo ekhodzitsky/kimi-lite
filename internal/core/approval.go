@@ -114,6 +114,13 @@ var neverAutoApprove = map[string]struct{}{
 	"edit":             {},
 }
 
+// IsNeverAutoApprove reports whether name is in the list of tools that must
+// never be auto-approved.
+func IsNeverAutoApprove(name string) bool {
+	_, ok := neverAutoApprove[name]
+	return ok
+}
+
 // matchRule reports whether ruleTool matches name using glob semantics.
 func matchRule(ruleTool, name string) bool {
 	if ruleTool == name {
