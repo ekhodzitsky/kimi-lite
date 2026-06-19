@@ -34,8 +34,15 @@ func (m *Model) handleSend(content string, parts []api.ContentPart) []tea.Cmd {
 		return cmds
 	}
 
+	// Queue input while the assistant is streaming or thinking so the user can
+	// keep typing without interrupting the current turn.
+	if m.state == api.TurnStreaming || m.state == api.TurnThinking {
+		m.enqueueMessage(content, parts)
+		return cmds
+	}
+
 	// Allow sending from Idle or Error state; block only during active turns.
-	if m.state == api.TurnThinking || m.state == api.TurnStreaming || m.state == api.TurnToolCalls || m.state == api.TurnWaitingApproval || m.state == api.TurnWaitingPlan {
+	if m.state == api.TurnToolCalls || m.state == api.TurnWaitingApproval || m.state == api.TurnWaitingPlan {
 		return nil
 	}
 
@@ -244,6 +251,12 @@ func (m *Model) handleStreamChunk(chunk api.StreamChunk) []tea.Cmd {
 		m.streamCh = nil
 		m.streamCanceled = false
 		m.mu.Unlock()
+
+		// Auto-send the next queued message, if any, so queued turns proceed
+		// without waiting for the user to press Enter again.
+		if cmd := m.sendNextQueuedCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		return cmds
 	}
 

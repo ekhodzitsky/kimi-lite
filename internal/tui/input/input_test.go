@@ -887,3 +887,29 @@ func TestDetectMention_DoesNotCallCandidateFnSynchronously(t *testing.T) {
 		t.Error("expected no completion when candidates are empty")
 	}
 }
+
+func TestSetQueueCount(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 10)
+	m.SetWidth(80)
+
+	m.SetQueueCount(0)
+	view := m.View().Content
+	if strings.Contains(view, "Queued") {
+		t.Errorf("placeholder should not show queue when empty, got:\n%s", view)
+	}
+
+	m.SetQueueCount(3)
+	view = m.View().Content
+	if !strings.Contains(view, "Queued: 3") {
+		t.Errorf("placeholder should show 'Queued: 3', got:\n%s", view)
+	}
+
+	m.SetQueueCount(0)
+	view = m.View().Content
+	if strings.Contains(view, "Queued") {
+		t.Errorf("placeholder should be restored, got:\n%s", view)
+	}
+}

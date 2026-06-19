@@ -195,6 +195,10 @@ type Model struct {
 	// Live output from running tools, keyed by call ID.
 	toolProgress map[string]string
 
+	// messageQueue holds user messages drafted while the assistant is streaming
+	// or thinking. They are sent automatically in FIFO order when the turn ends.
+	messageQueue []queuedMessage
+
 	// Focus management
 	focused focusedComponent
 
@@ -265,6 +269,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeCon
 		approvalMode:    approvalModeAuto,
 		mentionProvider: mp,
 		toolProgress:    make(map[string]string),
+		messageQueue:    make([]queuedMessage, 0),
 	}
 	inp.SetCandidateFunc(func() []string {
 		m.mu.RLock()
@@ -1350,6 +1355,7 @@ func (m *Model) updateFooter() {
 		ContextUsed: contextUsed,
 		ContextMax:  contextMax,
 		ToolCount:   toolCount,
+		QueueCount:  m.queueLength(),
 		GitBranch:   gitBranch,
 		GitDirty:    gitDirty,
 	})
@@ -1386,6 +1392,7 @@ func (m *Model) updateActivity() {
 		StatusText:  statusText,
 		ToolCalls:   m.pendingToolCalls(),
 		ToolOutputs: toolProgress,
+		QueueCount:  m.queueLength(),
 	})
 }
 

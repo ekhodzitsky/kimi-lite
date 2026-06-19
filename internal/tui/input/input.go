@@ -23,6 +23,8 @@ import (
 const (
 	inputWidthPadding = 4
 	popupMaxItems     = 8
+
+	defaultPlaceholder = "Type a message... (Enter to send, Alt+Enter/Shift+Enter/Ctrl+J for newline)"
 )
 
 // SendMsg is emitted when the user wants to send the current input.
@@ -216,7 +218,7 @@ type Model struct {
 // New creates a new input model.
 func New(st *styles.Styles, keyMap KeyMap, maxHistory int) *Model {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Enter to send, Alt+Enter/Shift+Enter/Ctrl+J for newline)"
+	ta.Placeholder = defaultPlaceholder
 	ta.ShowLineNumbers = false
 	ta.Focus()
 
@@ -530,6 +532,18 @@ func (m *Model) Reset() {
 // SetValue sets the input value.
 func (m *Model) SetValue(s string) {
 	m.textarea.SetValue(s)
+}
+
+// SetQueueCount updates the placeholder to include a queued-message indicator.
+// A count of zero restores the default placeholder.
+func (m *Model) SetQueueCount(count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if count > 0 {
+		m.textarea.Placeholder = fmt.Sprintf("%s [Queued: %d]", defaultPlaceholder, count)
+	} else {
+		m.textarea.Placeholder = defaultPlaceholder
+	}
 }
 
 // SetEditor sets the external editor command. An empty value falls back to

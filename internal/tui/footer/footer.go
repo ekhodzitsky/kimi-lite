@@ -36,6 +36,7 @@ type Data struct {
 	ContextUsed int
 	ContextMax  int
 	ToolCount   int
+	QueueCount  int
 	GitBranch   string
 	GitDirty    bool
 }
@@ -220,6 +221,9 @@ func (m *Model) rotatingTip() string {
 func (m *Model) statusPart() string {
 	if m.data.StatusText != "" {
 		return m.styles.FooterStatus.Render(" " + truncate(m.data.StatusText, m.width/2) + " ")
+	}
+	if m.data.QueueCount > 0 {
+		return m.styles.FooterStatus.Render(fmt.Sprintf(" queued: %d ", m.data.QueueCount))
 	}
 	return m.styles.FooterStatus.Render(" " + m.data.State.ShortString() + " ")
 }

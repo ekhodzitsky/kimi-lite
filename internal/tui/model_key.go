@@ -163,7 +163,32 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 
 	switch msg.String() {
 	case kb.Quit:
-		cmds = append(cmds, tea.Quit)
+		// First Ctrl+C cancels an active streaming/thinking turn while preserving
+		// queued messages. After cancel, a second Ctrl+C clears any draft. Only
+		// when there is nothing to cancel or clear does Ctrl+C quit the program.
+		m.mu.Lock()
+		state := m.state
+		cancel := m.streamCancel
+		m.mu.Unlock()
+
+		switch state {
+		case api.TurnThinking, api.TurnStreaming:
+			if cancel != nil {
+				cancel()
+			}
+			m.mu.Lock()
+			m.streamCh = nil
+			m.streamCancel = nil
+			m.streamCanceled = true
+			m.mu.Unlock()
+			m.setState(api.TurnIdle)
+		default:
+			if m.input.Value() != "" {
+				m.input.SetValue("")
+			} else {
+				cmds = append(cmds, tea.Quit)
+			}
+		}
 	case kb.Cancel:
 		// If the user has typed a draft, clear it first instead of cancelling
 		// the active stream. A second Cancel then stops the stream.

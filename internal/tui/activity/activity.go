@@ -2,6 +2,7 @@
 package activity
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -19,6 +20,7 @@ type Data struct {
 	StatusText  string
 	ToolCalls   []api.ToolCall
 	ToolOutputs map[string]string // callID -> live output tail
+	QueueCount  int
 }
 
 // Model renders transient activity status.
@@ -129,6 +131,9 @@ func (m *Model) activeLine() (active bool, line string) {
 	case api.TurnWaitingPlan:
 		return true, m.statusOr("waiting for plan approval...")
 	default:
+		if m.data.QueueCount > 0 {
+			return true, fmt.Sprintf("queued: %d", m.data.QueueCount)
+		}
 		return false, ""
 	}
 }
