@@ -14,6 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dev-time Graphify integration: Makefile targets, `docs/dev/graphify.md`,
   `AGENTS.md` guidance, `.graphifyignore`, and a CI workflow that builds the
   repo knowledge graph as an artifact.
+- TUI `/help` overlay now reflects live keybindings and adds context-sensitive
+  shortcut sections for approval, plan, and steer overlays.
+- `?` key toggles the help overlay.
+- `/resume` alias for `/sessions`.
+- `clipboard.WriteText` helper and `y` key in the sessions picker to copy the
+  resume command to the system clipboard.
+- Footer now renders a `PLAN` badge, a `MANUAL` approval-mode badge, and the
+  active tool count.
+- Welcome panel now displays the real build version via
+  `debug.ReadBuildInfo()`.
+- Activity panel shows dedicated status lines for `TurnWaitingApproval` and
+  `TurnWaitingPlan`.
 
 ### Changed
 
@@ -24,6 +36,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Allow for this session" for unsafe tools, renders fullscreen diffs
   edge-to-edge, and caches diffs asynchronously; steer overlay now has a
   visible cursor and line-editing keys.
+- TUI input fixes: `Shift+Tab` plan-mode toggle no longer double-toggles;
+  default newline bindings now include `Shift+Enter` and `Ctrl+J`;
+  slash-command selection auto-submits argument-free commands;
+  completion popups support `PageUp`/`PageDown` scrolling; `@`-mention
+  insertion appends a trailing space.
+- TUI message and viewport rendering: assistant markdown now respects panel
+  width; image `ContentParts` render as placeholders; viewport scroll indicator
+  is rendered on a dedicated status line; raw mode wraps long lines; text uses
+  soft word wrapping; streaming assistant messages append a cursor indicator;
+  tool-call arguments are pretty-printed via `encoding/json`.
+- Sessions picker: cross-directory resume hint now uses `--session` instead of
+  the non-existent `--resume`; picker width is enforced and footer text is
+  truncated to fit; display-width-aware truncation handles CJK runes; theme
+  integration uses semantic styles from `internal/tui/styles`.
+- Footer `YOLO` badge now uses the warning color instead of error red.
+- Footer context percentage is clamped to `100%+` with an overflow indicator.
+- Welcome panel truncates long directory/session/model values.
+- Activity panel respects panel width and truncates long tool-output lines.
+- Theme loader: custom theme paths are confined to `configDir/themes/` to
+  prevent directory traversal; partial custom themes load with dark-theme
+  defaults for missing colors; user-message foreground/border are now
+  theme-driven instead of hardcoded.
+- Glamour markdown style falls back to `"dark"` for unknown custom theme names.
+
+### Fixed
+
+- Plain-text clipboard pastes were silently dropped when they produced a
+  `ContentPartText` with an empty attachment path.
+- `Tab`/`Shift+Tab` could not navigate completion popups in the integrated TUI.
+- Configurable keybindings are now consistently applied across handlers and the
+  help overlay via `effectiveKeybindings()` defaults.
+- Duplicate `enter` entries in the help overlay are now disambiguated by focus.
 
 ## [0.6.0] - 2026-06-17
 
