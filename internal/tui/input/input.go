@@ -882,11 +882,11 @@ func (m *Model) mentionCompletionView() string {
 		end = len(m.mention.candidates)
 	}
 	for i := offset; i < end; i++ {
-		prefix := "  "
+		line := "  " + m.mention.candidates[i]
 		if i == m.mention.selected {
-			prefix = "> "
+			line = m.styles.CompletionSelected.Render("> " + m.mention.candidates[i])
 		}
-		b.WriteString(prefix + m.mention.candidates[i] + "\n")
+		b.WriteString(line + "\n")
 	}
 	if remaining := len(m.mention.candidates) - end; remaining > 0 {
 		fmt.Fprintf(&b, "  … %d more\n", remaining)
@@ -913,15 +913,18 @@ func (m *Model) slashCompletionView() string {
 		end = len(m.slash.candidates)
 	}
 	for i := offset; i < end; i++ {
-		prefix := "  "
-		if i == m.slash.selected {
-			prefix = "> "
-		}
 		c := m.slash.candidates[i]
-		line1 := prefix + c.Name
+		selected := i == m.slash.selected
+		line1 := "> " + c.Name
 		line2 := "    " + c.Description
-		b.WriteString(m.styles.SlashCommandName.Render(line1) + "\n")
-		b.WriteString(m.styles.SlashCommandDesc.Render(line2) + "\n")
+		if selected {
+			b.WriteString(m.styles.CompletionSelected.Render(line1) + "\n")
+			b.WriteString(m.styles.CompletionSelected.Render(line2) + "\n")
+		} else {
+			line1 = "  " + c.Name
+			b.WriteString(m.styles.SlashCommandName.Render(line1) + "\n")
+			b.WriteString(m.styles.SlashCommandDesc.Render(line2) + "\n")
+		}
 	}
 	if remaining := len(m.slash.candidates) - end; remaining > 0 {
 		fmt.Fprintf(&b, "  … %d more\n", remaining)
@@ -939,9 +942,7 @@ func (m *Model) updateStyles() {
 	}
 	s := m.textarea.Styles()
 	s.Focused.CursorLine = lipgloss.NewStyle()
-	s.Focused.Base = lipgloss.NewStyle().
-		Background(m.styles.Theme.InputBg).
-		Foreground(m.styles.Theme.Foreground)
+	s.Focused.Base = m.styles.InputBoxFocused
 	s.Blurred.Base = lipgloss.NewStyle().
 		Background(m.styles.Theme.InputBg).
 		Foreground(m.styles.Theme.Muted)
@@ -1083,5 +1084,5 @@ func (m *Model) attachmentView() string {
 		}
 		b.WriteString("📎 " + name)
 	}
-	return lipgloss.NewStyle().Foreground(m.styles.Theme.Muted).Render(b.String())
+	return m.styles.Attachment.Render(b.String())
 }

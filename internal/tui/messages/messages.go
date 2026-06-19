@@ -504,7 +504,7 @@ func safeGlamourRender(content, theme string, width int) (rendered string) {
 	if c.r == nil {
 		var err error
 		c.r, err = glamour.NewTermRenderer(
-			glamour.WithStandardStyle(theme),
+			glamour.WithStandardStyle(glamourStyle(theme)),
 			glamour.WithWordWrap(width),
 		)
 		if err != nil {
@@ -540,6 +540,19 @@ func wordWrap(s string, width int) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// glamourStyle maps a kimi-lite theme name to a glamour built-in style.
+// Custom theme names fall back to "dark" so markdown rendering doesn't degrade.
+func glamourStyle(theme string) string {
+	switch theme {
+	case "dark":
+		return "dark"
+	case "light":
+		return "light"
+	default:
+		return "dark"
+	}
 }
 
 func max(a, b int) int {

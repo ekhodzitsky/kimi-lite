@@ -5,13 +5,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 )
+
+// ThemeValidationError is returned when a custom theme is missing required
+// colors. Missing contains the JSON keys that were absent or empty.
+type ThemeValidationError struct {
+	Missing []string
+}
+
+// Error returns a human-readable description of the missing theme keys.
+func (e *ThemeValidationError) Error() string {
+	return fmt.Sprintf("theme missing required colors: %s", strings.Join(e.Missing, ", "))
+}
 
 // LoadTheme loads a theme by name.
 // If name is "dark" or "" it returns the built-in dark theme.
 // If name is "light" it returns the built-in light theme.
-// Otherwise it tries to load <configDir>/themes/<name>.json, or the file at
-// name if it is an absolute path.
+// Otherwise it tries to load <configDir>/themes/<name>.json. Absolute paths
+// are accepted only when they resolve inside the same themes directory.
 func LoadTheme(name, configDir string) (*Theme, error) {
 	switch name {
 	case "dark", "":
@@ -20,13 +33,19 @@ func LoadTheme(name, configDir string) (*Theme, error) {
 		return &lightTheme, nil
 	}
 
+	themesDir := filepath.Join(configDir, "themes")
 	path := name
 	if !filepath.IsAbs(name) {
-		path = filepath.Join(configDir, "themes", name+".json")
+		path = filepath.Join(themesDir, name+".json")
 	}
 
 	path = filepath.Clean(path)
-	data, err := os.ReadFile(path) // #nosec G304
+	themesDir = filepath.Clean(themesDir)
+	if !isWithinDir(path, themesDir) {
+		return nil, fmt.Errorf("theme path %q escapes themes directory %q", path, themesDir)
+	}
+
+	data, err := os.ReadFile(path) // #nosec G304 - path validated above
 	if err != nil {
 		return nil, fmt.Errorf("read theme %q: %w", path, err)
 	}
@@ -35,8 +54,51 @@ func LoadTheme(name, configDir string) (*Theme, error) {
 	if err := json.Unmarshal(data, &t); err != nil {
 		return nil, fmt.Errorf("parse theme %q: %w", path, err)
 	}
+
+	// Backward-compatible defaults for optional fields introduced after the
+	// initial theme format.
+	setThemeDefaults(&t)
+
+	if err := validateTheme(&t); err != nil {
+		return nil, fmt.Errorf("validate theme %q: %w", path, err)
+	}
+
 	if t.Name == "" {
 		t.Name = name
 	}
 	return &t, nil
+}
+
+// isWithinDir reports whether path is equal to dir or contained within it.
+func isWithinDir(path, dir string) bool {
+	if path == dir {
+		return true
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(path, dir+sep)
+}
+
+// validateTheme returns a structured error listing any required colors that are
+// missing or empty.
+func validateTheme(t *Theme) error {
+	v := reflect.ValueOf(t).Elem()
+	var missing []string
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Type().Field(i)
+		if f.Type != reflect.TypeOf(Color("")) {
+			continue
+		}
+		tag := f.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		key := strings.Split(tag, ",")[0]
+		if v.Field(i).String() == "" {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return &ThemeValidationError{Missing: missing}
+	}
+	return nil
 }

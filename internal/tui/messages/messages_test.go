@@ -2,6 +2,7 @@ package messages
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -603,11 +604,13 @@ func TestSetRawModeLocked_NoOp(t *testing.T) {
 func TestSafeGlamourRender_BadCacheEntry(t *testing.T) {
 	// Not parallel because it mutates the package-level rendererCache.
 	theme := "bad-cache-entry-theme-unique"
-	rendererCache.Store(theme, "not-a-cached-renderer")
-	defer rendererCache.Delete(theme)
+	width := 80
+	key := fmt.Sprintf("%s:%d", theme, width)
+	rendererCache.Store(key, "not-a-cached-renderer")
+	defer rendererCache.Delete(key)
 
 	content := "# hello\n"
-	got := safeGlamourRender(content, theme, 80)
+	got := safeGlamourRender(content, theme, width)
 	if got != content {
 		t.Errorf("safeGlamourRender with bad cache entry = %q, want raw content %q", got, content)
 	}
@@ -720,16 +723,18 @@ func TestToolCallCacheInvalidation(t *testing.T) {
 	}
 }
 
-func TestSafeGlamourRender_FallbackOnError(t *testing.T) {
+func TestSafeGlamourRender_CustomThemeDefaultsToDark(t *testing.T) {
 	t.Parallel()
 
 	content := "# hello\n"
-	// glamour cannot be made to panic deterministically, but an invalid theme
-	// forces the renderer-creation error branch and locks in the fallback-to-raw
-	// contract.
-	got := safeGlamourRender(content, "this-theme-does-not-exist-12345", 80)
-	if got != content {
-		t.Errorf("expected raw content fallback, got %q", got)
+	// Custom theme names should map to the dark glamour style so markdown
+	// rendering doesn't silently fall back to raw text.
+	got := safeGlamourRender(content, "my-custom-theme", 80)
+	if got == content {
+		t.Error("custom theme should render with glamour, not fall back to raw content")
+	}
+	if !strings.Contains(got, "hello") {
+		t.Errorf("rendered output should contain content, got %q", got)
 	}
 }
 

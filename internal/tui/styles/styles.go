@@ -38,62 +38,68 @@ func (c *Color) UnmarshalJSON(b []byte) error {
 
 // Theme represents a UI theme with color definitions.
 type Theme struct {
-	Name            string `json:"name"`
-	Background      Color  `json:"background"`
-	Foreground      Color  `json:"foreground"`
-	Primary         Color  `json:"primary"`
-	Secondary       Color  `json:"secondary"`
-	Success         Color  `json:"success"`
-	Warning         Color  `json:"warning"`
-	Error           Color  `json:"error"`
-	Muted           Color  `json:"muted"`
-	Border          Color  `json:"border"`
-	UserBubble      Color  `json:"user_bubble"`
-	AssistantBubble Color  `json:"assistant_bubble"`
-	ToolBubble      Color  `json:"tool_bubble"`
-	StatusBarBg     Color  `json:"status_bar_bg"`
-	InputBg         Color  `json:"input_bg"`
-	Highlight       Color  `json:"highlight"`
+	Name              string `json:"name"`
+	Background        Color  `json:"background"`
+	Foreground        Color  `json:"foreground"`
+	Primary           Color  `json:"primary"`
+	Secondary         Color  `json:"secondary"`
+	Success           Color  `json:"success"`
+	Warning           Color  `json:"warning"`
+	Error             Color  `json:"error"`
+	Muted             Color  `json:"muted"`
+	Border            Color  `json:"border"`
+	UserBubble        Color  `json:"user_bubble"`
+	AssistantBubble   Color  `json:"assistant_bubble"`
+	ToolBubble        Color  `json:"tool_bubble"`
+	StatusBarBg       Color  `json:"status_bar_bg"`
+	InputBg           Color  `json:"input_bg"`
+	Highlight         Color  `json:"highlight"`
+	UserMessageFg     Color  `json:"user_message_fg"`
+	UserMessageBorder Color  `json:"user_message_border"`
 }
 
 // darkTheme is the default dark theme.
 var darkTheme = Theme{
-	Name:            "dark",
-	Background:      Color("#1a1a1a"),
-	Foreground:      Color("#E0E0E0"),
-	Primary:         Color("#4FA8FF"),
-	Secondary:       Color("#5BC0BE"),
-	Success:         Color("#4EC87E"),
-	Warning:         Color("#E8A838"),
-	Error:           Color("#E85454"),
-	Muted:           Color("#6B6B6B"),
-	Border:          Color("#5A5A5A"),
-	UserBubble:      Color("#2a2a2a"),
-	AssistantBubble: Color("#1a1a1a"),
-	ToolBubble:      Color("#333333"),
-	StatusBarBg:     Color("#111111"),
-	InputBg:         Color("#262626"),
-	Highlight:       Color("#4FA8FF"),
+	Name:              "dark",
+	Background:        Color("#1a1a1a"),
+	Foreground:        Color("#E0E0E0"),
+	Primary:           Color("#4FA8FF"),
+	Secondary:         Color("#5BC0BE"),
+	Success:           Color("#4EC87E"),
+	Warning:           Color("#E8A838"),
+	Error:             Color("#E85454"),
+	Muted:             Color("#6B6B6B"),
+	Border:            Color("#5A5A5A"),
+	UserBubble:        Color("#2a2a2a"),
+	AssistantBubble:   Color("#1a1a1a"),
+	ToolBubble:        Color("#333333"),
+	StatusBarBg:       Color("#111111"),
+	InputBg:           Color("#262626"),
+	Highlight:         Color("#4FA8FF"),
+	UserMessageFg:     Color("#FFCB6B"),
+	UserMessageBorder: Color("#FFCB6B"),
 }
 
 // lightTheme is the light theme.
 var lightTheme = Theme{
-	Name:            "light",
-	Background:      Color("#eff1f5"),
-	Foreground:      Color("#4c4f69"),
-	Primary:         Color("#1e66f5"),
-	Secondary:       Color("#8839ef"),
-	Success:         Color("#40a02b"),
-	Warning:         Color("#df8e1d"),
-	Error:           Color("#d20f39"),
-	Muted:           Color("#8c8fa1"),
-	Border:          Color("#bcc0cc"),
-	UserBubble:      Color("#ccd0da"),
-	AssistantBubble: Color("#eff1f5"),
-	ToolBubble:      Color("#bcc0cc"),
-	StatusBarBg:     Color("#e6e9ef"),
-	InputBg:         Color("#ccd0da"),
-	Highlight:       Color("#1e66f5"),
+	Name:              "light",
+	Background:        Color("#eff1f5"),
+	Foreground:        Color("#4c4f69"),
+	Primary:           Color("#1e66f5"),
+	Secondary:         Color("#8839ef"),
+	Success:           Color("#40a02b"),
+	Warning:           Color("#df8e1d"),
+	Error:             Color("#d20f39"),
+	Muted:             Color("#8c8fa1"),
+	Border:            Color("#bcc0cc"),
+	UserBubble:        Color("#ccd0da"),
+	AssistantBubble:   Color("#eff1f5"),
+	ToolBubble:        Color("#bcc0cc"),
+	StatusBarBg:       Color("#e6e9ef"),
+	InputBg:           Color("#ccd0da"),
+	Highlight:         Color("#1e66f5"),
+	UserMessageFg:     Color("#df8e1d"),
+	UserMessageBorder: Color("#df8e1d"),
 }
 
 // Styles holds all Lipgloss styles for the application.
@@ -140,6 +146,12 @@ type Styles struct {
 	ActivityTool        lipgloss.Style
 	ActivityOutput      lipgloss.Style
 
+	Highlight          lipgloss.Style
+	Attachment         lipgloss.Style
+	SelectedItem       lipgloss.Style
+	CompletionSelected lipgloss.Style
+	InputBoxFocused    lipgloss.Style
+
 	PickerBorder      lipgloss.Style
 	PickerTitle       lipgloss.Style
 	PickerItem        lipgloss.Style
@@ -164,9 +176,20 @@ func New(themeName string) *Styles {
 
 // NewFromTheme creates a Styles instance from an arbitrary Theme.
 func NewFromTheme(t *Theme) *Styles {
+	setThemeDefaults(t)
 	s := &Styles{Theme: *t}
 	s.init()
 	return s
+}
+
+// setThemeDefaults fills in optional theme fields for backward compatibility.
+func setThemeDefaults(t *Theme) {
+	if t.UserMessageFg == "" {
+		t.UserMessageFg = t.Primary
+	}
+	if t.UserMessageBorder == "" {
+		t.UserMessageBorder = t.Border
+	}
 }
 
 func (s *Styles) init() {
@@ -174,13 +197,13 @@ func (s *Styles) init() {
 
 	s.UserMessage = lipgloss.NewStyle().
 		Background(t.UserBubble).
-		Foreground(lipgloss.Color("#FFCB6B")).
+		Foreground(t.UserMessageFg).
 		Padding(0, 1).
 		MarginLeft(1).
 		MarginRight(4).
 		MarginBottom(1).
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#FFCB6B"))
+		BorderForeground(t.UserMessageBorder)
 
 	s.AssistantMessage = lipgloss.NewStyle().
 		Background(t.AssistantBubble).
@@ -303,13 +326,9 @@ func (s *Styles) init() {
 	s.ModeBadgeAuto = lipgloss.NewStyle().Background(t.Primary).Foreground(t.Background).Bold(true)
 	s.ModeBadgeManual = lipgloss.NewStyle().Background(t.Muted).Foreground(t.Background).Bold(true)
 
-	borderColor := t.Border
-	if t.Name == "light" {
-		borderColor = Color("#bcc0cc")
-	}
 	s.WelcomeBox = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
+		BorderForeground(t.Border).
 		Background(t.Background).
 		Foreground(t.Foreground).
 		Padding(1, 2).
@@ -331,6 +350,22 @@ func (s *Styles) init() {
 		Background(t.Background).
 		Foreground(t.Muted).
 		MarginLeft(2)
+
+	s.Highlight = lipgloss.NewStyle().
+		Foreground(t.Highlight).
+		Bold(true)
+	s.Attachment = lipgloss.NewStyle().
+		Foreground(t.Primary).
+		Background(t.Background)
+	s.SelectedItem = lipgloss.NewStyle().
+		Background(t.Highlight).
+		Foreground(t.Background)
+	s.CompletionSelected = lipgloss.NewStyle().
+		Background(t.Highlight).
+		Foreground(t.Background)
+	s.InputBoxFocused = lipgloss.NewStyle().
+		Background(t.InputBg).
+		Foreground(t.Foreground)
 
 	s.PickerBorder = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

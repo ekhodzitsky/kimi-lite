@@ -144,10 +144,10 @@ func (m *Model) View() tea.View {
 	}
 	visible := strings.Join(lines[m.offset:end], "\n")
 	if m.offset > 0 {
-		visible = "▲ more\n" + visible
+		visible = m.styles.ScrollIndicator.Render("▲ more") + "\n" + visible
 	}
 	if end < len(lines) {
-		visible = visible + "\n▼ more"
+		visible = visible + "\n" + m.styles.ScrollIndicator.Render("▼ more")
 	}
 	return tea.NewView(m.styles.HelpOverlay.Width(innerW).Height(innerH).Render(visible))
 }
