@@ -242,3 +242,219 @@ func contains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestInsertEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		initial  string
+		cursor   int
+		text     string
+		want     string
+		wantCurs int
+	}{
+		{"insert at negative cursor", "abc", -1, "x", "xabc", 1},
+		{"insert at cursor beyond end", "abc", 10, "x", "abcx", 4},
+		{"insert in middle", "abc", 2, "XY", "abXYc", 4},
+		{"insert multi-byte runes", "a", 1, "日", "a日", 2},
+		{"insert empty", "abc", 1, "", "abc", 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestSearch()
+			m.query = tc.initial
+			m.cursor = tc.cursor
+			m.insert(tc.text)
+			if m.query != tc.want {
+				t.Errorf("query = %q, want %q", m.query, tc.want)
+			}
+			if m.cursor != tc.wantCurs {
+				t.Errorf("cursor = %d, want %d", m.cursor, tc.wantCurs)
+			}
+		})
+	}
+}
+
+func TestDeleteRuneBackwardEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		initial  string
+		cursor   int
+		want     string
+		wantCurs int
+	}{
+		{"cursor at start", "abc", 0, "abc", 0},
+		{"cursor beyond end", "abc", 10, "abc", 10},
+		{"delete multi-byte", "a日b", 2, "ab", 1},
+		{"delete at end", "abc", 3, "ab", 2},
+		{"empty query", "", 0, "", 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestSearch()
+			m.query = tc.initial
+			m.cursor = tc.cursor
+			m.deleteRuneBackward()
+			if m.query != tc.want {
+				t.Errorf("query = %q, want %q", m.query, tc.want)
+			}
+			if m.cursor != tc.wantCurs {
+				t.Errorf("cursor = %d, want %d", m.cursor, tc.wantCurs)
+			}
+		})
+	}
+}
+
+func TestDeleteWordBackwardEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		initial  string
+		cursor   int
+		want     string
+		wantCurs int
+	}{
+		{"cursor at start", "hello world", 0, "hello world", 0},
+		{"cursor beyond end", "hello world", 50, "hello world", 50},
+		{"first word with trailing spaces", "hello   ", 8, "", 0},
+		{"first word with leading spaces", "   hello", 8, "   ", 3},
+		{"delete last word keeps spaces", "hello world", 11, "hello ", 6},
+		{"delete last word with multiple spaces", "hello   world", 13, "hello   ", 8},
+		{"delete from middle of word", "hello world", 7, "hello orld", 6},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestSearch()
+			m.query = tc.initial
+			m.cursor = tc.cursor
+			m.deleteWordBackward()
+			if m.query != tc.want {
+				t.Errorf("query = %q, want %q", m.query, tc.want)
+			}
+			if m.cursor != tc.wantCurs {
+				t.Errorf("cursor = %d, want %d", m.cursor, tc.wantCurs)
+			}
+		})
+	}
+}
+
+func TestAppendableKeyText(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"empty text", "", ""},
+		{"regular ascii", "hi", "hi"},
+		{"multi-byte rune", "日", "日"},
+		{"control char", "\x01", ""},
+		{"newline", "\n", ""},
+		{"mixed control", "a\x01b", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := appendableKeyText(tea.KeyPressMsg{Text: tc.text})
+			if got != tc.want {
+				t.Errorf("appendableKeyText() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestViewTruncationNarrowWidth(t *testing.T) {
+	t.Parallel()
+
+	m := newTestSearch()
+	m.Open()
+	m.SetSize(2)
+	m.query = "hello world"
+	m.cursor = len([]rune(m.query))
+
+	view := m.View().Content
+	if view == "" {
+		t.Error("narrow View should not be empty")
+	}
+}
+
+func TestUpdateWrapperAndInit(t *testing.T) {
+	t.Parallel()
+
+	m := newTestSearch()
+	if m.Init() != nil {
+		t.Error("Init() should return nil")
+	}
+
+	m.Open()
+	model, cmd := m.Update(tea.KeyPressMsg{Text: "x"})
+	if model != m {
+		t.Error("Update() should return the same model")
+	}
+	if cmd == nil {
+		t.Fatal("Update() should return a command for appendable key")
+	}
+	if _, ok := cmd().(QueryChangedMsg); !ok {
+		t.Errorf("expected QueryChangedMsg, got %T", cmd())
+	}
+
+	// Non-key messages are ignored.
+	_, cmd = m.Update(struct{ kind int }{kind: 42})
+	if cmd != nil {
+		t.Error("Update() should return nil for unknown messages")
+	}
+
+	// Messages are ignored when the overlay is closed.
+	m.Close()
+	_, cmd = m.Update(tea.KeyPressMsg{Text: "x"})
+	if cmd != nil {
+		t.Error("Update() should return nil when closed")
+	}
+}
+
+func TestToggleCaseSensitiveDirect(t *testing.T) {
+	t.Parallel()
+
+	m := newTestSearch()
+	m.ToggleCaseSensitive()
+	if !m.CaseSensitive() {
+		t.Error("ToggleCaseSensitive() should enable case sensitivity")
+	}
+	m.ToggleCaseSensitive()
+	if m.CaseSensitive() {
+		t.Error("ToggleCaseSensitive() should disable case sensitivity")
+	}
+}
+
+func TestSetMatches(t *testing.T) {
+	t.Parallel()
+
+	m := newTestSearch()
+	m.SetMatches(10, 3)
+	if m.MatchCount() != 10 {
+		t.Errorf("MatchCount = %d, want 10", m.MatchCount())
+	}
+	if m.MatchIndex() != 3 {
+		t.Errorf("MatchIndex = %d, want 3", m.MatchIndex())
+	}
+
+	m.SetMatches(0, -1)
+	if m.MatchCount() != 0 {
+		t.Errorf("MatchCount = %d, want 0", m.MatchCount())
+	}
+	if m.MatchIndex() != -1 {
+		t.Errorf("MatchIndex = %d, want -1", m.MatchIndex())
+	}
+}
