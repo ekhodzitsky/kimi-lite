@@ -216,9 +216,10 @@ func TestScrollIndicatorPreservesLastLine(t *testing.T) {
 
 	st := styles.New("dark")
 	m := New(st)
-	m.SetSize(80, 5)
-	// With height 5, GotoTop shows the first 5 lines; "VISIBLE_BOTTOM" is the
-	// last rendered line and must not be overwritten by the scroll indicator.
+	m.SetSize(80, 6)
+	// With height 6, the indicator occupies a dedicated bottom line, leaving
+	// height-1 = 5 content lines. "VISIBLE_BOTTOM" must remain visible in the
+	// content area rather than being overwritten.
 	m.SetContent("line1\nline2\nline3\nline4\nVISIBLE_BOTTOM\nline6\nline7\nline8")
 	m.GotoTop()
 
@@ -228,6 +229,29 @@ func TestScrollIndicatorPreservesLastLine(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "▼") {
 		t.Error("View should contain scroll indicator when not at bottom")
+	}
+}
+
+func TestScrollIndicatorRightAlignedOnStatusLine(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(40, 5)
+	m.SetContent("line1\nline2\nline3\nline4\nline5\nline6")
+	m.GotoTop()
+
+	rendered := ansi.Strip(m.View().Content)
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		t.Fatal("View should have at least one line")
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "▼") {
+		t.Fatalf("last line %q should contain scroll indicator", last)
+	}
+	if strings.HasPrefix(last, "▼") {
+		t.Fatalf("scroll indicator should be right-aligned, got %q", last)
 	}
 }
 

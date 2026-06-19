@@ -7,6 +7,7 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 )
@@ -108,18 +109,34 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 // View implements tea.Model.
 func (m *Model) View() tea.View {
 	content := m.vp.View()
-	if m.scrollIndicatorVisible() {
-		indicator := m.scrollIndicator()
-		lines := strings.Split(content, "\n")
-		if len(lines) > 0 {
-			last := len(lines) - 1
-			// Append the indicator to the last line instead of replacing it,
-			// so the final line of content remains visible.
-			lines[last] = lines[last] + " " + indicator
-		}
-		content = strings.Join(lines, "\n")
+	if !m.scrollIndicatorVisible() || m.height <= 1 {
+		return tea.NewView(content)
 	}
-	return tea.NewView(content)
+
+	indicator := m.scrollIndicator()
+	indicatorWidth := ansi.StringWidth(indicator)
+	lines := strings.Split(content, "\n")
+
+	// Reserve one line at the bottom for the scroll indicator. The remaining
+	// height-1 lines are used for content so the indicator never overwrites it.
+	contentLines := m.height - 1
+	if len(lines) > contentLines {
+		lines = lines[:contentLines]
+	} else if len(lines) < contentLines {
+		lines = append(lines, make([]string, contentLines-len(lines))...)
+	}
+
+	padding := m.width - indicatorWidth
+	if padding < 0 {
+		padding = 0
+	}
+	statusLine := strings.Repeat(" ", padding) + indicator
+	if ansi.StringWidth(statusLine) > m.width {
+		statusLine = ansi.Cut(statusLine, 0, m.width)
+	}
+
+	lines = append(lines, statusLine)
+	return tea.NewView(strings.Join(lines, "\n"))
 }
 
 // SetSize sets the viewport dimensions.
