@@ -287,6 +287,58 @@ func TestApprovalDiffComputed_IgnoresStaleRequestID(t *testing.T) {
 	}
 }
 
+func TestApprovalFullscreen_PendingClearedWhenCallAdvances(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "file.txt"), []byte("old content\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: tmp}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	calls := []api.ToolCall{
+		{ID: "1", Name: "write_file", Arguments: `{"path":"file.txt","content":"new content\n"}`},
+		{ID: "2", Name: "read_file", Arguments: `{"path":"file.txt"}`},
+	}
+	updated, _ := m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+	model := updated.(*Model)
+
+	// Request fullscreen diff for the first call; this leaves a pending flag.
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model = updated.(*Model)
+	if model.approvalFullscreenPendingReqID != 1 {
+		t.Fatalf("pending reqID = %d, want 1", model.approvalFullscreenPendingReqID)
+	}
+
+	// Approve the first call before its diff command returns, advancing to call 2.
+	updated, _ = model.Update(ApprovalResponseMsg{Decision: api.ApprovalYes, CallID: "1"})
+	model = updated.(*Model)
+	if model.approval.currentIndex() != 1 {
+		t.Fatalf("expected controller to advance to second call")
+	}
+
+	// Now deliver the diff for the first (no longer current) call.
+	computed := runApprovalDiffCmd(t, cmd)
+	updated, _ = model.Update(computed)
+	model = updated.(*Model)
+
+	if model.approvalFullscreen {
+		t.Error("expected fullscreen to stay closed for stale call ID")
+	}
+	if model.approvalFullscreenPendingReqID != 0 {
+		t.Errorf("pending reqID = %d, want 0", model.approvalFullscreenPendingReqID)
+	}
+	if model.approvalDiffCallID != "" {
+		t.Errorf("expected cached diff to remain empty, got %q", model.approvalDiffCallID)
+	}
+}
+
 func TestApprovalFullscreenDiff_EdgeToEdge(t *testing.T) {
 	t.Parallel()
 

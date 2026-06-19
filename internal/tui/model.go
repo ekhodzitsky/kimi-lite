@@ -527,14 +527,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case approvalDiffComputedMsg:
 		m.mu.Lock()
 		if msg.RequestID == m.approval.requestID() {
+			callMatches := false
 			if call, ok := m.approval.currentCall(); ok && call.ID == msg.CallID {
 				m.approvalDiffCallID = msg.CallID
 				m.approvalDiffContent = msg.Diff
 				m.approvalDiffErr = msg.Err
+				callMatches = true
 			}
 			if m.approvalFullscreenPendingReqID == msg.RequestID {
 				m.approvalFullscreenPendingReqID = 0
-				if msg.Err == nil && msg.Diff != "" {
+				if callMatches && msg.Err == nil && msg.Diff != "" {
 					m.approvalFullscreen = true
 				}
 			}
