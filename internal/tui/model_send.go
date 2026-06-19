@@ -41,7 +41,9 @@ func (m *Model) handleSend(content string, parts []api.ContentPart) []tea.Cmd {
 
 	m.toolCount = 0
 	m.statusText = ""
-	m.addMessage(msgcomp.NewUserMessage(content, m.styles))
+	userMsg := msgcomp.NewUserMessage(content, m.styles)
+	userMsg.ContentParts = parts
+	m.addMessage(userMsg)
 	m.setState(api.TurnThinking)
 
 	// Capture service references under lock; the call itself runs asynchronously.

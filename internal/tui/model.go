@@ -999,10 +999,14 @@ func (m *Model) addMessage(msg *msgcomp.Message) {
 func (m *Model) appendSessionMessage(msg api.Message) {
 	switch msg.Role {
 	case api.RoleUser:
-		m.addMessage(msgcomp.NewUserMessage(msg.Content, m.styles))
+		userMsg := msgcomp.NewUserMessage(msg.Content, m.styles)
+		userMsg.ContentParts = msg.ContentParts
+		m.addMessage(userMsg)
 	case api.RoleAssistant:
-		if msg.Content != "" {
-			m.addMessage(msgcomp.NewAssistantMessage(msg.Content, m.styles))
+		if msg.Content != "" || len(msg.ContentParts) > 0 {
+			assistantMsg := msgcomp.NewAssistantMessage(msg.Content, m.styles)
+			assistantMsg.ContentParts = msg.ContentParts
+			m.addMessage(assistantMsg)
 		}
 		for _, tc := range msg.ToolCalls {
 			m.addMessage(msgcomp.NewToolCallMessage(tc, m.styles))
