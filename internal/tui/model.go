@@ -333,7 +333,7 @@ func (m *Model) helpData() help.Data {
 	return help.Data{
 		Shortcuts: []help.Shortcut{
 			{Keys: "enter", Description: "Send message"},
-			{Keys: "alt+enter", Description: "Insert newline"},
+			{Keys: "alt+enter/shift+enter/ctrl+j", Description: "Insert newline"},
 			{Keys: "tab", Description: "Switch focus"},
 			{Keys: "shift+tab", Description: "Toggle plan mode"},
 			{Keys: "ctrl+g", Description: "External editor"},
@@ -626,8 +626,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateFooter()
 	}
 
-	// Update focused child component for KeyMsg; all children for other messages
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+	// Update focused child component for KeyPressMsg; all children for other messages
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		keyStr := keyMsg.String()
 		isTab := keyStr == m.config.Keybindings.FocusNext || keyStr == m.config.Keybindings.FocusPrev
 		if !isTab {

@@ -193,6 +193,29 @@ func TestReadClipboardAttachmentsCopiesFileToTemp(t *testing.T) {
 	}
 }
 
+func TestPasteMsgPlainTextInsertsIntoValue(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st, DefaultKeyMap(), 100)
+	m.SetWidth(80)
+	m.SetValue("before ")
+
+	_, cmd := m.Update(PasteMsg{Parts: []api.ContentPart{
+		{Type: api.ContentPartText, Text: "pasted text"},
+	}})
+	if cmd != nil {
+		t.Error("PasteMsg should not produce a command")
+	}
+
+	if !strings.Contains(m.Value(), "pasted text") {
+		t.Errorf("value = %q, should contain pasted text", m.Value())
+	}
+	if len(m.Attachments()) != 0 {
+		t.Error("plain text paste should not create an empty-path attachment")
+	}
+}
+
 func TestResetClearsAttachments(t *testing.T) {
 	t.Parallel()
 

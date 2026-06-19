@@ -459,7 +459,7 @@ func TestMentionInsertCandidate(t *testing.T) {
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	inp := updated.(*Model)
 
-	want := "@cmd/kimi-lite/main.go"
+	want := "@cmd/kimi-lite/main.go "
 	if inp.Value() != want {
 		t.Errorf("value = %q, want %q", inp.Value(), want)
 	}
@@ -487,7 +487,7 @@ func TestMentionNavigateAndInsert(t *testing.T) {
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	inp := updated.(*Model)
 
-	want := "@cmd/kimi-lite/root.go"
+	want := "@cmd/kimi-lite/root.go "
 	if inp.Value() != want {
 		t.Errorf("value = %q, want %q", inp.Value(), want)
 	}
@@ -576,7 +576,7 @@ func TestMentionMultiByte(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	inp := updated.(*Model)
-	want := "prefix @docs/日本語.go"
+	want := "prefix @docs/日本語.go "
 	if inp.Value() != want {
 		t.Errorf("value = %q, want %q", inp.Value(), want)
 	}
@@ -625,11 +625,21 @@ func TestSlashInsertCandidate(t *testing.T) {
 	m.SetValue("/com")
 	m.detectSlash()
 
-	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	inp := updated.(*Model)
-	want := "/compact "
-	if inp.Value() != want {
-		t.Errorf("value = %q, want %q", inp.Value(), want)
+
+	if cmd == nil {
+		t.Fatal("expected a send command after slash selection")
+	}
+	msg, ok := cmd().(SendMsg)
+	if !ok {
+		t.Fatalf("expected SendMsg, got %T", cmd())
+	}
+	if msg.Content != "/compact" {
+		t.Errorf("SendMsg.Content = %q, want %q", msg.Content, "/compact")
+	}
+	if inp.Value() != "" {
+		t.Errorf("value = %q, want empty after auto-submit", inp.Value())
 	}
 	if inp.Completing() {
 		t.Error("completion should close after insertion")
@@ -647,12 +657,21 @@ func TestSlashNavigateAndInsert(t *testing.T) {
 	m.detectSlash()
 
 	m.UpdateMsg(tea.KeyPressMsg{Code: tea.KeyTab})
-	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	inp := updated.(*Model)
 
-	want := "/clear "
-	if inp.Value() != want {
-		t.Errorf("value = %q, want %q", inp.Value(), want)
+	if cmd == nil {
+		t.Fatal("expected a send command after slash selection")
+	}
+	msg, ok := cmd().(SendMsg)
+	if !ok {
+		t.Fatalf("expected SendMsg, got %T", cmd())
+	}
+	if msg.Content != "/clear" {
+		t.Errorf("SendMsg.Content = %q, want %q", msg.Content, "/clear")
+	}
+	if inp.Value() != "" {
+		t.Errorf("value = %q, want empty after auto-submit", inp.Value())
 	}
 }
 
@@ -755,23 +774,17 @@ func TestPlanModeShiftTab(t *testing.T) {
 	m := New(st, DefaultKeyMap(), 10)
 	m.SetWidth(80)
 
+	// The input component no longer owns Shift+Tab plan-mode toggling; that is
+	// handled by the root model. The input should ignore Shift+Tab so it is not
+	// double-toggled.
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if cmd != nil {
 		t.Error("shift+tab should not produce a command")
 	}
 
 	inp := updated.(*Model)
-	if !inp.PlanMode() {
-		t.Error("shift+tab should enable plan mode")
-	}
-
-	updated, cmd = inp.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	if cmd != nil {
-		t.Error("second shift+tab should not produce a command")
-	}
-	inp = updated.(*Model)
 	if inp.PlanMode() {
-		t.Error("second shift+tab should disable plan mode")
+		t.Error("input should not toggle plan mode on shift+tab")
 	}
 }
 

@@ -20,7 +20,10 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
-const inputWidthPadding = 4
+const (
+	inputWidthPadding = 4
+	popupMaxItems     = 8
+)
 
 // SendMsg is emitted when the user wants to send the current input.
 type SendMsg struct {
@@ -54,8 +57,8 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("enter", "send"),
 		),
 		Newline: key.NewBinding(
-			key.WithKeys("alt+enter"),
-			key.WithHelp("alt+enter", "newline"),
+			key.WithKeys("alt+enter", "shift+enter", "ctrl+j"),
+			key.WithHelp("alt+enter/shift+enter/ctrl+j", "newline"),
 		),
 		ExternalEditor: key.NewBinding(
 			key.WithKeys("ctrl+g"),
@@ -112,6 +115,7 @@ type mentionState struct {
 	query      string   // lower-cased text after '@'
 	candidates []string // matching candidate paths
 	selected   int      // index of the selected candidate
+	scroll     int      // index of the first visible candidate
 }
 
 // slashState tracks an active /-command completion session.
@@ -121,6 +125,49 @@ type slashState struct {
 	query      string         // lower-cased text after '/'
 	candidates []SlashCommand // matching slash commands
 	selected   int            // index of the selected candidate
+	scroll     int            // index of the first visible candidate
+}
+
+// clampScroll ensures the selected item is visible and the view stays within
+// the candidate list.
+func (s *mentionState) clampScroll() {
+	if s.selected < s.scroll {
+		s.scroll = s.selected
+	}
+	if s.selected >= s.scroll+popupMaxItems {
+		s.scroll = s.selected - popupMaxItems + 1
+	}
+	maxScroll := len(s.candidates) - popupMaxItems
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if s.scroll > maxScroll {
+		s.scroll = maxScroll
+	}
+	if s.scroll < 0 {
+		s.scroll = 0
+	}
+}
+
+// clampScroll ensures the selected item is visible and the view stays within
+// the candidate list.
+func (s *slashState) clampScroll() {
+	if s.selected < s.scroll {
+		s.scroll = s.selected
+	}
+	if s.selected >= s.scroll+popupMaxItems {
+		s.scroll = s.selected - popupMaxItems + 1
+	}
+	maxScroll := len(s.candidates) - popupMaxItems
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if s.scroll > maxScroll {
+		s.scroll = maxScroll
+	}
+	if s.scroll < 0 {
+		s.scroll = 0
+	}
 }
 
 // Attachment holds a pasted file attachment.
@@ -161,7 +208,7 @@ type Model struct {
 // New creates a new input model.
 func New(st *styles.Styles, keyMap KeyMap, maxHistory int) *Model {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Enter to send, Alt+Enter for newline)"
+	ta.Placeholder = "Type a message... (Enter to send, Alt+Enter/Shift+Enter/Ctrl+J for newline)"
 	ta.ShowLineNumbers = false
 	ta.Focus()
 
@@ -217,13 +264,30 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				m.mention.selected++
 				if m.mention.selected >= len(m.mention.candidates) {
 					m.mention.selected = 0
+					m.mention.scroll = 0
 				}
+				m.mention.clampScroll()
 				return nil
 			case "shift+tab", "up":
 				m.mention.selected--
 				if m.mention.selected < 0 {
 					m.mention.selected = len(m.mention.candidates) - 1
 				}
+				m.mention.clampScroll()
+				return nil
+			case "pgdown":
+				m.mention.selected += popupMaxItems
+				if m.mention.selected >= len(m.mention.candidates) {
+					m.mention.selected = len(m.mention.candidates) - 1
+				}
+				m.mention.clampScroll()
+				return nil
+			case "pgup":
+				m.mention.selected -= popupMaxItems
+				if m.mention.selected < 0 {
+					m.mention.selected = 0
+				}
+				m.mention.clampScroll()
 				return nil
 			case "enter":
 				m.insertCandidate()
@@ -241,27 +305,38 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 				m.slash.selected++
 				if m.slash.selected >= len(m.slash.candidates) {
 					m.slash.selected = 0
+					m.slash.scroll = 0
 				}
+				m.slash.clampScroll()
 				return nil
 			case "shift+tab", "up":
 				m.slash.selected--
 				if m.slash.selected < 0 {
 					m.slash.selected = len(m.slash.candidates) - 1
 				}
+				m.slash.clampScroll()
+				return nil
+			case "pgdown":
+				m.slash.selected += popupMaxItems
+				if m.slash.selected >= len(m.slash.candidates) {
+					m.slash.selected = len(m.slash.candidates) - 1
+				}
+				m.slash.clampScroll()
+				return nil
+			case "pgup":
+				m.slash.selected -= popupMaxItems
+				if m.slash.selected < 0 {
+					m.slash.selected = 0
+				}
+				m.slash.clampScroll()
 				return nil
 			case "enter":
 				m.insertSlashCandidate()
-				return nil
+				return m.submitCurrentLocked()
 			case "esc", "ctrl+c":
 				m.slash = nil
 				return nil
 			}
-		}
-
-		// Shift+Tab toggles plan mode when no completion popup is active.
-		if msg.String() == "shift+tab" || (msg.Mod == tea.ModShift && msg.Code == tea.KeyTab) {
-			m.planMode = !m.planMode
-			return nil
 		}
 
 		if key.Matches(msg, km.Paste) {
@@ -269,28 +344,7 @@ func (m *Model) UpdateMsg(msg tea.Msg) tea.Cmd {
 		}
 
 		if key.Matches(msg, km.Send) {
-			content := strings.TrimSpace(m.textarea.Value())
-			if content != "" {
-				// De-duplicate consecutive entries.
-				if len(m.history) == 0 || m.history[len(m.history)-1] != content {
-					m.history = append(m.history, content)
-					// Trim oldest entries beyond the cap.
-					if m.maxHistory > 0 && len(m.history) > m.maxHistory {
-						m.history = m.history[len(m.history)-m.maxHistory:]
-					}
-				}
-				m.histIdx = -1
-				m.draft = ""
-				parts := m.attachmentContentParts()
-				m.textarea.Reset()
-				m.mention = nil
-				m.slash = nil
-				m.attachments = nil
-				return func() tea.Msg {
-					return SendMsg{Content: content, ContentParts: parts}
-				}
-			}
-			return nil
+			return m.submitCurrentLocked()
 		}
 
 		if key.Matches(msg, km.Newline) {
@@ -553,6 +607,33 @@ func (m *Model) CloseCompletion() {
 	m.slash = nil
 }
 
+// submitCurrentLocked sends the current input value and clears transient state.
+// The caller must hold m.mu.
+func (m *Model) submitCurrentLocked() tea.Cmd {
+	content := strings.TrimSpace(m.textarea.Value())
+	if content == "" {
+		return nil
+	}
+	// De-duplicate consecutive entries.
+	if len(m.history) == 0 || m.history[len(m.history)-1] != content {
+		m.history = append(m.history, content)
+		// Trim oldest entries beyond the cap.
+		if m.maxHistory > 0 && len(m.history) > m.maxHistory {
+			m.history = m.history[len(m.history)-m.maxHistory:]
+		}
+	}
+	m.histIdx = -1
+	m.draft = ""
+	parts := m.attachmentContentParts()
+	m.textarea.Reset()
+	m.mention = nil
+	m.slash = nil
+	m.attachments = nil
+	return func() tea.Msg {
+		return SendMsg{Content: content, ContentParts: parts}
+	}
+}
+
 // TogglePlanMode toggles plan mode on/off.
 func (m *Model) TogglePlanMode() {
 	m.mu.Lock()
@@ -674,6 +755,7 @@ func (m *Model) detectMention() {
 		query:      query,
 		candidates: candidates,
 		selected:   0,
+		scroll:     0,
 	}
 }
 
@@ -709,7 +791,7 @@ func (m *Model) insertCandidate() {
 		return
 	}
 	value := m.textarea.Value()
-	replacement := "@" + m.mention.candidates[m.mention.selected]
+	replacement := "@" + m.mention.candidates[m.mention.selected] + " "
 	newValue := value[:m.mention.start] + replacement
 	if m.mention.end <= len(value) {
 		newValue += value[m.mention.end:]
@@ -738,6 +820,7 @@ func (m *Model) detectSlash() {
 		query:      query,
 		candidates: candidates,
 		selected:   0,
+		scroll:     0,
 	}
 }
 
@@ -785,16 +868,23 @@ func (m *Model) mentionCompletionView() string {
 		return ""
 	}
 	var b strings.Builder
-	const maxItems = 8
-	for i, c := range m.mention.candidates {
-		if i >= maxItems {
-			break
-		}
+	offset := m.mention.scroll
+	if offset < 0 {
+		offset = 0
+	}
+	end := offset + popupMaxItems
+	if end > len(m.mention.candidates) {
+		end = len(m.mention.candidates)
+	}
+	for i := offset; i < end; i++ {
 		prefix := "  "
 		if i == m.mention.selected {
 			prefix = "> "
 		}
-		b.WriteString(prefix + c + "\n")
+		b.WriteString(prefix + m.mention.candidates[i] + "\n")
+	}
+	if remaining := len(m.mention.candidates) - end; remaining > 0 {
+		fmt.Fprintf(&b, "  … %d more\n", remaining)
 	}
 	content := strings.TrimSuffix(b.String(), "\n")
 	if content == "" {
@@ -809,19 +899,27 @@ func (m *Model) slashCompletionView() string {
 		return ""
 	}
 	var b strings.Builder
-	const maxItems = 8
-	for i, c := range m.slash.candidates {
-		if i >= maxItems {
-			break
-		}
+	offset := m.slash.scroll
+	if offset < 0 {
+		offset = 0
+	}
+	end := offset + popupMaxItems
+	if end > len(m.slash.candidates) {
+		end = len(m.slash.candidates)
+	}
+	for i := offset; i < end; i++ {
 		prefix := "  "
 		if i == m.slash.selected {
 			prefix = "> "
 		}
+		c := m.slash.candidates[i]
 		line1 := prefix + c.Name
 		line2 := "    " + c.Description
 		b.WriteString(m.styles.SlashCommandName.Render(line1) + "\n")
 		b.WriteString(m.styles.SlashCommandDesc.Render(line2) + "\n")
+	}
+	if remaining := len(m.slash.candidates) - end; remaining > 0 {
+		fmt.Fprintf(&b, "  … %d more\n", remaining)
 	}
 	content := strings.TrimSuffix(b.String(), "\n")
 	if content == "" {
@@ -927,7 +1025,9 @@ func (m *Model) addContentPart(part api.ContentPart) {
 			mime := clipboard.MIMEForPath(path)
 			m.attachments = append(m.attachments, Attachment{Path: path, MIMEType: mime})
 		} else {
-			m.attachments = append(m.attachments, Attachment{Path: "", MIMEType: "text/plain"})
+			// Plain text without a file path is pasted directly into the input
+			// so it is not silently dropped.
+			m.textarea.InsertString(part.Text)
 		}
 	}
 }

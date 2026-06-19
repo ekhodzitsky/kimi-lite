@@ -270,10 +270,13 @@ func TestCompletionView(t *testing.T) {
 	for i := range candidates {
 		candidates[i] = string(rune('a'+i)) + ".go"
 	}
-	m.mention = &mentionState{candidates: candidates, selected: 0}
+	m.mention = &mentionState{candidates: candidates, selected: 0, scroll: 0}
 	view := m.completionView()
 	if !strings.Contains(view, "a.go") || strings.Contains(view, "i.go") {
 		t.Errorf("completionView() should render 8 candidates, got %q", view)
+	}
+	if !strings.Contains(view, "… 2 more") {
+		t.Errorf("completionView() should indicate hidden candidates, got %q", view)
 	}
 }
 
@@ -292,16 +295,16 @@ func TestInsertCandidate(t *testing.T) {
 	m.SetFileCandidates([]string{"cmd/main.go"})
 	m.detectMention()
 	m.insertCandidate()
-	if m.Value() != "@cmd/main.go" {
-		t.Errorf("value = %q, want @cmd/main.go", m.Value())
+	if m.Value() != "@cmd/main.go " {
+		t.Errorf("value = %q, want @cmd/main.go ", m.Value())
 	}
 
 	m.SetValue("@cmd")
 	m.detectMention()
 	m.mention.end = 100
 	m.insertCandidate()
-	if m.Value() != "@cmd/main.go" {
-		t.Errorf("value with end beyond length = %q, want @cmd/main.go", m.Value())
+	if m.Value() != "@cmd/main.go " {
+		t.Errorf("value with end beyond length = %q, want @cmd/main.go ", m.Value())
 	}
 }
 
@@ -374,5 +377,107 @@ func TestUpdateMsgPassesToTextarea(t *testing.T) {
 	_ = m.UpdateMsg(tea.WindowSizeMsg{Width: 100, Height: 30})
 	if m.Value() != "hello" {
 		t.Errorf("Value = %q, want %q", m.Value(), "hello")
+	}
+}
+
+func TestNewlineBindings(t *testing.T) {
+	t.Parallel()
+
+	bindings := []tea.KeyPressMsg{
+		{Code: tea.KeyEnter, Mod: tea.ModAlt},
+		{Code: tea.KeyEnter, Mod: tea.ModShift},
+		{Code: 'j', Mod: tea.ModCtrl},
+	}
+
+	for _, key := range bindings {
+		st := styles.New("dark")
+		m := New(st, DefaultKeyMap(), 100)
+		m.SetWidth(80)
+		m.SetValue("line1")
+
+		updated, cmd := m.Update(key)
+		if cmd != nil {
+			t.Errorf("%s should not produce a command", key)
+		}
+		inp := updated.(*Model)
+		if !strings.Contains(inp.Value(), "\n") {
+			t.Errorf("%s should insert a newline character, got %q", key, inp.Value())
+		}
+	}
+}
+
+func TestCompletionPopupScrollAndPageKeys(t *testing.T) {
+	t.Parallel()
+
+	m := New(styles.New("dark"), DefaultKeyMap(), 100)
+	m.SetWidth(80)
+
+	candidates := make([]string, 20)
+	for i := range candidates {
+		candidates[i] = string(rune('a'+i)) + ".go"
+	}
+	m.mention = &mentionState{candidates: candidates, selected: 0, scroll: 0}
+
+	m.UpdateMsg(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.mention.selected != 1 {
+		t.Errorf("after down: selected = %d, want 1", m.mention.selected)
+	}
+
+	// Page down should move the selection and scroll the view.
+	m.UpdateMsg(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if m.mention.selected != 9 {
+		t.Errorf("after pgdown: selected = %d, want 9", m.mention.selected)
+	}
+	if m.mention.scroll != 2 {
+		t.Errorf("after pgdown: scroll = %d, want 2", m.mention.scroll)
+	}
+
+	// Another page down should approach the end of the list.
+	m.UpdateMsg(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if m.mention.selected != 17 {
+		t.Errorf("after second pgdown: selected = %d, want 17", m.mention.selected)
+	}
+	if m.mention.selected < m.mention.scroll || m.mention.selected >= m.mention.scroll+popupMaxItems {
+		t.Errorf("selected item not visible: selected=%d scroll=%d", m.mention.selected, m.mention.scroll)
+	}
+
+	// Page up should move back toward the top.
+	m.UpdateMsg(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.mention.selected != 9 {
+		t.Errorf("after first pgup: selected = %d, want 9", m.mention.selected)
+	}
+	m.UpdateMsg(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m.UpdateMsg(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.mention.selected != 0 {
+		t.Errorf("after three pgups: selected = %d, want 0", m.mention.selected)
+	}
+	if m.mention.scroll != 0 {
+		t.Errorf("after three pgups: scroll = %d, want 0", m.mention.scroll)
+	}
+}
+
+func TestCompletionPopupScrollIndicator(t *testing.T) {
+	t.Parallel()
+
+	m := New(styles.New("dark"), DefaultKeyMap(), 100)
+	m.SetWidth(80)
+
+	candidates := make([]string, 12)
+	for i := range candidates {
+		candidates[i] = string(rune('a'+i)) + ".go"
+	}
+	m.mention = &mentionState{candidates: candidates, selected: 0, scroll: 0}
+	view := m.mentionCompletionView()
+	if !strings.Contains(view, "… 4 more") {
+		t.Errorf("expected hidden indicator, got %q", view)
+	}
+
+	m.mention.scroll = 4
+	view = m.mentionCompletionView()
+	if strings.Contains(view, "a.go") {
+		t.Errorf("scrolled view should not contain first candidate, got %q", view)
+	}
+	if !strings.Contains(view, "e.go") {
+		t.Errorf("scrolled view should contain candidate at offset, got %q", view)
 	}
 }

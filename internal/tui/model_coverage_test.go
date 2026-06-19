@@ -878,3 +878,24 @@ func (e *errorRunTurnManager) ResumeWithApproval(ctx context.Context, sessionID 
 func (e *errorRunTurnManager) Steer(ctx context.Context, sessionID string, input string) error {
 	return nil
 }
+
+func TestViewportFocusDoesNotSendKeysToInput(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	m.input.SetValue("typed")
+	m.focused = focusViewport
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	model := updated.(*Model)
+
+	if model.input.Value() != "typed" {
+		t.Errorf("input value changed to %q while viewport is focused", model.input.Value())
+	}
+}
