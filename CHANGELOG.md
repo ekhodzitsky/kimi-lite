@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `debug.ReadBuildInfo()`.
 - Activity panel shows dedicated status lines for `TurnWaitingApproval` and
   `TurnWaitingPlan`.
+- TUI message queueing: while the assistant is streaming or thinking, pressing
+  `Enter` queues the draft and shows a "Queued: N" indicator in the input
+  placeholder, footer, and activity panel. Queued messages auto-send in FIFO
+  order when the turn completes. `Ctrl+C` first cancels the active stream and
+  preserves the queue; a second `Ctrl+C` clears the draft.
 
 ### Changed
 
