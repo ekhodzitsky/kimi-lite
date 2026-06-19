@@ -76,6 +76,32 @@ func TestPicker_Search(t *testing.T) {
 	}
 }
 
+func TestPicker_SearchBackspaceCJK(t *testing.T) {
+	t.Parallel()
+
+	sessions := []api.Session{
+		{ID: "alpha", Name: "first", Path: "/tmp", UpdatedAt: time.Now()},
+		{ID: "beta", Name: "second", Path: "/tmp", UpdatedAt: time.Now()},
+	}
+	p := NewPicker(sessions, "/tmp", 80, 24, styles.New("dark"))
+	p.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	p.Update(tea.KeyPressMsg{Code: '世', Text: "世"})
+	p.Update(tea.KeyPressMsg{Code: '界', Text: "界"})
+	if p.query != "世界" {
+		t.Fatalf("expected query %q, got %q", "世界", p.query)
+	}
+
+	p.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if p.query != "世" {
+		t.Errorf("after one backspace expected %q, got %q", "世", p.query)
+	}
+
+	p.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if p.query != "" {
+		t.Errorf("after two backspaces expected empty query, got %q", p.query)
+	}
+}
+
 func TestPicker_Cancel(t *testing.T) {
 	t.Parallel()
 

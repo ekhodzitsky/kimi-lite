@@ -1,4 +1,5 @@
-// Package clipboard reads image and file data from the system clipboard.
+// Package clipboard reads and writes image, file, and text data from the system
+// clipboard.
 package clipboard
 
 import (

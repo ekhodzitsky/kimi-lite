@@ -392,7 +392,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusText = ""
 				return m, nil
 			}
-			if sel := m.sessionPicker.Selected(); sel.Path != "" && m.session != nil && sel.Path != m.session.Path {
+			var currentPath string
+			m.mu.RLock()
+			if m.session != nil {
+				currentPath = m.session.Path
+			}
+			m.mu.RUnlock()
+			if sel := m.sessionPicker.Selected(); sel.Path != "" && currentPath != "" && sel.Path != currentPath {
 				m.statusText = fmt.Sprintf("cd %s && kimi-lite --session %s", shellQuote(sel.Path), sel.ID)
 			} else {
 				m.statusText = ""

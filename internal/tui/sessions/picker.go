@@ -116,7 +116,8 @@ func (p *Picker) Update(msg tea.KeyPressMsg) (done, selected, copyCmd bool) {
 		return true, false, false
 	case tea.KeyBackspace:
 		if p.searching && len(p.query) > 0 {
-			p.query = p.query[:len(p.query)-1]
+			runes := []rune(p.query)
+			p.query = string(runes[:len(runes)-1])
 			p.filter()
 		}
 	default:
