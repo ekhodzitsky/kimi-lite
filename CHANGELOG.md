@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `README.md` now documents how to configure Kimi K2.7 Code and the Kimi Code
   subscription endpoint (`https://api.kimi.com/coding/v1`).
+- TUI approval, plan, and steer overlays updated per audit: plan panel scrolls
+  and uses Enter/Esc; approval dialog shows batch progress, suppresses
+  "Allow for this session" for unsafe tools, renders fullscreen diffs
+  edge-to-edge, and caches diffs asynchronously; steer overlay now has a
+  visible cursor and line-editing keys.
 
 ## [0.6.0] - 2026-06-17
 
