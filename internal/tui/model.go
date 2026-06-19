@@ -14,6 +14,7 @@ import (
 
 	"github.com/ekhodzitsky/kimi-lite/internal/core"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/activity"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/clipboard"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/footer"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/help"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
@@ -346,7 +347,7 @@ func (m *Model) helpData() help.Data {
 		Commands: []help.SlashCommand{
 			{Name: "/compact", Description: "Summarize older messages"},
 			{Name: "/clear", Description: "Clear transcript"},
-			{Name: "/sessions", Description: "Switch session"},
+			{Name: "/sessions, /resume", Description: "Switch session"},
 			{Name: "/checkpoint", Description: "Create git checkpoint"},
 			{Name: "/diff", Description: "Show git diff"},
 			{Name: "/mcp", Description: "List MCP tools"},
@@ -376,7 +377,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		if m.sessionPicker != nil {
-			done, selected := m.sessionPicker.Update(msg)
+			done, selected, copyCmd := m.sessionPicker.Update(msg)
 			if selected {
 				id := m.sessionPicker.Selected().ID
 				m.sessionPicker = nil
@@ -392,11 +393,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if sel := m.sessionPicker.Selected(); sel.Path != "" && m.session != nil && sel.Path != m.session.Path {
-				m.statusText = fmt.Sprintf("cd %s && kimi-lite --resume %s", shellQuote(sel.Path), sel.ID)
+				m.statusText = fmt.Sprintf("cd %s && kimi-lite --session %s", shellQuote(sel.Path), sel.ID)
 			} else {
 				m.statusText = ""
 			}
-			return m, nil
+			if copyCmd && m.statusText != "" {
+				cmds = append(cmds, m.copyStatusTextCmd())
+			}
+			return m, tea.Batch(cmds...)
 		}
 		// Let the input component consume completion keys while a popup is open.
 		if !m.input.Completing() {
@@ -557,7 +561,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.session != nil {
 				path = m.session.Path
 			}
-			m.sessionPicker = sessions.NewPicker(msg.Sessions, path, m.width, m.height)
+			m.sessionPicker = sessions.NewPicker(msg.Sessions, path, m.width, m.height, m.styles)
 		}
 
 	case SessionSelectedMsg:
@@ -852,6 +856,25 @@ func (m *Model) resumeSessionCmd(id string) tea.Cmd {
 		defer cancel()
 		sess, err := sm.Resume(ctx, id)
 		return SessionSelectedMsg{Session: sess, Err: err}
+	}
+}
+
+// copyStatusTextCmd returns a command that copies the current status text to
+// the system clipboard.
+func (m *Model) copyStatusTextCmd() tea.Cmd {
+	m.mu.RLock()
+	appCtx := m.appCtx
+	text := m.statusText
+	m.mu.RUnlock()
+
+	return func() tea.Msg {
+		if text == "" {
+			return nil
+		}
+		if err := clipboard.WriteText(appCtx, text); err != nil {
+			return ErrorMsg{Err: fmt.Errorf("copy to clipboard: %w", err)}
+		}
+		return StatusMsg{Text: "Copied resume command to clipboard"}
 	}
 }
 

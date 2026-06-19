@@ -252,7 +252,7 @@ func (m *Model) handleCommand(content string) tea.Cmd {
 			}
 			return ClearMsg{}
 		}
-	case "/sessions":
+	case "/sessions", "/resume":
 		m.addMessage(msgcomp.NewUserMessage("Listing sessions...", m.styles))
 		return m.listSessionsCmd()
 

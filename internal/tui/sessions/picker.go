@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
@@ -26,33 +26,11 @@ type Picker struct {
 	allMode   bool
 	path      string
 
-	style pickerStyle
-}
-
-type pickerStyle struct {
-	border      lipgloss.Style
-	title       lipgloss.Style
-	item        lipgloss.Style
-	selected    lipgloss.Style
-	header      lipgloss.Style
-	footer      lipgloss.Style
-	placeholder lipgloss.Style
-}
-
-func defaultPickerStyle() pickerStyle {
-	return pickerStyle{
-		border:      lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2),
-		title:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAFAFA")),
-		item:        lipgloss.NewStyle(),
-		selected:    lipgloss.NewStyle().Foreground(lipgloss.Color("#212121")).Background(lipgloss.Color("#FDD835")),
-		header:      lipgloss.NewStyle().Foreground(lipgloss.Color("#A3A3A3")),
-		footer:      lipgloss.NewStyle().Foreground(lipgloss.Color("#A3A3A3")),
-		placeholder: lipgloss.NewStyle().Foreground(lipgloss.Color("#737373")),
-	}
+	styles *styles.Styles
 }
 
 // NewPicker creates a picker for the provided sessions.
-func NewPicker(sessions []api.Session, currentPath string, width, height int) *Picker {
+func NewPicker(sessions []api.Session, currentPath string, width, height int, st *styles.Styles) *Picker {
 	p := &Picker{
 		sessions: sessions,
 		filtered: sessions,
@@ -60,7 +38,7 @@ func NewPicker(sessions []api.Session, currentPath string, width, height int) *P
 		width:    width,
 		height:   height,
 		path:     currentPath,
-		style:    defaultPickerStyle(),
+		styles:   st,
 	}
 	p.filter()
 	p.pageSize = p.computePageSize()
@@ -104,8 +82,9 @@ func (p *Picker) HasSelection() bool {
 }
 
 // Update handles keyboard input. It returns done=true when the picker should
-// be closed, and selected=true when the user chose a session.
-func (p *Picker) Update(msg tea.KeyPressMsg) (done, selected bool) {
+// be closed, selected=true when the user chose a session, and copyCmd=true
+// when the caller should copy the current resume command to the clipboard.
+func (p *Picker) Update(msg tea.KeyPressMsg) (done, selected, copyCmd bool) {
 	switch msg.Code {
 	case tea.KeyUp:
 		p.move(-1)
@@ -124,15 +103,17 @@ func (p *Picker) Update(msg tea.KeyPressMsg) (done, selected bool) {
 		}
 	case tea.KeyEnter:
 		if p.HasSelection() {
-			return true, true
+			return true, true, false
 		}
-		return true, false
+		return true, false, false
 	case tea.KeyEscape:
 		if p.searching {
 			p.searching = false
-			return false, false
+			p.query = ""
+			p.filter()
+			return false, false, false
 		}
-		return true, false
+		return true, false, false
 	case tea.KeyBackspace:
 		if p.searching && len(p.query) > 0 {
 			p.query = p.query[:len(p.query)-1]
@@ -142,30 +123,33 @@ func (p *Picker) Update(msg tea.KeyPressMsg) (done, selected bool) {
 		if msg.Mod == tea.ModCtrl && msg.Code == 'c' {
 			if p.searching {
 				p.searching = false
-				return false, false
+				return false, false, false
 			}
-			return true, false
+			return true, false, false
 		}
 		text := msg.Text
 		if text == "" {
-			return false, false
+			return false, false, false
 		}
 		if !p.searching && text == "/" {
 			p.searching = true
 			p.query = ""
 			p.filter()
-			return false, false
+			return false, false, false
 		}
 		if !p.searching && strings.EqualFold(text, "a") {
 			p.ToggleAll()
-			return false, false
+			return false, false, false
+		}
+		if !p.searching && strings.EqualFold(text, "y") {
+			return false, false, true
 		}
 		if p.searching {
 			p.query += text
 			p.filter()
 		}
 	}
-	return false, false
+	return false, false, false
 }
 
 // View renders the picker as a string suitable for overlaying on the TUI.
@@ -180,23 +164,29 @@ func (p *Picker) View() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(p.style.title.Render("Sessions") + "\n")
+	b.WriteString(p.styles.PickerTitle.Render("Sessions") + "\n")
 	mode := "current directory"
 	if p.allMode {
 		mode = "all directories"
 	}
-	searchLine := fmt.Sprintf("Mode: %s | %d sessions", mode, len(p.filtered))
+	countLabel := "sessions"
+	if len(p.filtered) == 1 {
+		countLabel = "session"
+	}
+	searchLine := fmt.Sprintf("Mode: %s | %d %s", mode, len(p.filtered), countLabel)
 	if p.searching {
 		searchLine = fmt.Sprintf("Search: %s_ | %d matches", p.query, len(p.filtered))
 	}
-	b.WriteString(p.style.header.Render(searchLine) + "\n\n")
+	searchLine = truncateWidth(searchLine, innerW)
+	b.WriteString(p.styles.PickerHeader.Render(searchLine) + "\n\n")
 
 	if len(p.filtered) == 0 {
 		placeholder := "No sessions match."
 		if !p.allMode && p.path != "" && p.query == "" {
 			placeholder = "No sessions in this directory. Press 'a' to show all sessions."
 		}
-		b.WriteString(p.style.placeholder.Render(placeholder))
+		placeholder = truncateWidth(placeholder, innerW)
+		b.WriteString(p.styles.PickerPlaceholder.Render(placeholder))
 	} else {
 		start, end := p.visibleRange()
 		for i := start; i < end && i < len(p.filtered); i++ {
@@ -210,10 +200,11 @@ func (p *Picker) View() string {
 	if len(p.filtered) == 0 {
 		pos = 0
 	}
-	footer := fmt.Sprintf("↑/↓ move • PgUp/PgDown page • Enter select • Esc close • / search • a toggle all (%d/%d)", pos, len(p.filtered))
-	b.WriteString("\n" + p.style.footer.Render(footer))
+	footer := fmt.Sprintf("↑/↓ move • PgUp/PgDown page • Enter select • Esc close • / search • a toggle all • y copy (%d/%d)", pos, len(p.filtered))
+	footer = truncateWidth(footer, innerW)
+	b.WriteString("\n" + p.styles.PickerFooter.Render(footer))
 
-	return p.style.border.Render(b.String())
+	return p.styles.PickerBorder.Width(innerW).Render(b.String())
 }
 
 func (p *Picker) move(delta int) {
@@ -311,42 +302,36 @@ func (p *Picker) formatCard(s api.Session, width int, selected bool) string {
 		title = s.ID
 	}
 	top := fmt.Sprintf("%s%s • %s", marker, title, humanizeTime(s.UpdatedAt))
-	top = truncateRunes(top, maxContent)
+	top = truncateWidth(top, maxContent)
 	b.WriteString(top + "\n")
 	pathLine := fmt.Sprintf("   %s", s.Path)
-	pathLine = truncateRunes(pathLine, maxContent)
+	pathLine = truncateWidth(pathLine, maxContent)
 	b.WriteString(pathLine + "\n")
 	if s.LastPrompt != "" {
-		prompt := truncateRunes(s.LastPrompt, maxContent)
+		prompt := truncateWidth(s.LastPrompt, maxContent)
 		fmt.Fprintf(&b, "   %s\n", prompt)
 	}
-	card := b.String()
+	card := strings.TrimSuffix(b.String(), "\n")
 	if selected {
-		return p.style.selected.Render(card)
+		return p.styles.PickerSelected.Render(card)
 	}
-	return p.style.item.Render(card)
+	return p.styles.PickerItem.Render(card)
 }
 
-// truncateRunes truncates s to at most maxRunes runes, appending an ellipsis
-// when truncated. It avoids splitting multi-byte runes.
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
+// truncateWidth truncates s to fit within maxWidth display cells, appending an
+// ellipsis when truncated. Wide runes and ANSI sequences are handled via the
+// charmbracelet/x/ansi package.
+func truncateWidth(s string, maxWidth int) string {
+	if maxWidth <= 0 {
 		return ""
 	}
-	if utf8.RuneCountInString(s) <= maxRunes {
+	if ansi.StringWidth(s) <= maxWidth {
 		return s
 	}
-	var b strings.Builder
-	count := 0
-	for _, r := range s {
-		if count >= maxRunes-1 {
-			b.WriteRune('…')
-			break
-		}
-		b.WriteRune(r)
-		count++
+	if maxWidth == 1 {
+		return "…"
 	}
-	return b.String()
+	return ansi.Cut(s, 0, maxWidth-1) + "…"
 }
 
 // humanizeTime returns a short relative timestamp such as "2m ago" or the

@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/atotto/clipboard"
 )
 
 const pasteTimeout = 5 * time.Second
@@ -19,6 +21,14 @@ const pasteTimeout = 5 * time.Second
 // MaxPasteFileSize is the largest file that will be copied from a paste path
 // into the temporary attachment directory.
 const MaxPasteFileSize = 10 * 1024 * 1024 // 10 MB
+
+// WriteText writes plain text to the system clipboard.
+func WriteText(_ context.Context, text string) error {
+	if err := clipboard.WriteAll(text); err != nil {
+		return fmt.Errorf("write clipboard: %w", err)
+	}
+	return nil
+}
 
 // ReadImage reads image data from the clipboard and returns the raw bytes and
 // the detected MIME type. It returns an empty result when the clipboard does

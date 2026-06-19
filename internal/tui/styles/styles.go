@@ -138,6 +138,14 @@ type Styles struct {
 	Activity            lipgloss.Style
 	ActivityTool        lipgloss.Style
 	ActivityOutput      lipgloss.Style
+
+	PickerBorder      lipgloss.Style
+	PickerTitle       lipgloss.Style
+	PickerItem        lipgloss.Style
+	PickerSelected    lipgloss.Style
+	PickerHeader      lipgloss.Style
+	PickerFooter      lipgloss.Style
+	PickerPlaceholder lipgloss.Style
 }
 
 // New creates a new Styles instance for the given theme name.
@@ -321,4 +329,30 @@ func (s *Styles) init() {
 		Background(t.Background).
 		Foreground(t.Muted).
 		MarginLeft(2)
+
+	s.PickerBorder = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Border).
+		Background(t.Background).
+		Foreground(t.Foreground).
+		Padding(1, 2)
+	s.PickerTitle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(t.Primary).
+		Background(t.Background)
+	s.PickerItem = lipgloss.NewStyle().
+		Background(t.Background).
+		Foreground(t.Foreground)
+	s.PickerSelected = lipgloss.NewStyle().
+		Background(t.Highlight).
+		Foreground(t.Background)
+	s.PickerHeader = lipgloss.NewStyle().
+		Foreground(t.Muted).
+		Background(t.Background)
+	s.PickerFooter = lipgloss.NewStyle().
+		Foreground(t.Muted).
+		Background(t.Background)
+	s.PickerPlaceholder = lipgloss.NewStyle().
+		Foreground(t.Muted).
+		Background(t.Background)
 }

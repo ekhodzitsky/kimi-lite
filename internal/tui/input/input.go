@@ -101,6 +101,7 @@ var DefaultSlashCommands = []SlashCommand{
 	{Name: "/compact", Description: "Summarize older messages to free context"},
 	{Name: "/clear", Description: "Clear the current transcript"},
 	{Name: "/sessions", Description: "Switch to another session"},
+	{Name: "/resume", Description: "Switch to another session (alias for /sessions)"},
 	{Name: "/checkpoint", Description: "Create a git checkpoint commit"},
 	{Name: "/diff", Description: "Show git diff for a path", NoAutoSubmit: true},
 	{Name: "/mcp", Description: "List connected MCP tools"},

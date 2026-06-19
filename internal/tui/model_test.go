@@ -252,6 +252,31 @@ func TestCommandSessions(t *testing.T) {
 	}
 }
 
+func TestCommandResumeAlias(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	updated, cmd := m.Update(input.SendMsg{Content: "/resume"})
+	model := updated.(*Model)
+
+	if cmd == nil {
+		t.Fatal("expected command for /resume")
+	}
+	msg := cmd()
+	if _, ok := msg.(SessionsResultMsg); !ok {
+		t.Errorf("expected SessionsResultMsg, got %T", msg)
+	}
+	if len(model.messages) != 1 {
+		t.Errorf("messages length = %d, want 1", len(model.messages))
+	}
+}
+
 func TestCommandCheckpoint(t *testing.T) {
 	t.Parallel()
 
@@ -1768,6 +1793,48 @@ func TestSessionsMsg_WithSessions(t *testing.T) {
 	}
 	if len(model2.sessionPicker.Selected().ID) == 0 && model2.sessionPicker.HasSelection() {
 		t.Error("expected first session to be selected")
+	}
+}
+
+func TestSessionsMsg_CrossDirectoryStatusUsesSessionFlag(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 120
+	m.height = 40
+	m.updateLayout()
+
+	now := time.Now()
+	sm := &fakeSessionManagerWithSessions{
+		sessions: []api.Session{
+			{ID: "s1", Path: "/tmp", UpdatedAt: now},
+			{ID: "s2", Path: "/other/path", UpdatedAt: now},
+		},
+	}
+	m.SetSessionManager(sm)
+
+	updated, cmd := m.Update(SessionsMsg{})
+	model := updated.(*Model)
+	msg := cmd()
+	updated2, _ := model.Update(msg)
+	model2 := updated2.(*Model)
+
+	if model2.sessionPicker == nil {
+		t.Fatal("expected session picker to open")
+	}
+
+	// Toggle all-directory mode and move to the cross-directory session.
+	updated3, _ := model2.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	model3 := updated3.(*Model)
+	updated4, _ := model3.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	model4 := updated4.(*Model)
+	if !strings.Contains(model4.statusText, "--session") {
+		t.Errorf("expected status text to use --session flag, got %q", model4.statusText)
+	}
+	if strings.Contains(model4.statusText, "--resume") {
+		t.Errorf("status text should not use --resume flag, got %q", model4.statusText)
 	}
 }
 
