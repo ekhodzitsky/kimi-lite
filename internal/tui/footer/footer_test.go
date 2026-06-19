@@ -92,3 +92,75 @@ func TestFooterGitBadge_NoAheadBehind(t *testing.T) {
 		t.Errorf("footer should not render ahead/behind counters, got %q", view)
 	}
 }
+
+func TestFooterToolCount(t *testing.T) {
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80)
+	m.SetData(Data{ModelName: "m", ToolCount: 3, ContextMax: 1})
+	view := m.View()
+	if !strings.Contains(view, "tools: 3") {
+		t.Errorf("expected tool count on line 2, got %q", view)
+	}
+}
+
+func TestFooterToolCount_ZeroHidden(t *testing.T) {
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80)
+	m.SetData(Data{ModelName: "m", ToolCount: 0, ContextMax: 1})
+	view := m.View()
+	if strings.Contains(view, "tools:") {
+		t.Errorf("zero tool count should be hidden, got %q", view)
+	}
+}
+
+func TestFooterManualBadge(t *testing.T) {
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80)
+	m.SetData(Data{ModelName: "m", Mode: ModeManual, ContextMax: 1})
+	view := m.View()
+	if !strings.Contains(view, "MANUAL") {
+		t.Errorf("expected MANUAL badge, got %q", view)
+	}
+}
+
+func TestFooterPlanBadge(t *testing.T) {
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80)
+	m.SetData(Data{ModelName: "m", Mode: ModeAuto, PlanMode: true, ContextMax: 1})
+	view := m.View()
+	if !strings.Contains(view, "PLAN") {
+		t.Errorf("expected PLAN badge, got %q", view)
+	}
+	if !strings.Contains(view, "AUTO") {
+		t.Errorf("expected AUTO badge alongside PLAN, got %q", view)
+	}
+}
+
+func TestFooterPlanBadge_WithManual(t *testing.T) {
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80)
+	m.SetData(Data{ModelName: "m", Mode: ModeManual, PlanMode: true, ContextMax: 1})
+	view := m.View()
+	if !strings.Contains(view, "PLAN") {
+		t.Errorf("expected PLAN badge, got %q", view)
+	}
+	if !strings.Contains(view, "MANUAL") {
+		t.Errorf("expected MANUAL badge alongside PLAN, got %q", view)
+	}
+}
+
+func TestFooterContextClamp(t *testing.T) {
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(80)
+	m.SetData(Data{ModelName: "m", ContextMax: 100, ContextUsed: 250})
+	view := m.View()
+	if !strings.Contains(view, "100.0%+") {
+		t.Errorf("expected clamped context overflow indicator, got %q", view)
+	}
+}

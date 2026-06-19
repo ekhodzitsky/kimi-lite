@@ -132,6 +132,7 @@ type Styles struct {
 	FooterContext       lipgloss.Style
 	ModeBadgeYolo       lipgloss.Style
 	ModeBadgeAuto       lipgloss.Style
+	ModeBadgeManual     lipgloss.Style
 	WelcomeBox          lipgloss.Style
 	WelcomeTitle        lipgloss.Style
 	WelcomeText         lipgloss.Style
@@ -298,8 +299,9 @@ func (s *Styles) init() {
 	s.FooterTip = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Muted)
 	s.FooterStatus = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Foreground)
 	s.FooterContext = lipgloss.NewStyle().Background(t.StatusBarBg).Foreground(t.Secondary)
-	s.ModeBadgeYolo = lipgloss.NewStyle().Background(t.Error).Foreground(t.Foreground).Bold(true)
+	s.ModeBadgeYolo = lipgloss.NewStyle().Background(t.Warning).Foreground(t.Background).Bold(true)
 	s.ModeBadgeAuto = lipgloss.NewStyle().Background(t.Primary).Foreground(t.Background).Bold(true)
+	s.ModeBadgeManual = lipgloss.NewStyle().Background(t.Muted).Foreground(t.Background).Bold(true)
 
 	borderColor := t.Border
 	if t.Name == "light" {

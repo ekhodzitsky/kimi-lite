@@ -3,15 +3,22 @@ package welcome
 
 import (
 	"fmt"
+	"runtime/debug"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 )
 
-// Version is the version shown in the welcome panel until build-info wiring is
-// in place.
-const Version = "0.5.0-dev"
+// Version returns the build version, falling back to "dev" when build info is
+// unavailable (for example, when running tests or an unversioned binary).
+func Version() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "dev"
+}
 
 // Data carries the dynamic parts of the welcome box.
 type Data struct {
@@ -58,18 +65,26 @@ func (m *Model) View() string {
 		title,
 		hint,
 		"",
-		m.line("Directory:", m.data.Directory),
-		m.line("Session:", m.data.SessionID),
-		m.line("Model:", m.data.ModelName),
-		m.line("Version:", m.data.Version),
+		m.line("Directory:", m.data.Directory, innerW),
+		m.line("Session:", m.data.SessionID, innerW),
+		m.line("Model:", m.data.ModelName, innerW),
+		m.line("Version:", m.data.Version, innerW),
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	return m.styles.WelcomeBox.Width(innerW).Render(content)
 }
 
-func (m *Model) line(label, value string) string {
+func (m *Model) line(label, value string, innerW int) string {
 	if value == "" {
 		value = "-"
 	}
-	return m.styles.WelcomeText.Render(fmt.Sprintf("%-10s %s", label, value))
+	prefix := fmt.Sprintf("%-10s ", label)
+	maxValueW := innerW - ansi.StringWidth(prefix)
+	if maxValueW < 0 {
+		maxValueW = 0
+	}
+	if ansi.StringWidth(value) > maxValueW {
+		value = ansi.Cut(value, 0, maxValueW-1) + "…"
+	}
+	return m.styles.WelcomeText.Render(prefix + value)
 }

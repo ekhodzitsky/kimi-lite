@@ -45,10 +45,12 @@ const (
 
 	resizeDebounce = 80 * time.Millisecond
 
-	// approvalModeAuto and approvalModeYolo mirror core approval modes in the
-	// integer representation used by the TUI's approval-mode callback.
-	approvalModeAuto = int(core.ModeAuto)
-	approvalModeYolo = int(core.ModeYolo)
+	// approvalModeManual, approvalModeAuto and approvalModeYolo mirror core
+	// approval modes in the integer representation used by the TUI's
+	// approval-mode callback.
+	approvalModeManual = int(core.ModeManual)
+	approvalModeAuto   = int(core.ModeAuto)
+	approvalModeYolo   = int(core.ModeYolo)
 
 	// maxToolProgressLen caps live tool output stored in the root model.
 	maxToolProgressLen = 2048
@@ -1203,6 +1205,7 @@ func (m *Model) updateFooter() {
 	m.footer.SetData(footer.Data{
 		ModelName:   modelName,
 		Mode:        approvalMode,
+		PlanMode:    m.input.PlanMode(),
 		State:       state,
 		StatusText:  statusText,
 		CWD:         cwd,
@@ -1228,7 +1231,7 @@ func (m *Model) updateWelcomeData() {
 		Directory: directory,
 		SessionID: sessionID,
 		ModelName: m.modelName,
-		Version:   welcome.Version,
+		Version:   welcome.Version(),
 	})
 }
 
