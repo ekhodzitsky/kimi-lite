@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaving the TUI. Output streams to the activity panel and a system message
   records the command and exit code. Supports command history (`Up`/`Down`),
   manual-approval confirmation in `MANUAL` mode, and `Ctrl+C` cancel.
+- Inline image rendering in the TUI for terminals that support the iTerm2,
+  Kitty, or Sixel graphics protocols. Unsupported terminals and remote URLs
+  fall back to a text placeholder.
 
 ### Changed
 

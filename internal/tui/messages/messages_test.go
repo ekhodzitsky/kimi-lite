@@ -10,6 +10,7 @@ import (
 	"charm.land/glamour/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/images"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
@@ -799,31 +800,47 @@ func TestRenderedContent_StreamingCursor(t *testing.T) {
 	}
 }
 
-func TestContentWithParts(t *testing.T) {
+func TestPartsSource(t *testing.T) {
 	t.Parallel()
 
+	fake := &fakeImageRenderer{render: "[IMG]"}
 	parts := []api.ContentPart{
 		{Type: api.ContentPartText, Text: "extra text"},
 		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "http://example.com/img.png"}},
 		{Type: api.ContentPartImageData, ImageData: &api.ImageData{MIMEType: "image/png", Data: "abc"}},
 	}
-	got := contentWithParts("base", parts)
-	if !strings.Contains(got, "base") {
-		t.Error("contentWithParts should preserve base content")
+	text, imgs := partsSource("base", parts, fake, 80)
+	if !strings.Contains(text, "base") {
+		t.Error("partsSource should preserve base content")
 	}
-	if !strings.Contains(got, "extra text") {
-		t.Error("contentWithParts should include text parts")
+	if !strings.Contains(text, "extra text") {
+		t.Error("partsSource should include text parts")
 	}
-	if !strings.Contains(got, "🖼️ image") {
-		t.Errorf("contentWithParts should render image placeholder, got %q", got)
+	if len(imgs) != 2 {
+		t.Fatalf("partsSource should return 2 image blocks, got %d", len(imgs))
 	}
-	if !strings.Contains(got, "http://example.com/img.png") {
-		t.Error("contentWithParts should include image URL")
+	for _, img := range imgs {
+		if img != "[IMG]" {
+			t.Errorf("partsSource image block = %q, want [IMG]", img)
+		}
 	}
 
-	if got := contentWithParts("", parts); strings.HasPrefix(got, "\n") {
-		t.Errorf("contentWithParts with empty base should not lead with blank lines, got %q", got)
+	text, imgs = partsSource("", parts, fake, 80)
+	if strings.HasPrefix(text, "\n") {
+		t.Errorf("partsSource with empty base should not lead with blank lines, got %q", text)
 	}
+	if len(imgs) != 2 {
+		t.Fatalf("partsSource with empty base should return 2 image blocks, got %d", len(imgs))
+	}
+}
+
+type fakeImageRenderer struct {
+	render string
+}
+
+func (f *fakeImageRenderer) Capability() images.Capability { return images.None }
+func (f *fakeImageRenderer) Render(api.ContentPart, int, int) string {
+	return f.render
 }
 
 func TestUserMessageView_ContentParts(t *testing.T) {

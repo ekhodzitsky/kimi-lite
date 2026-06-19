@@ -15,6 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/images"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
@@ -25,6 +26,8 @@ type cachedRenderer struct {
 }
 
 var rendererCache sync.Map // key: theme string, value: *cachedRenderer
+
+var defaultImageRenderer = images.NewRenderer(images.DetectCapability())
 
 const (
 	messageWidthPadding = 8
@@ -99,6 +102,9 @@ type Message struct {
 	Styles   *styles.Styles
 	KeyMap   KeyMap
 
+	// ImageRenderer renders image content parts inline when the terminal supports it.
+	imageRenderer images.Renderer
+
 	// Cached wrapped output for non-assistant messages
 	cachedView    string
 	cacheWidth    int
@@ -110,34 +116,37 @@ type Message struct {
 // NewUserMessage creates a new user message.
 func NewUserMessage(content string, st *styles.Styles) *Message {
 	return &Message{
-		Type:    TypeUser,
-		Content: content,
-		Role:    api.RoleUser,
-		Styles:  st,
-		KeyMap:  DefaultKeyMap(),
+		Type:          TypeUser,
+		Content:       content,
+		Role:          api.RoleUser,
+		Styles:        st,
+		KeyMap:        DefaultKeyMap(),
+		imageRenderer: defaultImageRenderer,
 	}
 }
 
 // NewAssistantMessage creates a new assistant message.
 func NewAssistantMessage(content string, st *styles.Styles) *Message {
 	return &Message{
-		Type:    TypeAssistant,
-		Content: content,
-		Role:    api.RoleAssistant,
-		Styles:  st,
-		KeyMap:  DefaultKeyMap(),
+		Type:          TypeAssistant,
+		Content:       content,
+		Role:          api.RoleAssistant,
+		Styles:        st,
+		KeyMap:        DefaultKeyMap(),
+		imageRenderer: defaultImageRenderer,
 	}
 }
 
 // NewToolCallMessage creates a new tool call display message.
 func NewToolCallMessage(call api.ToolCall, st *styles.Styles) *Message {
 	return &Message{
-		Type:      TypeToolCall,
-		ToolCall:  call,
-		Role:      api.RoleTool,
-		Styles:    st,
-		KeyMap:    DefaultKeyMap(),
-		ToolStart: time.Now(),
+		Type:          TypeToolCall,
+		ToolCall:      call,
+		Role:          api.RoleTool,
+		Styles:        st,
+		KeyMap:        DefaultKeyMap(),
+		ToolStart:     time.Now(),
+		imageRenderer: defaultImageRenderer,
 	}
 }
 
@@ -146,21 +155,23 @@ func NewToolCallMessage(call api.ToolCall, st *styles.Styles) *Message {
 func NewErrorMessage(err error, st *styles.Styles) *Message {
 	if err == nil {
 		return &Message{
-			Type:    TypeError,
-			Content: "",
-			Err:     nil,
-			Role:    api.RoleSystem,
-			Styles:  st,
-			KeyMap:  DefaultKeyMap(),
+			Type:          TypeError,
+			Content:       "",
+			Err:           nil,
+			Role:          api.RoleSystem,
+			Styles:        st,
+			KeyMap:        DefaultKeyMap(),
+			imageRenderer: defaultImageRenderer,
 		}
 	}
 	return &Message{
-		Type:    TypeError,
-		Content: err.Error(),
-		Err:     err,
-		Role:    api.RoleSystem,
-		Styles:  st,
-		KeyMap:  DefaultKeyMap(),
+		Type:          TypeError,
+		Content:       err.Error(),
+		Err:           err,
+		Role:          api.RoleSystem,
+		Styles:        st,
+		KeyMap:        DefaultKeyMap(),
+		imageRenderer: defaultImageRenderer,
 	}
 }
 
@@ -297,10 +308,15 @@ func (m *Message) viewUser() string {
 	}
 	prefix := m.Styles.UserMessage.Render("You")
 	width := max(m.Width-messageWidthPadding, minMessageWidth)
-	content := contentWithParts(m.Content, m.ContentParts)
-	content = wordWrap(content, width)
-	body := m.Styles.UserMessage.Render(content)
-	m.cachedView = lipgloss.JoinVertical(lipgloss.Left, prefix, body)
+	text, imgs := partsSource(m.Content, m.ContentParts, m.imageRenderer, width)
+	text = wordWrap(text, width)
+	body := m.Styles.UserMessage.Render(text)
+
+	blocks := []string{prefix, body}
+	if len(imgs) > 0 {
+		blocks = append(blocks, strings.Join(imgs, "\n\n"))
+	}
+	m.cachedView = lipgloss.JoinVertical(lipgloss.Left, blocks...)
 	m.cacheWidth = m.Width
 	return m.cachedView
 }
@@ -313,41 +329,55 @@ func (m *Message) viewAssistant() string {
 
 func (m *Message) renderedContent() string {
 	width := max(m.Width-messageWidthPadding, minMessageWidth)
-	source := contentWithParts(m.Content, m.ContentParts)
+	text, imgs := partsSource(m.Content, m.ContentParts, m.imageRenderer, width)
+	imageBlock := strings.Join(imgs, "\n\n")
 
-	if !m.Streaming && m.Rendered != "" && m.renderCache == source && m.renderCacheWidth == width && !m.needsRender {
+	if !m.Streaming && m.Rendered != "" && m.renderCache == text && m.renderCacheWidth == width && !m.needsRender {
 		return m.Rendered
 	}
 
 	// Raw mode bypasses glamour for finished assistant messages.
 	if m.RawMode && !m.Streaming {
-		m.renderCache = source
+		m.renderCache = text
 		m.renderCacheWidth = width
 		m.needsRender = false
-		return wordWrap(source, width)
+		return joinTextAndImages(wordWrap(text, width), imageBlock)
 	}
 
 	if !m.Streaming {
-		rendered := safeGlamourRender(source, m.Styles.Theme.Name, width)
-		m.Rendered = rendered
-		m.renderCache = source
+		renderedText := safeGlamourRender(text, m.Styles.Theme.Name, width)
+		m.Rendered = joinTextAndImages(renderedText, imageBlock)
+		m.renderCache = text
 		m.renderCacheWidth = width
 		m.needsRender = false
 	}
 
 	// During active streaming, show raw text with a cursor indicator.
 	if m.Streaming {
-		wrapped := wordWrap(source, width)
+		wrapped := wordWrap(text, width)
 		if wrapped == "" {
-			return streamingCursor
+			return joinTextAndImages(streamingCursor, imageBlock)
 		}
-		return wrapped + streamingCursor
+		return joinTextAndImages(wrapped+streamingCursor, imageBlock)
 	}
 
 	if m.Rendered != "" {
 		return m.Rendered
 	}
-	return source
+	return joinTextAndImages(text, imageBlock)
+}
+
+func joinTextAndImages(text, images string) string {
+	switch {
+	case text == "" && images == "":
+		return ""
+	case text == "":
+		return images
+	case images == "":
+		return text
+	default:
+		return text + "\n\n" + images
+	}
 }
 
 func (m *Message) viewToolCall() string {
@@ -402,10 +432,16 @@ func (m *Message) viewToolCall() string {
 			}
 
 			if len(m.ToolResult.ContentParts) > 0 {
-				b.WriteString("\n")
-				parts := contentWithParts("", m.ToolResult.ContentParts)
-				partsWrapped := wordWrap(parts, max(m.Width-messageWidthPadding, minMessageWidth))
-				b.WriteString(m.Styles.ToolCallExpanded.Render(partsWrapped))
+				width := max(m.Width-messageWidthPadding, minMessageWidth)
+				text, imgs := partsSource("", m.ToolResult.ContentParts, m.imageRenderer, width)
+				if text != "" {
+					b.WriteString("\n")
+					b.WriteString(m.Styles.ToolCallExpanded.Render(wordWrap(text, width)))
+				}
+				for _, img := range imgs {
+					b.WriteString("\n\n")
+					b.WriteString(img)
+				}
 			}
 		}
 	}
@@ -441,14 +477,18 @@ func countLines(s string) int {
 	return strings.Count(s, "\n") + 1
 }
 
-// contentWithParts appends multi-modal content parts (text, images) to a base
-// content string. Image parts are rendered as placeholders or links.
-func contentWithParts(content string, parts []api.ContentPart) string {
-	if len(parts) == 0 {
-		return content
+// partsSource builds a plain-text source from the base content and any text
+// content parts. Image parts are returned as separately rendered terminal
+// blocks so they can be appended after glamour rendering for assistant messages.
+func partsSource(content string, parts []api.ContentPart, renderer images.Renderer, width int) (string, []string) {
+	if len(parts) == 0 && content == "" {
+		return "", nil
 	}
 	var b strings.Builder
 	b.WriteString(content)
+
+	var imgs []string
+	maxHeight := imageMaxHeight(width)
 	for _, p := range parts {
 		switch p.Type {
 		case api.ContentPartText:
@@ -456,20 +496,26 @@ func contentWithParts(content string, parts []api.ContentPart) string {
 				b.WriteString("\n\n")
 				b.WriteString(p.Text)
 			}
-		case api.ContentPartImageURL:
-			b.WriteString("\n\n🖼️ image")
-			if p.ImageURL != nil && p.ImageURL.URL != "" {
-				b.WriteString(": ")
-				b.WriteString(p.ImageURL.URL)
+		case api.ContentPartImageURL, api.ContentPartImageData:
+			if renderer != nil {
+				imgs = append(imgs, renderer.Render(p, width, maxHeight))
 			}
-		case api.ContentPartImageData:
-			b.WriteString("\n\n🖼️ image")
 		}
 	}
+	text := b.String()
 	if content == "" {
-		return strings.TrimLeft(b.String(), "\n")
+		text = strings.TrimLeft(text, "\n")
 	}
-	return b.String()
+	return text, imgs
+}
+
+// imageMaxHeight returns a reasonable maximum image height in terminal cells.
+func imageMaxHeight(width int) int {
+	const maxImageHeight = 30
+	if width > maxImageHeight {
+		return maxImageHeight
+	}
+	return width
 }
 
 func (m *Message) viewError() string {
