@@ -35,6 +35,12 @@ func (m *Model) searchHeight() int {
 	return h
 }
 
+// shellHeight returns the rendered height of the shell overlay, or 0 when it
+// is closed.
+func (m *Model) shellHeight() int {
+	return m.shellOverlay.Height()
+}
+
 // layoutRect holds computed geometry for a single frame.
 type layoutRect struct {
 	contentWidth int
@@ -66,12 +72,13 @@ func (m *Model) layout() layoutRect {
 	welcomeHeight := m.welcomeHeight()
 	inputHeight := m.inputHeight()
 	activityHeight := m.activityHeight()
+	shellHeight := m.shellHeight()
 	searchHeight := m.searchHeight()
-	vpHeight := m.height - statusHeight - inputHeight - welcomeHeight - activityHeight - searchHeight
+	vpHeight := m.height - statusHeight - inputHeight - welcomeHeight - activityHeight - shellHeight - searchHeight
 	if vpHeight < minViewportHeight {
 		vpHeight = minViewportHeight
 	}
-	statusY := welcomeHeight + vpHeight + inputHeight + activityHeight + searchHeight
+	statusY := welcomeHeight + vpHeight + inputHeight + activityHeight + shellHeight + searchHeight
 	if statusY > m.height {
 		statusY = m.height
 	}
@@ -92,6 +99,7 @@ func (m *Model) applyLayoutSizes(l layoutRect) {
 	m.welcome.SetSize(l.contentWidth)
 	m.activity.SetSize(l.contentWidth)
 	m.search.SetSize(l.contentWidth)
+	m.shellOverlay.SetSize(l.contentWidth)
 }
 
 func (m *Model) contentWidth() int {

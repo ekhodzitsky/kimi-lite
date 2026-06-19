@@ -21,6 +21,13 @@ type Data struct {
 	ToolCalls   []api.ToolCall
 	ToolOutputs map[string]string // callID -> live output tail
 	QueueCount  int
+
+	// ShellActive is true when the quick shell overlay is running a command.
+	ShellActive bool
+	// ShellCommand is the command currently running in the shell overlay.
+	ShellCommand string
+	// ShellOutput is the accumulated stdout/stderr from the running command.
+	ShellOutput string
 }
 
 // Model renders transient activity status.
@@ -77,6 +84,10 @@ func (m *Model) View() string {
 	line = m.fit(line, m.width-3-ansi.StringWidth(m.spinner.View())-1)
 	var b strings.Builder
 	b.WriteString(m.styles.Activity.Render(m.spinner.View() + " " + line))
+	if m.data.ShellActive {
+		m.renderShellOutput(&b)
+		return b.String()
+	}
 	if m.data.State == api.TurnToolCalls && len(m.data.ToolCalls) > 0 {
 		for _, tc := range m.data.ToolCalls {
 			b.WriteString("\n")
@@ -101,6 +112,28 @@ func (m *Model) View() string {
 	return b.String()
 }
 
+func (m *Model) renderShellOutput(b *strings.Builder) {
+	if m.data.ShellCommand == "" {
+		return
+	}
+	b.WriteString("\n")
+	toolLine := "  • shell$ " + m.data.ShellCommand
+	b.WriteString(m.styles.ActivityTool.Render(m.fit(toolLine, m.width-2)))
+	if m.data.ShellOutput == "" {
+		return
+	}
+	lines := strings.Split(m.data.ShellOutput, "\n")
+	tail := lines
+	if len(tail) > 4 {
+		tail = tail[len(tail)-4:]
+	}
+	for _, outLine := range tail {
+		b.WriteString("\n")
+		rendered := "    " + outLine
+		b.WriteString(m.styles.ActivityOutput.Render(m.fit(rendered, m.width-2)))
+	}
+}
+
 // fit truncates s to w display cells, preserving an overflow indicator when
 // truncation occurs.
 func (m *Model) fit(s string, w int) string {
@@ -119,6 +152,9 @@ func (m *Model) Height() int {
 }
 
 func (m *Model) activeLine() (active bool, line string) {
+	if m.data.ShellActive {
+		return true, m.statusOr("running shell...")
+	}
 	switch m.data.State {
 	case api.TurnThinking:
 		return true, m.statusOr("thinking...")

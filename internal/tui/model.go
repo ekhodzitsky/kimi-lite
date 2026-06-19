@@ -23,6 +23,7 @@ import (
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/search"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/sessions"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/shell"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/viewport"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/welcome"
@@ -138,6 +139,16 @@ type Model struct {
 	// search is the transcript search overlay.
 	search *search.Model
 
+	// shellOverlay is the quick shell command overlay.
+	shellOverlay *shell.Model
+
+	// shellOutput holds live output from the quick shell overlay command.
+	shellOutput string
+	// shellCancel cancels the running quick shell command.
+	shellCancel context.CancelFunc
+	// shellCh is the channel for shell command progress and result events.
+	shellCh <-chan shellEvent
+
 	// approvalFullscreen shows a temporary fullscreen diff preview for the
 	// pending approval call.
 	approvalFullscreen  bool
@@ -181,6 +192,9 @@ type Model struct {
 	autoApproveSetter  func(string)
 	approvalModeSetter func(int)
 	approvalMode       int // approvalModeAuto by default; toggles to approvalModeYolo
+
+	// shellExecutor runs a shell command for the quick shell overlay.
+	shellExecutor func(ctx context.Context, command string, onProgress func([]byte)) (output string, exitCode int, err error)
 
 	// protectedPaths are additional paths blocked by diff previews (mirrors
 	// BuiltInToolExecutor.protectedPaths).
@@ -245,6 +259,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeCon
 	ac := activity.New(st)
 	hp := help.New(st)
 	sh := search.New(st)
+	so := shell.New(st)
 
 	mp := &mentions.FileWalker{MaxDepth: 3}
 	m := &Model{
@@ -257,6 +272,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeCon
 		activity:        ac,
 		helpPanel:       hp,
 		search:          sh,
+		shellOverlay:    so,
 		messages:        make([]*msgcomp.Message, 0),
 		state:           api.TurnIdle,
 		session:         session,
@@ -371,6 +387,14 @@ func (m *Model) SetApprovalMode(mode int) {
 	m.approvalMode = mode
 }
 
+// SetShellExecutor wires the callback that runs shell commands for the quick
+// shell overlay.
+func (m *Model) SetShellExecutor(fn func(ctx context.Context, command string, onProgress func([]byte)) (output string, exitCode int, err error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shellExecutor = fn
+}
+
 func defaultIfEmpty(s, fallback string) string {
 	if s == "" {
 		return fallback
@@ -430,6 +454,7 @@ func (m *Model) helpData() help.Data {
 		{Keys: kb.Steer, Description: "Steer response while streaming"},
 		{Keys: kb.Paste, Description: "Paste image or file"},
 		{Keys: "ctrl+f", Description: "Find in transcript"},
+		{Keys: "ctrl+x", Description: "Toggle shell overlay"},
 		{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
 		{Keys: kb.Send + " (viewport, tool call)", Description: "Expand/collapse tool call"},
 		{Keys: kb.Cancel, Description: "Cancel / clear draft"},
@@ -534,7 +559,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Overlays own the keyboard while open; do not dispatch the key to
 		// child components.
-		if m.planPending || m.showHelp || m.approvalFullscreen || m.steerOpen || m.search.IsOpen() {
+		if m.planPending || m.showHelp || m.approvalFullscreen || m.steerOpen || m.search.IsOpen() || m.shellOverlay.IsOpen() {
 			return m, tea.Batch(cmds...)
 		}
 	case tea.MouseReleaseMsg:
@@ -578,6 +603,40 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mu.Unlock()
 		m.updateActivity()
 		cmds = append(cmds, m.handleToolResult(msg.Result)...)
+
+	case shell.ExecuteMsg:
+		if m.approvalMode == approvalModeManual {
+			m.shellOverlay.StartConfirmation(msg.Command)
+		} else {
+			m.shellOverlay.SetRunning(msg.Command, true)
+			cmds = append(cmds, m.runShellCmd(msg.Command))
+		}
+		m.updateActivity()
+
+	case shell.ConfirmedExecuteMsg:
+		m.shellOverlay.SetRunning(msg.Command, true)
+		cmds = append(cmds, m.runShellCmd(msg.Command))
+		m.updateActivity()
+
+	case shellStartedMsg:
+		m.shellCh = msg.Ch
+		cmds = append(cmds, m.readShellProgress())
+
+	case shell.CancelMsg:
+		m.cancelShell()
+		m.updateActivity()
+
+	case ShellProgressMsg:
+		m.appendShellOutput(msg.Chunk)
+		m.updateActivity()
+		cmds = append(cmds, m.readShellProgress())
+
+	case ShellResultMsg:
+		m.shellOverlay.SetRunning("", false)
+		m.shellOutput = ""
+		m.shellCh = nil
+		m.updateActivity()
+		cmds = append(cmds, m.handleShellResult(msg))
 
 	case ErrorMsg:
 		m.addMessage(msgcomp.NewErrorMessage(msg.Err, m.styles))
@@ -951,6 +1010,10 @@ func (m *Model) View() tea.View {
 	mainContent.WriteString("\n")
 	if act := m.activity.View(); act != "" {
 		mainContent.WriteString(act)
+		mainContent.WriteString("\n")
+	}
+	if shellView := m.shellOverlay.View(); shellView.Content != "" {
+		mainContent.WriteString(shellView.Content)
 		mainContent.WriteString("\n")
 	}
 	if searchView := m.search.View(); searchView.Content != "" {
@@ -1386,13 +1449,19 @@ func (m *Model) updateActivity() {
 	state := m.state
 	statusText := m.statusText
 	toolProgress := maps.Clone(m.toolProgress)
+	shellActive := m.shellOverlay.IsRunning()
+	shellCommand := m.shellOverlay.RunningCommand()
+	shellOutput := m.shellOutput
 	m.mu.RUnlock()
 	m.activity.SetData(activity.Data{
-		State:       state,
-		StatusText:  statusText,
-		ToolCalls:   m.pendingToolCalls(),
-		ToolOutputs: toolProgress,
-		QueueCount:  m.queueLength(),
+		State:        state,
+		StatusText:   statusText,
+		ToolCalls:    m.pendingToolCalls(),
+		ToolOutputs:  toolProgress,
+		QueueCount:   m.queueLength(),
+		ShellActive:  shellActive,
+		ShellCommand: shellCommand,
+		ShellOutput:  shellOutput,
 	})
 }
 
@@ -1405,6 +1474,99 @@ func (m *Model) appendToolProgress(callID, chunk string) {
 	if len(m.toolProgress[callID]) > maxToolProgressLen {
 		m.toolProgress[callID] = "…" + m.toolProgress[callID][len(m.toolProgress[callID])-maxToolProgressLen+1:]
 	}
+}
+
+// runShellCmd executes command through the shell executor callback and returns
+// a command that starts the execution and exposes a channel for streaming
+// progress and the final result.
+func (m *Model) runShellCmd(command string) tea.Cmd {
+	m.mu.RLock()
+	execFn := m.shellExecutor
+	appCtx := m.appCtx
+	m.mu.RUnlock()
+
+	if execFn == nil {
+		return func() tea.Msg {
+			return ShellResultMsg{Command: command, ExitCode: -1, Err: fmt.Errorf("shell executor not available")}
+		}
+	}
+
+	ch := make(chan shellEvent, 64)
+	ctx, cancel := context.WithCancel(appCtx)
+	m.mu.Lock()
+	m.shellCancel = cancel
+	m.mu.Unlock()
+
+	go func() {
+		defer close(ch)
+		onProgress := func(p []byte) {
+			select {
+			case ch <- shellEvent{chunk: string(p)}:
+			case <-ctx.Done():
+			}
+		}
+		output, exitCode, err := execFn(ctx, command, onProgress)
+		select {
+		case ch <- shellEvent{result: &ShellResultMsg{Command: command, Output: output, ExitCode: exitCode, Err: err}}:
+		case <-ctx.Done():
+		}
+	}()
+
+	return func() tea.Msg {
+		return shellStartedMsg{Command: command, Ch: ch}
+	}
+}
+
+// readShellProgress returns a command that reads the next event from the
+// running shell command channel.
+func (m *Model) readShellProgress() tea.Cmd {
+	ch := m.shellCh
+	return func() tea.Msg {
+		if ch == nil {
+			return nil
+		}
+		event, ok := <-ch
+		if !ok {
+			return nil
+		}
+		if event.result != nil {
+			return *event.result
+		}
+		return ShellProgressMsg{Chunk: event.chunk}
+	}
+}
+
+// appendShellOutput appends a chunk to the quick shell overlay output,
+// capping the stored output to maxToolProgressLen bytes.
+func (m *Model) appendShellOutput(chunk string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shellOutput += chunk
+	if len(m.shellOutput) > maxToolProgressLen {
+		m.shellOutput = "…" + m.shellOutput[len(m.shellOutput)-maxToolProgressLen+1:]
+	}
+}
+
+// cancelShell cancels the running quick shell command, if any.
+func (m *Model) cancelShell() {
+	m.mu.Lock()
+	cancel := m.shellCancel
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// handleShellResult appends a system message with the command and exit code.
+func (m *Model) handleShellResult(msg ShellResultMsg) tea.Cmd {
+	var text string
+	if msg.Err != nil {
+		text = fmt.Sprintf("shell$ %s\n[error] %v", msg.Command, msg.Err)
+	} else {
+		text = fmt.Sprintf("shell$ %s\n[exit code %d]\n%s", msg.Command, msg.ExitCode, msg.Output)
+	}
+	m.addMessage(msgcomp.NewUserMessage(text, m.styles))
+	return nil
 }
 
 // pendingToolCalls returns the tool calls that should be shown in the activity

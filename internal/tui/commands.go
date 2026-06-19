@@ -47,6 +47,33 @@ type ToolProgressMsg struct {
 	Content string
 }
 
+// ShellProgressMsg carries a live output chunk from the quick shell overlay.
+type ShellProgressMsg struct {
+	Chunk string
+}
+
+// ShellResultMsg carries the result of a quick shell overlay command.
+type ShellResultMsg struct {
+	Command  string
+	Output   string
+	ExitCode int
+	Err      error
+}
+
+// shellEvent is an internal progress or result event from a running shell
+// command in the quick shell overlay.
+type shellEvent struct {
+	chunk  string
+	result *ShellResultMsg
+}
+
+// shellStartedMsg signals that a quick shell command has started and provides
+// the channel through which progress and the final result are delivered.
+type shellStartedMsg struct {
+	Command string
+	Ch      <-chan shellEvent
+}
+
 // StatusMsg carries a transient status sentence for the status bar.
 type StatusMsg struct {
 	Text string

@@ -131,6 +131,8 @@ type Styles struct {
 	SearchOverlay       lipgloss.Style
 	SearchMatch         lipgloss.Style
 	SearchMatchCurrent  lipgloss.Style
+	ShellOverlay        lipgloss.Style
+	ShellPrompt         lipgloss.Style
 	PlanModeIndicator   lipgloss.Style
 	Footer              lipgloss.Style
 	FooterModel         lipgloss.Style
@@ -304,6 +306,16 @@ func (s *Styles) init() {
 		Background(t.InputBg).
 		Foreground(t.Foreground).
 		Padding(0, 1)
+
+	s.ShellOverlay = lipgloss.NewStyle().
+		Background(t.InputBg).
+		Foreground(t.Foreground).
+		Padding(0, 1)
+
+	s.ShellPrompt = lipgloss.NewStyle().
+		Background(t.InputBg).
+		Foreground(t.Primary).
+		Bold(true)
 
 	s.SearchMatch = lipgloss.NewStyle().
 		Background(t.Muted).

@@ -50,6 +50,27 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 		return cmds
 	}
 
+	// Shell overlay takes precedence while it is open.
+	if m.shellOverlay.IsOpen() {
+		if msg.String() == "ctrl+x" {
+			m.shellOverlay.Close()
+			m.updateLayout()
+			return nil
+		}
+		cmd := m.shellOverlay.UpdateMsg(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return cmds
+	}
+
+	// Ctrl+X toggles the shell overlay.
+	if msg.String() == "ctrl+x" {
+		m.shellOverlay.Toggle()
+		m.updateLayout()
+		return cmds
+	}
+
 	// Fullscreen diff preview closes on Esc or Ctrl+E.
 	if m.approvalFullscreen {
 		if msg.String() == "esc" || msg.String() == "ctrl+e" {

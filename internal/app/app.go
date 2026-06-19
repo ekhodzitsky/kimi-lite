@@ -3,11 +3,14 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -422,6 +425,41 @@ func (a *App) Run(ctx context.Context, session *api.Session) error {
 	})
 	model.SetApprovalModeSetter(a.setApprovalMode)
 	model.SetApprovalMode(int(a.approvalGate.GetMode()))
+
+	// Wire the quick shell overlay to the built-in shell tool executor.
+	model.SetShellExecutor(func(ctx context.Context, command string, onProgress func([]byte)) (string, int, error) {
+		args, marshalErr := json.Marshal(map[string]any{"command": command})
+		if marshalErr != nil {
+			return "", -1, fmt.Errorf("marshal shell args: %w", marshalErr)
+		}
+		ctx = core.WithToolProgress(ctx, func(callID, chunk string) {
+			_ = callID
+			if onProgress != nil {
+				onProgress([]byte(chunk))
+			}
+		})
+		result, err := a.builtInExec.Execute(ctx, api.ToolCall{Name: "shell", Arguments: string(args)})
+		exitCode := 0
+		if result.Error != "" {
+			if idx := strings.LastIndex(result.Output, "[exit status "); idx != -1 {
+				rest := result.Output[idx+len("[exit status "):]
+				if end := strings.Index(rest, "]"); end != -1 {
+					if code, parseErr := strconv.Atoi(rest[:end]); parseErr == nil {
+						exitCode = code
+					}
+				}
+			} else {
+				exitCode = -1
+				if err == nil {
+					err = errors.New(result.Error)
+				}
+			}
+		}
+		if err != nil {
+			return result.Output, exitCode, err
+		}
+		return result.Output, exitCode, nil
+	})
 
 	// Set context stats from cached model info.
 	modelInfo := llm.LookupModel(a.resolvedModel)

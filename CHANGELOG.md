@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   placeholder, footer, and activity panel. Queued messages auto-send in FIFO
   order when the turn completes. `Ctrl+C` first cancels the active stream and
   preserves the queue; a second `Ctrl+C` clears the draft.
+- Quick shell overlay (`Ctrl+X`) for running ad-hoc shell commands without
+  leaving the TUI. Output streams to the activity panel and a system message
+  records the command and exit code. Supports command history (`Up`/`Down`),
+  manual-approval confirmation in `MANUAL` mode, and `Ctrl+C` cancel.
 
 ### Changed
 
