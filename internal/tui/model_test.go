@@ -2741,10 +2741,18 @@ func TestApprovalFullscreenDiff(t *testing.T) {
 		Name:      "write_file",
 		Arguments: `{"path":"file.txt","content":"new content\n"}`,
 	}}
-	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
-
-	updated, _ := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	updated, _ := m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
 	model := updated.(*Model)
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Fatal("expected fullscreen to wait for async diff")
+	}
+
+	computed := runApprovalDiffCmd(t, cmd)
+	updated, _ = model.Update(computed)
+	model = updated.(*Model)
 
 	if !model.approvalFullscreen {
 		t.Fatal("expected fullscreen diff to open")
@@ -2768,8 +2776,15 @@ func TestApprovalFullscreenDiff(t *testing.T) {
 		t.Error("expected diff content to be cleared after close")
 	}
 
-	// Reopen and close on Ctrl+E.
-	updated, _ = model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	// Reopen (diff was cleared by Esc, so it recomputes async) and close on Ctrl+E.
+	updated, cmd = model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Fatal("expected fullscreen to wait for async diff on reopen")
+	}
+
+	computed = runApprovalDiffCmd(t, cmd)
+	updated, _ = model.Update(computed)
 	model = updated.(*Model)
 	if !model.approvalFullscreen {
 		t.Fatal("expected fullscreen diff to reopen")
@@ -2803,10 +2818,18 @@ func TestApprovalFullscreenResetsOnNewRequest(t *testing.T) {
 		Name:      "write_file",
 		Arguments: `{"path":"file.txt","content":"new content\n"}`,
 	}}
-	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
-
-	updated, _ := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	updated, _ := m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
 	model := updated.(*Model)
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Fatal("expected fullscreen to wait for async diff")
+	}
+
+	computed := runApprovalDiffCmd(t, cmd)
+	updated, _ = model.Update(computed)
+	model = updated.(*Model)
 	if !model.approvalFullscreen {
 		t.Fatal("expected fullscreen diff to open")
 	}
@@ -2816,6 +2839,9 @@ func TestApprovalFullscreenResetsOnNewRequest(t *testing.T) {
 	model = updated.(*Model)
 	if model.approvalFullscreen {
 		t.Error("expected approvalFullscreen to reset on new ApprovalRequestMsg")
+	}
+	if model.approvalFullscreenPendingReqID != 0 {
+		t.Errorf("expected pending fullscreen reqID to be cleared, got %d", model.approvalFullscreenPendingReqID)
 	}
 	if model.approvalDiffContent != "" {
 		t.Errorf("expected approvalDiffContent to be cleared, got %q", model.approvalDiffContent)
@@ -3288,7 +3314,14 @@ func TestOverlayKeys_ConsumedByApprovalFullscreen(t *testing.T) {
 		Arguments: `{"path":"file.txt","content":"new\n"}`,
 	}}
 	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
-	m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	m = updated.(*Model)
+	if m.approvalFullscreen {
+		t.Fatal("expected fullscreen to wait for async diff")
+	}
+	computed := runApprovalDiffCmd(t, cmd)
+	updated, _ = m.Update(computed)
+	m = updated.(*Model)
 	if !m.approvalFullscreen {
 		t.Fatal("expected fullscreen diff to be open")
 	}
@@ -3298,7 +3331,7 @@ func TestOverlayKeys_ConsumedByApprovalFullscreen(t *testing.T) {
 	m.addMessage(assistant)
 
 	// Pressing 'r' while fullscreen diff is open must not toggle raw mode.
-	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	model := updated.(*Model)
 	if !model.approvalFullscreen {
 		t.Error("fullscreen diff should remain open")

@@ -15,9 +15,10 @@ import (
 // approvalDiffComputedMsg carries the asynchronously computed inline diff for
 // the current pending approval call.
 type approvalDiffComputedMsg struct {
-	CallID string
-	Diff   string
-	Err    error
+	RequestID int64
+	CallID    string
+	Diff      string
+	Err       error
 }
 
 // approvalStartRequest starts a new approval request under m.mu and clears any
@@ -26,6 +27,7 @@ func (m *Model) approvalStartRequest(calls []api.ToolCall, requestID int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.approvalFullscreen = false
+	m.approvalFullscreenPendingReqID = 0
 	m.approvalDiffContent = ""
 	m.approvalDiffCallID = ""
 	m.approvalDiffErr = nil
@@ -80,6 +82,7 @@ func (m *Model) approvalApproveCurrent(decision api.ApprovalDecision) (ApprovalR
 func (m *Model) approvalComputeDiffCmd() tea.Cmd {
 	m.mu.RLock()
 	call, ok := m.approval.currentCall()
+	reqID := m.approval.requestID()
 	session := m.session
 	protectedPaths := append([]string(nil), m.protectedPaths...)
 	m.mu.RUnlock()
@@ -90,7 +93,7 @@ func (m *Model) approvalComputeDiffCmd() tea.Cmd {
 
 	return func() tea.Msg {
 		diff, err := toolCallDiff(call, session.Path, protectedPaths)
-		return approvalDiffComputedMsg{CallID: call.ID, Diff: diff, Err: err}
+		return approvalDiffComputedMsg{RequestID: reqID, CallID: call.ID, Diff: diff, Err: err}
 	}
 }
 
@@ -101,6 +104,8 @@ func (m *Model) renderApprovalDialog(background string) string {
 	cachedCallID := m.approvalDiffCallID
 	cachedDiff := m.approvalDiffContent
 	cachedErr := m.approvalDiffErr
+	total := len(m.approval.pending())
+	currentIdx := m.approval.currentIndex()
 	m.mu.RUnlock()
 	if !ok || session == nil {
 		return background
@@ -108,9 +113,8 @@ func (m *Model) renderApprovalDialog(background string) string {
 	var b strings.Builder
 	b.WriteString("Tool call requires approval\n\n")
 
-	total := len(m.approval.pending())
 	if total > 1 {
-		fmt.Fprintf(&b, "Call %d of %d\n\n", m.approval.currentIndex()+1, total)
+		fmt.Fprintf(&b, "Call %d of %d\n\n", currentIdx+1, total)
 	}
 
 	fmt.Fprintf(&b, "Tool: %s\n", call.Name)

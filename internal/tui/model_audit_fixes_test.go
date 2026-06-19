@@ -177,6 +177,31 @@ func TestApprovalDialog_UnsafeToolHidesAlways(t *testing.T) {
 	}
 }
 
+func runApprovalDiffCmd(t *testing.T, cmd tea.Cmd) approvalDiffComputedMsg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("expected command")
+	}
+	msg := cmd()
+	if computed, ok := msg.(approvalDiffComputedMsg); ok {
+		return computed
+	}
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected approvalDiffComputedMsg or tea.BatchMsg, got %T", msg)
+	}
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		if computed, ok := c().(approvalDiffComputedMsg); ok {
+			return computed
+		}
+	}
+	t.Fatal("expected approvalDiffComputedMsg in batch")
+	return approvalDiffComputedMsg{}
+}
+
 func TestApprovalRequest_CachesDiffAsync(t *testing.T) {
 	t.Parallel()
 
@@ -203,24 +228,12 @@ func TestApprovalRequest_CachesDiffAsync(t *testing.T) {
 		t.Fatal("expected command after ApprovalRequestMsg")
 	}
 
-	msg := cmd()
-	batch, ok := msg.(tea.BatchMsg)
-	if !ok {
-		t.Fatalf("expected tea.BatchMsg, got %T", msg)
-	}
-
-	var computed approvalDiffComputedMsg
-	for _, c := range batch {
-		if c == nil {
-			continue
-		}
-		if m, ok := c().(approvalDiffComputedMsg); ok {
-			computed = m
-			break
-		}
+	computed := runApprovalDiffCmd(t, cmd)
+	if computed.RequestID != 1 {
+		t.Errorf("RequestID = %d, want 1", computed.RequestID)
 	}
 	if computed.CallID != "1" {
-		t.Fatalf("expected computed diff for call 1, got %+v", computed)
+		t.Errorf("CallID = %q, want 1", computed.CallID)
 	}
 	if computed.Diff == "" {
 		t.Fatal("expected non-empty diff")
@@ -233,6 +246,44 @@ func TestApprovalRequest_CachesDiffAsync(t *testing.T) {
 	}
 	if !strings.Contains(model2.approvalDiffContent, "new content") {
 		t.Errorf("expected cached diff to contain new content, got %q", model2.approvalDiffContent)
+	}
+}
+
+func TestApprovalDiffComputed_IgnoresStaleRequestID(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "file.txt"), []byte("old content\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: tmp}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	calls := []api.ToolCall{{
+		ID:        "1",
+		Name:      "write_file",
+		Arguments: `{"path":"file.txt","content":"new content\n"}`,
+	}}
+	updated, cmd := m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
+	model := updated.(*Model)
+	stale := runApprovalDiffCmd(t, cmd)
+
+	// A new approval request replaces the active request before the stale diff arrives.
+	updated, _ = model.Update(ApprovalRequestMsg{Calls: calls, RequestID: 2})
+	model = updated.(*Model)
+
+	updated, _ = model.Update(stale)
+	model = updated.(*Model)
+	if model.approvalDiffCallID != "" {
+		t.Errorf("expected stale diff to be ignored, got callID %q", model.approvalDiffCallID)
+	}
+	if strings.Contains(model.approvalDiffContent, "new content") {
+		t.Error("expected stale diff content to be ignored")
 	}
 }
 
@@ -257,12 +308,23 @@ func TestApprovalFullscreenDiff_EdgeToEdge(t *testing.T) {
 		Name:      "write_file",
 		Arguments: `{"path":"file.txt","content":"new content\n"}`,
 	}}
-	m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
-
-	updated, _ := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	updated, _ := m.Update(ApprovalRequestMsg{Calls: calls, RequestID: 1})
 	model := updated.(*Model)
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: "ctrl+e"})
+	model = updated.(*Model)
+	if model.approvalFullscreen {
+		t.Fatal("expected fullscreen to wait for async diff")
+	}
+	if model.approvalFullscreenPendingReqID != 1 {
+		t.Errorf("pending reqID = %d, want 1", model.approvalFullscreenPendingReqID)
+	}
+
+	computed := runApprovalDiffCmd(t, cmd)
+	updated, _ = model.Update(computed)
+	model = updated.(*Model)
 	if !model.approvalFullscreen {
-		t.Fatal("expected fullscreen diff to open")
+		t.Fatal("expected fullscreen diff to open after async diff")
 	}
 
 	view := model.View().Content

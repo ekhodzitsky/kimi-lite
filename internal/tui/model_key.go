@@ -117,26 +117,21 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 		case "ctrl+e":
 			m.mu.RLock()
 			call, ok := m.approval.currentCall()
-			session := m.session
-			protectedPaths := append([]string(nil), m.protectedPaths...)
 			cachedCallID := m.approvalDiffCallID
 			cachedDiff := m.approvalDiffContent
+			reqID := m.approval.requestID()
 			m.mu.RUnlock()
-			if !ok || session == nil {
+			if !ok {
 				return cmds
 			}
-			diff := cachedDiff
-			if cachedCallID != call.ID || diff == "" {
-				computed, err := toolCallDiff(call, session.Path, protectedPaths)
-				if err != nil {
-					return cmds
-				}
-				diff = computed
-			}
-			if diff != "" {
+			if cachedCallID == call.ID && cachedDiff != "" {
 				m.approvalFullscreen = true
-				m.approvalDiffContent = diff
+				return cmds
 			}
+			m.mu.Lock()
+			m.approvalFullscreenPendingReqID = reqID
+			m.mu.Unlock()
+			cmds = append(cmds, m.approvalComputeDiffCmd())
 			return cmds
 		}
 	}

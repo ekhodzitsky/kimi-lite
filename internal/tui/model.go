@@ -138,6 +138,9 @@ type Model struct {
 	approvalDiffCallID string
 	// approvalDiffErr holds the error from computing the cached diff, if any.
 	approvalDiffErr error
+	// approvalFullscreenPendingReqID is the request ID waiting for an async
+	// diff before opening fullscreen. Zero means no fullscreen is pending.
+	approvalFullscreenPendingReqID int64
 
 	// planRequest holds the generated plan waiting for user approval.
 	planRequest string
@@ -523,10 +526,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case approvalDiffComputedMsg:
 		m.mu.Lock()
-		if call, ok := m.approval.currentCall(); ok && call.ID == msg.CallID {
-			m.approvalDiffCallID = msg.CallID
-			m.approvalDiffContent = msg.Diff
-			m.approvalDiffErr = msg.Err
+		if msg.RequestID == m.approval.requestID() {
+			if call, ok := m.approval.currentCall(); ok && call.ID == msg.CallID {
+				m.approvalDiffCallID = msg.CallID
+				m.approvalDiffContent = msg.Diff
+				m.approvalDiffErr = msg.Err
+			}
+			if m.approvalFullscreenPendingReqID == msg.RequestID {
+				m.approvalFullscreenPendingReqID = 0
+				if msg.Err == nil && msg.Diff != "" {
+					m.approvalFullscreen = true
+				}
+			}
 		}
 		m.mu.Unlock()
 
