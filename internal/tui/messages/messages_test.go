@@ -442,9 +442,10 @@ func TestWordWrap(t *testing.T) {
 		want  string
 	}{
 		{"hello world", 20, "hello world"},
-		{"hello world", 5, "hello\n worl\nd"},
+		{"hello world", 5, "hello\nworld"},
 		{"", 10, ""},
 		{"hello\nworld", 10, "hello\nworld"},
+		{"helloworld", 4, "hell\nowor\nld"},
 	}
 
 	for _, tt := range tests {
@@ -473,7 +474,7 @@ func TestWordWrap_ANSISequences(t *testing.T) {
 	// ANSI escape sequences contribute zero width and must not be split.
 	input := "\x1b[31mhello world\x1b[0m"
 	got := wordWrap(input, 5)
-	want := "\x1b[31mhello\x1b[0m\n\x1b[31m worl\x1b[0m\n\x1b[31md\x1b[0m"
+	want := "\x1b[31mhello\nworld\x1b[0m"
 	if got != want {
 		t.Errorf("wordWrap(%q, 5) = %q, want %q", input, got, want)
 	}
@@ -487,10 +488,13 @@ func TestRenderedContent_SkipsGlamourWhileStreaming(t *testing.T) {
 	m.SetWidth(80)
 	m.SetStreaming(true)
 
-	// While streaming, should return raw content
+	// While streaming, should return raw content with a cursor indicator.
 	raw := m.renderedContent()
-	if raw != m.Content {
-		t.Errorf("streaming renderedContent = %q, want raw %q", raw, m.Content)
+	if !strings.HasSuffix(raw, streamingCursor) {
+		t.Errorf("streaming renderedContent = %q, want cursor suffix %q", raw, streamingCursor)
+	}
+	if !strings.Contains(raw, m.Content) {
+		t.Errorf("streaming renderedContent = %q, should contain raw %q", raw, m.Content)
 	}
 	if strings.Contains(raw, "\x1b[") {
 		t.Error("streaming content should not contain ANSI escape codes")
@@ -513,7 +517,7 @@ func TestCachedRendererOutput(t *testing.T) {
 		if err != nil {
 			t.Fatalf("glamour.Render error: %v", err)
 		}
-		got := safeGlamourRender(content, theme)
+		got := safeGlamourRender(content, theme, 80)
 		if ansi.Strip(got) != ansi.Strip(want) {
 			t.Errorf("theme=%s: cached output differs from glamour.Render", theme)
 		}
@@ -529,10 +533,10 @@ func BenchmarkRenderMarkdown(b *testing.B) {
 	})
 	b.Run("cached", func(b *testing.B) {
 		// Prime cache
-		_ = safeGlamourRender(content, "dark")
+		_ = safeGlamourRender(content, "dark", 80)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_ = safeGlamourRender(content, "dark")
+			_ = safeGlamourRender(content, "dark", 80)
 		}
 	})
 }
@@ -603,7 +607,7 @@ func TestSafeGlamourRender_BadCacheEntry(t *testing.T) {
 	defer rendererCache.Delete(theme)
 
 	content := "# hello\n"
-	got := safeGlamourRender(content, theme)
+	got := safeGlamourRender(content, theme, 80)
 	if got != content {
 		t.Errorf("safeGlamourRender with bad cache entry = %q, want raw content %q", got, content)
 	}
@@ -723,9 +727,150 @@ func TestSafeGlamourRender_FallbackOnError(t *testing.T) {
 	// glamour cannot be made to panic deterministically, but an invalid theme
 	// forces the renderer-creation error branch and locks in the fallback-to-raw
 	// contract.
-	got := safeGlamourRender(content, "this-theme-does-not-exist-12345")
+	got := safeGlamourRender(content, "this-theme-does-not-exist-12345", 80)
 	if got != content {
 		t.Errorf("expected raw content fallback, got %q", got)
+	}
+}
+
+func TestPrettyJSONArgs(t *testing.T) {
+	t.Parallel()
+
+	raw := `{"path":"/tmp/test","count":1}`
+	got := prettyJSONArgs(raw)
+	if !strings.Contains(got, "\n") {
+		t.Errorf("prettyJSONArgs should indent JSON, got %q", got)
+	}
+	if !strings.Contains(got, `"path"`) {
+		t.Errorf("prettyJSONArgs should preserve keys, got %q", got)
+	}
+
+	invalid := "not json"
+	if prettyJSONArgs(invalid) != invalid {
+		t.Errorf("prettyJSONArgs should return raw input for invalid JSON, got %q", prettyJSONArgs(invalid))
+	}
+}
+
+func TestRenderedContent_AssistantWidthInvalidation(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	content := "This is a fairly long assistant message that should wrap differently at different widths."
+	m := NewAssistantMessage(content, st)
+	m.SetWidth(120)
+	wide := m.renderedContent()
+	m.SetWidth(40)
+	narrow := m.renderedContent()
+	if wide == narrow {
+		t.Error("renderedContent should be recomputed when width changes")
+	}
+}
+
+func TestRenderedContent_RawModeWraps(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	content := strings.Repeat("word ", 30)
+	m := NewAssistantMessage(content, st)
+	m.SetWidth(40)
+	m.SetRawMode(true)
+	got := m.renderedContent()
+	if !strings.Contains(got, "\n") {
+		t.Errorf("raw mode should wrap long lines, got %q", got)
+	}
+}
+
+func TestRenderedContent_StreamingCursor(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewAssistantMessage("typing", st)
+	m.SetWidth(80)
+	m.SetStreaming(true)
+
+	got := m.renderedContent()
+	if !strings.HasSuffix(got, streamingCursor) {
+		t.Errorf("streaming renderedContent = %q, want cursor suffix %q", got, streamingCursor)
+	}
+}
+
+func TestContentWithParts(t *testing.T) {
+	t.Parallel()
+
+	parts := []api.ContentPart{
+		{Type: api.ContentPartText, Text: "extra text"},
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "http://example.com/img.png"}},
+		{Type: api.ContentPartImageData, ImageData: &api.ImageData{MIMEType: "image/png", Data: "abc"}},
+	}
+	got := contentWithParts("base", parts)
+	if !strings.Contains(got, "base") {
+		t.Error("contentWithParts should preserve base content")
+	}
+	if !strings.Contains(got, "extra text") {
+		t.Error("contentWithParts should include text parts")
+	}
+	if !strings.Contains(got, "🖼️ image") {
+		t.Errorf("contentWithParts should render image placeholder, got %q", got)
+	}
+	if !strings.Contains(got, "http://example.com/img.png") {
+		t.Error("contentWithParts should include image URL")
+	}
+
+	if got := contentWithParts("", parts); strings.HasPrefix(got, "\n") {
+		t.Errorf("contentWithParts with empty base should not lead with blank lines, got %q", got)
+	}
+}
+
+func TestUserMessageView_ContentParts(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewUserMessage("Look at this", st)
+	m.ContentParts = []api.ContentPart{
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "http://example.com/img.png"}},
+	}
+	m.SetWidth(80)
+	view := m.View().Content
+	if !strings.Contains(view, "🖼️ image") {
+		t.Errorf("user message view should render image part, got %q", view)
+	}
+}
+
+func TestAssistantMessageView_ContentParts(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := NewAssistantMessage("Here is an image", st)
+	m.ContentParts = []api.ContentPart{
+		{Type: api.ContentPartImageURL, ImageURL: &api.ImageURL{URL: "http://example.com/img.png"}},
+	}
+	m.SetWidth(80)
+	m.SetStreaming(false)
+	view := m.View().Content
+	if !strings.Contains(view, "🖼️ image") {
+		t.Errorf("assistant message view should render image part, got %q", view)
+	}
+}
+
+func TestToolCallView_ContentParts(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	call := api.ToolCall{ID: "1", Name: "read_file", Arguments: `{}`}
+	m := NewToolCallMessage(call, st)
+	m.Expanded = true
+	m.SetToolResult(api.ToolResult{
+		CallID: "1",
+		Name:   "read_file",
+		Output: "done",
+		ContentParts: []api.ContentPart{
+			{Type: api.ContentPartImageData, ImageData: &api.ImageData{MIMEType: "image/png", Data: "abc"}},
+		},
+	})
+	m.SetWidth(80)
+	view := m.View().Content
+	if !strings.Contains(view, "🖼️ image") {
+		t.Errorf("tool result view should render image content parts, got %q", view)
 	}
 }
 

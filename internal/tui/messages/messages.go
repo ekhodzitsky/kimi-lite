@@ -2,6 +2,7 @@
 package messages
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -28,6 +29,7 @@ var rendererCache sync.Map // key: theme string, value: *cachedRenderer
 const (
 	messageWidthPadding = 8
 	minMessageWidth     = 20
+	streamingCursor     = "▍"
 )
 
 // Type represents the kind of message.
@@ -66,6 +68,10 @@ type Message struct {
 	Content string
 	Role    api.Role
 
+	// ContentParts holds multi-modal parts (text, images) for user/assistant/tool
+	// messages. They are rendered as placeholders or links in the transcript.
+	ContentParts []api.ContentPart
+
 	// ToolCall fields (only for TypeToolCall)
 	ToolCall   api.ToolCall
 	ToolResult *api.ToolResult
@@ -78,9 +84,10 @@ type Message struct {
 	Err error
 
 	// Assistant rendering
-	Rendered    string // cached glamour output
-	renderCache string // content that was rendered
-	RawMode     bool   // when true, bypass glamour and show raw markdown
+	Rendered         string // cached glamour output
+	renderCache      string // content that was rendered
+	renderCacheWidth int    // width used for the cached render
+	RawMode          bool   // when true, bypass glamour and show raw markdown
 
 	// Debounce state
 	needsRender bool
@@ -249,6 +256,7 @@ func (m *Message) setRawModeLocked(raw bool) {
 	m.RawMode = raw
 	m.Rendered = ""
 	m.renderCache = ""
+	m.renderCacheWidth = 0
 	m.needsRender = true
 }
 
@@ -288,7 +296,9 @@ func (m *Message) viewUser() string {
 		return m.cachedView
 	}
 	prefix := m.Styles.UserMessage.Render("You")
-	content := wordWrap(m.Content, max(m.Width-messageWidthPadding, minMessageWidth))
+	width := max(m.Width-messageWidthPadding, minMessageWidth)
+	content := contentWithParts(m.Content, m.ContentParts)
+	content = wordWrap(content, width)
 	body := m.Styles.UserMessage.Render(content)
 	m.cachedView = lipgloss.JoinVertical(lipgloss.Left, prefix, body)
 	m.cacheWidth = m.Width
@@ -302,35 +312,42 @@ func (m *Message) viewAssistant() string {
 }
 
 func (m *Message) renderedContent() string {
-	if !m.Streaming && m.Rendered != "" && m.renderCache == m.Content && !m.needsRender {
+	width := max(m.Width-messageWidthPadding, minMessageWidth)
+	source := contentWithParts(m.Content, m.ContentParts)
+
+	if !m.Streaming && m.Rendered != "" && m.renderCache == source && m.renderCacheWidth == width && !m.needsRender {
 		return m.Rendered
 	}
 
 	// Raw mode bypasses glamour for finished assistant messages.
 	if m.RawMode && !m.Streaming {
-		m.renderCache = m.Content
+		m.renderCache = source
+		m.renderCacheWidth = width
 		m.needsRender = false
-		return m.Content
+		return wordWrap(source, width)
 	}
 
-	shouldRender := !m.Streaming
-
-	if shouldRender {
-		rendered := safeGlamourRender(m.Content, m.Styles.Theme.Name)
+	if !m.Streaming {
+		rendered := safeGlamourRender(source, m.Styles.Theme.Name, width)
 		m.Rendered = rendered
-		m.renderCache = m.Content
+		m.renderCache = source
+		m.renderCacheWidth = width
 		m.needsRender = false
 	}
 
-	// During active streaming, show raw text
+	// During active streaming, show raw text with a cursor indicator.
 	if m.Streaming {
-		return m.Content
+		wrapped := wordWrap(source, width)
+		if wrapped == "" {
+			return streamingCursor
+		}
+		return wrapped + streamingCursor
 	}
 
 	if m.Rendered != "" {
 		return m.Rendered
 	}
-	return m.Content
+	return source
 }
 
 func (m *Message) viewToolCall() string {
@@ -383,6 +400,13 @@ func (m *Message) viewToolCall() string {
 				outWrapped := wordWrap(m.ToolResult.Output, max(m.Width-messageWidthPadding, minMessageWidth))
 				b.WriteString(m.Styles.ToolCallExpanded.Render("Output: " + outWrapped))
 			}
+
+			if len(m.ToolResult.ContentParts) > 0 {
+				b.WriteString("\n")
+				parts := contentWithParts("", m.ToolResult.ContentParts)
+				partsWrapped := wordWrap(parts, max(m.Width-messageWidthPadding, minMessageWidth))
+				b.WriteString(m.Styles.ToolCallExpanded.Render(partsWrapped))
+			}
 		}
 	}
 
@@ -393,16 +417,15 @@ func (m *Message) viewToolCall() string {
 }
 
 func prettyJSONArgs(raw string) string {
-	var out strings.Builder
-	for _, r := range raw {
-		if r == '{' || r == '}' || r == ',' {
-			out.WriteRune(r)
-			out.WriteRune(' ')
-		} else {
-			out.WriteRune(r)
-		}
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return raw
 	}
-	return strings.TrimSpace(out.String())
+	pretty, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return raw
+	}
+	return string(pretty)
 }
 
 // isLineCountTool reports whether the tool result should be summarized as a line count.
@@ -418,6 +441,37 @@ func countLines(s string) int {
 	return strings.Count(s, "\n") + 1
 }
 
+// contentWithParts appends multi-modal content parts (text, images) to a base
+// content string. Image parts are rendered as placeholders or links.
+func contentWithParts(content string, parts []api.ContentPart) string {
+	if len(parts) == 0 {
+		return content
+	}
+	var b strings.Builder
+	b.WriteString(content)
+	for _, p := range parts {
+		switch p.Type {
+		case api.ContentPartText:
+			if p.Text != "" {
+				b.WriteString("\n\n")
+				b.WriteString(p.Text)
+			}
+		case api.ContentPartImageURL:
+			b.WriteString("\n\n🖼️ image")
+			if p.ImageURL != nil && p.ImageURL.URL != "" {
+				b.WriteString(": ")
+				b.WriteString(p.ImageURL.URL)
+			}
+		case api.ContentPartImageData:
+			b.WriteString("\n\n🖼️ image")
+		}
+	}
+	if content == "" {
+		return strings.TrimLeft(b.String(), "\n")
+	}
+	return b.String()
+}
+
 func (m *Message) viewError() string {
 	if m.cacheWidth == m.Width && m.cachedView != "" {
 		return m.cachedView
@@ -430,7 +484,7 @@ func (m *Message) viewError() string {
 	return m.cachedView
 }
 
-func safeGlamourRender(content, theme string) (rendered string) {
+func safeGlamourRender(content, theme string, width int) (rendered string) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("glamour.Render panicked", "recover", r)
@@ -438,7 +492,8 @@ func safeGlamourRender(content, theme string) (rendered string) {
 		}
 	}()
 
-	cr, _ := rendererCache.LoadOrStore(theme, &cachedRenderer{})
+	key := fmt.Sprintf("%s:%d", theme, width)
+	cr, _ := rendererCache.LoadOrStore(key, &cachedRenderer{})
 	c, ok := cr.(*cachedRenderer)
 	if !ok {
 		return content
@@ -448,7 +503,10 @@ func safeGlamourRender(content, theme string) (rendered string) {
 
 	if c.r == nil {
 		var err error
-		c.r, err = glamour.NewTermRenderer(glamour.WithStandardStyle(theme))
+		c.r, err = glamour.NewTermRenderer(
+			glamour.WithStandardStyle(theme),
+			glamour.WithWordWrap(width),
+		)
 		if err != nil {
 			return content
 		}
@@ -468,11 +526,18 @@ func wordWrap(s string, width int) string {
 	lines := strings.Split(s, "\n")
 	var out []string
 	for _, line := range lines {
-		for ansi.StringWidth(line) > width {
-			out = append(out, ansi.Cut(line, 0, width))
-			line = ansi.Cut(line, width, ansi.StringWidth(line))
+		// Soft-wrap at word boundaries (spaces and hyphens). ANSI sequences are
+		// preserved and wide characters are accounted for.
+		soft := ansi.Wordwrap(line, width, " ")
+		for _, wrapped := range strings.Split(soft, "\n") {
+			// Hard-wrap any line that is still too long (indivisible runs such as
+			// very long identifiers, URLs, or CJK text without breakpoints).
+			for ansi.StringWidth(wrapped) > width {
+				out = append(out, ansi.Cut(wrapped, 0, width))
+				wrapped = ansi.Cut(wrapped, width, ansi.StringWidth(wrapped))
+			}
+			out = append(out, wrapped)
 		}
-		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
 }
