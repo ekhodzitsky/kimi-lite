@@ -14,6 +14,29 @@ import (
 func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 
+	// Ctrl+F toggles the search overlay.
+	if msg.String() == "ctrl+f" {
+		if m.search.IsOpen() {
+			m.search.Close()
+			m.vp.ClearSearch()
+		} else {
+			m.search.Open()
+			count, idx := m.vp.SetSearch(m.search.Query(), m.search.CaseSensitive())
+			m.search.SetMatches(count, idx)
+		}
+		m.updateLayout()
+		return cmds
+	}
+
+	// Search overlay takes precedence while it is open.
+	if m.search.IsOpen() {
+		cmd := m.search.UpdateMsg(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return cmds
+	}
+
 	// Help overlay takes precedence while it is open.
 	if m.showHelp {
 		if help.CloseKeys(msg.String()) || msg.String() == "?" {

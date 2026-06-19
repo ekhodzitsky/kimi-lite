@@ -22,6 +22,19 @@ func (m *Model) activityHeight() int {
 	return m.activity.Height()
 }
 
+// searchHeight returns the rendered height of the search overlay, or 0 when it
+// is closed.
+func (m *Model) searchHeight() int {
+	if !m.search.IsOpen() {
+		return 0
+	}
+	h := lipgloss.Height(m.search.View().Content)
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
 // layoutRect holds computed geometry for a single frame.
 type layoutRect struct {
 	contentWidth int
@@ -53,11 +66,12 @@ func (m *Model) layout() layoutRect {
 	welcomeHeight := m.welcomeHeight()
 	inputHeight := m.inputHeight()
 	activityHeight := m.activityHeight()
-	vpHeight := m.height - statusHeight - inputHeight - welcomeHeight - activityHeight
+	searchHeight := m.searchHeight()
+	vpHeight := m.height - statusHeight - inputHeight - welcomeHeight - activityHeight - searchHeight
 	if vpHeight < minViewportHeight {
 		vpHeight = minViewportHeight
 	}
-	statusY := welcomeHeight + vpHeight + inputHeight + activityHeight
+	statusY := welcomeHeight + vpHeight + inputHeight + activityHeight + searchHeight
 	if statusY > m.height {
 		statusY = m.height
 	}
@@ -77,6 +91,7 @@ func (m *Model) applyLayoutSizes(l layoutRect) {
 	m.footer.SetSize(l.contentWidth)
 	m.welcome.SetSize(l.contentWidth)
 	m.activity.SetSize(l.contentWidth)
+	m.search.SetSize(l.contentWidth)
 }
 
 func (m *Model) contentWidth() int {

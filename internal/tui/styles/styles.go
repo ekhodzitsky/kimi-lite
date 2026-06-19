@@ -128,6 +128,9 @@ type Styles struct {
 	ApprovalDialog      lipgloss.Style
 	PlanPanel           lipgloss.Style
 	SteerOverlay        lipgloss.Style
+	SearchOverlay       lipgloss.Style
+	SearchMatch         lipgloss.Style
+	SearchMatchCurrent  lipgloss.Style
 	PlanModeIndicator   lipgloss.Style
 	Footer              lipgloss.Style
 	FooterModel         lipgloss.Style
@@ -296,6 +299,20 @@ func (s *Styles) init() {
 		BorderStyle(lipgloss.DoubleBorder()).
 		BorderForeground(t.Secondary).
 		Padding(1, 2)
+
+	s.SearchOverlay = lipgloss.NewStyle().
+		Background(t.InputBg).
+		Foreground(t.Foreground).
+		Padding(0, 1)
+
+	s.SearchMatch = lipgloss.NewStyle().
+		Background(t.Muted).
+		Foreground(t.Background)
+
+	s.SearchMatchCurrent = lipgloss.NewStyle().
+		Background(t.Highlight).
+		Foreground(t.Background).
+		Bold(true)
 
 	s.PlanModeIndicator = lipgloss.NewStyle().
 		Background(t.Background).

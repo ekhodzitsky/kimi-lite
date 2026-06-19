@@ -21,6 +21,7 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/input"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/mentions"
 	msgcomp "github.com/ekhodzitsky/kimi-lite/internal/tui/messages"
+	"github.com/ekhodzitsky/kimi-lite/internal/tui/search"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/sessions"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/styles"
 	"github.com/ekhodzitsky/kimi-lite/internal/tui/viewport"
@@ -134,6 +135,9 @@ type Model struct {
 	helpPanel *help.Model
 	showHelp  bool
 
+	// search is the transcript search overlay.
+	search *search.Model
+
 	// approvalFullscreen shows a temporary fullscreen diff preview for the
 	// pending approval call.
 	approvalFullscreen  bool
@@ -236,6 +240,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeCon
 	wc := welcome.New(st)
 	ac := activity.New(st)
 	hp := help.New(st)
+	sh := search.New(st)
 
 	mp := &mentions.FileWalker{MaxDepth: 3}
 	m := &Model{
@@ -247,6 +252,7 @@ func New(cfg *api.Config, session *api.Session, appCtx context.Context, themeCon
 		welcome:         wc,
 		activity:        ac,
 		helpPanel:       hp,
+		search:          sh,
 		messages:        make([]*msgcomp.Message, 0),
 		state:           api.TurnIdle,
 		session:         session,
@@ -418,6 +424,7 @@ func (m *Model) helpData() help.Data {
 		{Keys: kb.Yolo, Description: "Toggle yolo mode"},
 		{Keys: kb.Steer, Description: "Steer response while streaming"},
 		{Keys: kb.Paste, Description: "Paste image or file"},
+		{Keys: "ctrl+f", Description: "Find in transcript"},
 		{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
 		{Keys: kb.Send + " (viewport, tool call)", Description: "Expand/collapse tool call"},
 		{Keys: kb.Cancel, Description: "Cancel / clear draft"},
@@ -522,7 +529,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Overlays own the keyboard while open; do not dispatch the key to
 		// child components.
-		if m.planPending || m.showHelp || m.approvalFullscreen || m.steerOpen {
+		if m.planPending || m.showHelp || m.approvalFullscreen || m.steerOpen || m.search.IsOpen() {
 			return m, tea.Batch(cmds...)
 		}
 	case tea.MouseReleaseMsg:
@@ -831,6 +838,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgcomp.RenderInvalidateMsg:
 		m.rebuildRenderedContent()
 
+	case search.QueryChangedMsg:
+		count, idx := m.vp.SetSearch(msg.Query, msg.CaseSensitive)
+		m.search.SetMatches(count, idx)
+
+	case search.NextMsg:
+		idx, count, ok := m.vp.SearchNext()
+		if ok {
+			m.search.SetMatches(count, idx)
+		}
+
+	case search.PreviousMsg:
+		idx, count, ok := m.vp.SearchPrevious()
+		if ok {
+			m.search.SetMatches(count, idx)
+		}
+
+	case search.CloseMsg:
+		m.search.Close()
+		m.vp.ClearSearch()
+		m.updateLayout()
+
 	case input.SendMsg:
 		cmds = append(cmds, m.handleSend(msg.Content, msg.ContentParts)...)
 
@@ -891,6 +919,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	m.mu.Unlock()
 
+	m.refreshSearch()
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -916,6 +946,10 @@ func (m *Model) View() tea.View {
 	mainContent.WriteString("\n")
 	if act := m.activity.View(); act != "" {
 		mainContent.WriteString(act)
+		mainContent.WriteString("\n")
+	}
+	if searchView := m.search.View(); searchView.Content != "" {
+		mainContent.WriteString(searchView.Content)
 		mainContent.WriteString("\n")
 	}
 	mainContent.WriteString(m.input.View().Content)
@@ -1388,6 +1422,16 @@ func (m *Model) vpWidth() int {
 		contentWidth = minContentWidth
 	}
 	return contentWidth - viewportWidthPadding
+}
+
+// refreshSearch recomputes viewport highlights when the search overlay is open
+// and the underlying transcript has changed.
+func (m *Model) refreshSearch() {
+	if !m.search.IsOpen() {
+		return
+	}
+	count, idx := m.vp.RefreshSearch()
+	m.search.SetMatches(count, idx)
 }
 
 // shellQuote returns s unchanged if it contains no shell-special characters;
