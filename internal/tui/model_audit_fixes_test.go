@@ -14,6 +14,214 @@ import (
 	"github.com/ekhodzitsky/kimi-lite/pkg/api"
 )
 
+func TestHelpData_UsesConfiguredKeybindings(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Keybindings.Send = "ctrl+enter"
+	cfg.Keybindings.Newline = "enter"
+	cfg.Keybindings.Cancel = "ctrl+[" // missing config field? no, it's there
+	cfg.Keybindings.Quit = "ctrl+q"
+	cfg.Keybindings.Yolo = "ctrl+o"
+	cfg.Keybindings.FocusNext = "ctrl+n"
+	cfg.Keybindings.FocusPrev = "ctrl+p"
+	cfg.Keybindings.ApproveYes = "f1"
+	cfg.Keybindings.ApproveNo = "f2"
+	cfg.Keybindings.ApproveAlways = "f3"
+	cfg.Keybindings.ApproveDiff = "f4"
+	cfg.Keybindings.ExternalEditor = "ctrl+x"
+	cfg.Keybindings.Steer = "ctrl+t"
+	cfg.Keybindings.Paste = "ctrl+shift+v"
+
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+
+	data := m.helpData()
+	want := map[string]bool{
+		"ctrl+enter (input)": false,
+		"enter":              false,
+		"ctrl+[":             false,
+		"ctrl+q":             false,
+		"ctrl+o":             false,
+		"ctrl+n":             false,
+		"ctrl+p":             false,
+		"ctrl+x":             false,
+		"ctrl+t":             false,
+		"ctrl+shift+v":       false,
+	}
+	for _, s := range data.Shortcuts {
+		if _, ok := want[s.Keys]; ok {
+			want[s.Keys] = true
+		}
+	}
+	for k, found := range want {
+		if !found {
+			t.Errorf("expected help data to contain shortcut %q", k)
+		}
+	}
+}
+
+func TestHelpData_FallsBackToDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Keybindings.Send = ""
+	cfg.Keybindings.Newline = ""
+	cfg.Keybindings.Cancel = ""
+	cfg.Keybindings.Quit = ""
+	cfg.Keybindings.Yolo = ""
+	cfg.Keybindings.FocusNext = ""
+	cfg.Keybindings.FocusPrev = ""
+	cfg.Keybindings.ApproveYes = ""
+	cfg.Keybindings.ApproveNo = ""
+	cfg.Keybindings.ApproveAlways = ""
+	cfg.Keybindings.ApproveDiff = ""
+	cfg.Keybindings.ExternalEditor = ""
+	cfg.Keybindings.Steer = ""
+	cfg.Keybindings.Paste = ""
+
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.state = api.TurnWaitingApproval
+
+	data := m.helpData()
+	want := map[string]bool{
+		"enter (input)":               false,
+		"alt+enter":                   false,
+		"esc":                         false,
+		"ctrl+c":                      false,
+		"ctrl+y":                      false,
+		"tab":                         false,
+		"shift+tab":                   false,
+		"ctrl+g":                      false,
+		"ctrl+s":                      false,
+		"ctrl+v":                      false,
+		"y/n/a/d":                     false,
+		"enter (viewport, tool call)": false,
+	}
+	for _, s := range data.Shortcuts {
+		switch s.Keys {
+		case "enter (input)", "alt+enter", "esc", "ctrl+c", "ctrl+y", "tab", "shift+tab", "ctrl+g", "ctrl+s", "ctrl+v", "y/n/a/d", "enter (viewport, tool call)":
+			want[s.Keys] = true
+		}
+	}
+	for k, found := range want {
+		if !found {
+			t.Errorf("expected help data to contain shortcut %q", k)
+		}
+	}
+}
+
+func TestHelpData_ContextSensitive(t *testing.T) {
+	t.Parallel()
+
+	session := &api.Session{ID: "test", Path: "/tmp"}
+
+	t.Run("approval waiting", func(t *testing.T) {
+		t.Parallel()
+		cfg := config.DefaultConfig()
+		cfg.Keybindings.ApproveYes = "f1"
+		cfg.Keybindings.ApproveNo = "f2"
+		cfg.Keybindings.ApproveAlways = "f3"
+		cfg.Keybindings.ApproveDiff = "f4"
+		m, _ := New(cfg, session, context.Background(), "")
+		m.state = api.TurnWaitingApproval
+
+		data := m.helpData()
+		found := false
+		for _, s := range data.Shortcuts {
+			if s.Keys == "f1/f2/f3/f4" && s.Description == "Approve yes/no/always/diff" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected approval shortcut, got %+v", data.Shortcuts)
+		}
+	})
+
+	t.Run("plan pending", func(t *testing.T) {
+		t.Parallel()
+		cfg := config.DefaultConfig()
+		m, _ := New(cfg, session, context.Background(), "")
+		m.planPending = true
+
+		data := m.helpData()
+		found := false
+		for _, s := range data.Shortcuts {
+			if s.Keys == "enter/y" && s.Description == "Approve plan" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected plan approve shortcut, got %+v", data.Shortcuts)
+		}
+	})
+
+	t.Run("steer open", func(t *testing.T) {
+		t.Parallel()
+		cfg := config.DefaultConfig()
+		cfg.Keybindings.Send = "f5"
+		m, _ := New(cfg, session, context.Background(), "")
+		m.steerOpen = true
+
+		data := m.helpData()
+		found := false
+		for _, s := range data.Shortcuts {
+			if s.Keys == "f5" && s.Description == "Send steering instruction" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected steer send shortcut, got %+v", data.Shortcuts)
+		}
+	})
+}
+
+func TestHelpKey_TogglesHelpWhenInputEmpty(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	if m.input.Value() != "" {
+		t.Fatal("expected empty input at start")
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	model := updated.(*Model)
+	if !model.showHelp {
+		t.Fatal("expected help overlay to open on ? with empty input")
+	}
+}
+
+func TestHelpKey_DoesNotToggleWhenInputNotEmpty(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+	m.input.SetValue("hello")
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	model := updated.(*Model)
+	if model.showHelp {
+		t.Error("expected help overlay to stay closed when input is not empty")
+	}
+	if !strings.Contains(model.input.Value(), "?") {
+		t.Errorf("expected ? to be typed into input, got %q", model.input.Value())
+	}
+}
+
 func TestPlanPanel_ScrollAndEnterEsc(t *testing.T) {
 	t.Parallel()
 

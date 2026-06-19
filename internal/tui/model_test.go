@@ -2609,8 +2609,20 @@ func TestHelpCommand_OpensOverlay(t *testing.T) {
 	if !strings.Contains(view, "Keyboard shortcuts") {
 		t.Errorf("view should contain help title, got %q", view)
 	}
-	if !strings.Contains(view, "/help") {
-		t.Errorf("view should contain /help command, got %q", view)
+	if !strings.Contains(view, "enter (input)") {
+		t.Errorf("view should contain configured send binding, got %q", view)
+	}
+
+	data := model2.helpData()
+	found := false
+	for _, c := range data.Commands {
+		if c.Name == "/help" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("help data should contain /help command")
 	}
 }
 

@@ -101,10 +101,12 @@ func (m *Model) Offset() int {
 }
 
 func (m *Model) visibleLines() int {
-	if m.height < 6 {
-		return 1
+	innerH := m.height - 4
+	if innerH < 5 {
+		innerH = 5
 	}
-	return m.height - 6
+	// Reserve one line for each possible scroll indicator.
+	return innerH - 2
 }
 
 func (m *Model) contentLines() int {
@@ -135,7 +137,8 @@ func (m *Model) View() tea.View {
 	}
 	content := m.renderContent()
 	lines := strings.Split(content, "\n")
-	end := m.offset + innerH
+	visibleCount := m.visibleLines()
+	end := m.offset + visibleCount
 	if end > len(lines) {
 		end = len(lines)
 	}

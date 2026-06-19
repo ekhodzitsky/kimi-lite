@@ -342,20 +342,68 @@ func (m *Model) SetApprovalMode(mode int) {
 	m.approvalMode = mode
 }
 
+func defaultIfEmpty(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
 func (m *Model) helpData() help.Data {
+	kb := m.config.Keybindings
+
+	send := defaultIfEmpty(kb.Send, "enter")
+	newline := defaultIfEmpty(kb.Newline, "alt+enter")
+	cancel := defaultIfEmpty(kb.Cancel, "esc")
+	quit := defaultIfEmpty(kb.Quit, "ctrl+c")
+	yolo := defaultIfEmpty(kb.Yolo, "ctrl+y")
+	focusNext := defaultIfEmpty(kb.FocusNext, "tab")
+	focusPrev := defaultIfEmpty(kb.FocusPrev, "shift+tab")
+	approveYes := defaultIfEmpty(kb.ApproveYes, "y")
+	approveNo := defaultIfEmpty(kb.ApproveNo, "n")
+	approveAlways := defaultIfEmpty(kb.ApproveAlways, "a")
+	approveDiff := defaultIfEmpty(kb.ApproveDiff, "d")
+	externalEditor := defaultIfEmpty(kb.ExternalEditor, "ctrl+g")
+	steer := defaultIfEmpty(kb.Steer, "ctrl+s")
+	paste := defaultIfEmpty(kb.Paste, "ctrl+v")
+
+	shortcuts := []help.Shortcut{
+		{Keys: send + " (input)", Description: "Send message"},
+		{Keys: newline, Description: "Insert newline"},
+		{Keys: focusNext, Description: "Switch focus"},
+		{Keys: focusPrev, Description: "Toggle plan mode"},
+		{Keys: externalEditor, Description: "External editor"},
+		{Keys: yolo, Description: "Toggle yolo mode"},
+		{Keys: steer, Description: "Steer response while streaming"},
+		{Keys: paste, Description: "Paste image or file"},
+		{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
+		{Keys: send + " (viewport, tool call)", Description: "Expand/collapse tool call"},
+		{Keys: cancel, Description: "Cancel / clear draft"},
+		{Keys: quit, Description: "Quit"},
+		{Keys: "?", Description: "Toggle this help"},
+	}
+
+	if m.state == api.TurnWaitingApproval {
+		shortcuts = append(shortcuts, help.Shortcut{
+			Keys:        approveYes + "/" + approveNo + "/" + approveAlways + "/" + approveDiff,
+			Description: "Approve yes/no/always/diff",
+		})
+	}
+	if m.planPending {
+		shortcuts = append(shortcuts,
+			help.Shortcut{Keys: send + "/y", Description: "Approve plan"},
+			help.Shortcut{Keys: cancel + "/n", Description: "Reject plan"},
+		)
+	}
+	if m.steerOpen {
+		shortcuts = append(shortcuts, help.Shortcut{
+			Keys:        send,
+			Description: "Send steering instruction",
+		})
+	}
+
 	return help.Data{
-		Shortcuts: []help.Shortcut{
-			{Keys: "enter", Description: "Send message"},
-			{Keys: "alt+enter/shift+enter/ctrl+j", Description: "Insert newline"},
-			{Keys: "tab", Description: "Switch focus"},
-			{Keys: "shift+tab", Description: "Toggle plan mode"},
-			{Keys: "ctrl+g", Description: "External editor"},
-			{Keys: "ctrl+y", Description: "Toggle yolo mode"},
-			{Keys: "ctrl+s", Description: "Steer response while streaming"},
-			{Keys: "ctrl+v/alt+v", Description: "Paste image or file"},
-			{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
-			{Keys: "enter", Description: "Expand/collapse tool call"},
-		},
+		Shortcuts: shortcuts,
 		Commands: []help.SlashCommand{
 			{Name: "/compact", Description: "Summarize older messages"},
 			{Name: "/clear", Description: "Clear transcript"},

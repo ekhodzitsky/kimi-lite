@@ -181,6 +181,12 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 			m.mu.Unlock()
 			m.approvalModeSetter(mode)
 		}
+	case "?":
+		if m.input.Value() == "" {
+			m.showHelp = true
+			m.helpPanel.SetSize(m.width-4, m.height-4)
+			m.helpPanel.SetData(m.helpData())
+		}
 	}
 
 	if steerKey(msg, m.config.Keybindings.Steer) {

@@ -1,6 +1,7 @@
 package help
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -73,5 +74,48 @@ func TestCloseKeys(t *testing.T) {
 	}
 	if CloseKeys("x") {
 		t.Error("CloseKeys(\"x\") = true, want false")
+	}
+}
+
+func TestVisibleLines_ReservesIndicatorSpace(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(60, 20) // innerH = 16
+	if got := m.visibleLines(); got != 14 {
+		t.Errorf("visibleLines = %d, want 14", got)
+	}
+
+	m.SetSize(60, 6) // innerH clamped to 5
+	if got := m.visibleLines(); got != 3 {
+		t.Errorf("visibleLines = %d, want 3", got)
+	}
+}
+
+func TestHelpView_IndicatorsDoNotOverflowFrame(t *testing.T) {
+	t.Parallel()
+
+	st := styles.New("dark")
+	m := New(st)
+	m.SetSize(40, 12) // innerH = 8, visibleLines = 6
+
+	var shortcuts []Shortcut
+	for i := 0; i < 20; i++ {
+		shortcuts = append(shortcuts, Shortcut{Keys: fmt.Sprintf("k%d", i), Description: "desc"})
+	}
+	m.SetData(Data{Shortcuts: shortcuts})
+	m.offset = 5
+
+	view := m.View().Content
+	lines := strings.Split(view, "\n")
+	if len(lines) != m.height {
+		t.Errorf("rendered height = %d, want %d", len(lines), m.height)
+	}
+	if !strings.Contains(view, "▲ more") {
+		t.Error("expected top scroll indicator")
+	}
+	if !strings.Contains(view, "▼ more") {
+		t.Error("expected bottom scroll indicator")
 	}
 }
