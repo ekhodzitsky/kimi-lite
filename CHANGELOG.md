@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-19
+
 ### Added
 
 - Registered `kimi-k2.7-code` and `kimi-for-coding` in the LLM model registry
@@ -328,7 +330,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Observability** — `--debug` flag, sanitized error logging, structured `slog` output.
 - **Cross-platform** — static binary with `CGO_ENABLED=0`, supports macOS, Linux (glibc & musl), ARM64.
 
-[Unreleased]: https://github.com/ekhodzitsky/kimi-lite/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/ekhodzitsky/kimi-lite/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.5.0
 [0.3.0]: https://github.com/ekhodzitsky/kimi-lite/releases/tag/v0.3.0
