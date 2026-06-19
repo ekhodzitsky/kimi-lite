@@ -9,7 +9,9 @@ A single-terminal AI assistant with no Node, Python runtime, or Electron depende
 
 ## Features
 
-- **Streaming TUI chat** — native Bubble Tea interface with multi-line input, history, `@`-mention file completion, and a two-line footer showing model, git, and context status.
+- **Streaming TUI chat** — native Bubble Tea interface with multi-line input, history, `@`-mention file completion, slash commands, message queueing during streaming, and a two-line footer showing model, git, context, and clock.
+- **Transcript search** — `Ctrl+F` to search the conversation history with inline match highlighting and navigation.
+- **Quick shell overlay** — `Ctrl+X` to run ad-hoc shell commands without leaving the chat.
 - **Built-in tools** — `read_file`, `write_file`, `str_replace_file`, `edit`, `glob`, `grep`, `shell`, `fetch_url`, `list_directory`, `web_search`, `read_video`, `dispatch_subagent`, and `TodoList` with sandboxed file access.
 - **Subagents** — delegate focused work to `coder`, `explore`, and `plan` subagents via `dispatch_subagent`.
 - **Lifecycle hooks** — run local commands at `session_start`, `turn_start`, `turn_end`, `tool_call`, `tool_result`, `approval_request`, and `approval_decision`.
@@ -19,7 +21,7 @@ A single-terminal AI assistant with no Node, Python runtime, or Electron depende
 - **Observability** — `--pprof` runtime profiling and internal metrics collection.
 - **MCP support** — connect to Model Context Protocol servers via stdio, HTTP, or legacy SSE.
 - **All-sessions picker** — `/sessions` lists and resumes sessions across all directories, with search and pagination.
-- **Multi-modal messages** — image content parts are persisted and forwarded to vision-capable models.
+- **Multi-modal messages** — image content parts are persisted, forwarded to vision-capable models, and rendered inline in terminals that support iTerm2, Kitty, or Sixel graphics protocols.
 - **Language-aware UI** — transient status messages before long-running tools match the user's language; reasoning is instructed to stay in the same language.
 - **Workspace prompt** — the system prompt includes a compact workspace tree with hidden directories collapsed.
 
@@ -108,7 +110,30 @@ Inside the chat:
 |---------|-------------|
 | `/compact` | Summarize conversation history |
 | `/clear` | Clear current conversation |
-| `/sessions` | List available sessions |
+| `/sessions` or `/resume` | List and resume sessions |
+| `/title <name>` | Rename the current session |
+| `/fork [name]` | Fork the current session |
+| `/checkpoint` | Commit the current workspace changes |
+| `/diff [args]` | Show git diff |
+| `/mcp` | List connected MCP tools |
+| `/export [path]` | Export the current session to JSON |
+| `/import <path>` | Import a session JSON snapshot |
+| `/model <name>` | Switch the active model |
+| `/goal <text>` | Set a short-term goal for the session |
+| `/btw <text>` | Queue a note for the next message |
+| `/version` | Show the build version |
+| `/help` | Show keybindings and commands |
+
+Keyboard shortcuts:
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+F` | Search transcript |
+| `Ctrl+X` | Quick shell overlay |
+| `Ctrl+S` | Steer a streaming response |
+| `Shift+Tab` | Toggle plan mode |
+| `Tab` | Switch focus between input and viewport |
+| `?` | Toggle help overlay |
 
 The agent can also dispatch focused subagents (`coder`, `explore`, `plan`) via the `dispatch_subagent` tool for parallel, isolated work, and run local lifecycle hooks at key events such as tool calls and approvals. Context compression (`/compact`) uses a language-aware token estimator to keep long conversations within the model's context window.
 
