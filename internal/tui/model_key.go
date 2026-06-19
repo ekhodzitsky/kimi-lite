@@ -16,7 +16,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 
 	// Help overlay takes precedence while it is open.
 	if m.showHelp {
-		if help.CloseKeys(msg.String()) {
+		if help.CloseKeys(msg.String()) || msg.String() == "?" {
 			m.showHelp = false
 			return nil
 		}
@@ -47,12 +47,14 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 		return cmds
 	}
 
+	kb := m.effectiveKeybindings()
+
 	// Plan approval panel takes precedence while it is open.
 	if m.planPending {
 		switch msg.String() {
-		case "enter", "y":
+		case kb.Send, "y":
 			return append(cmds, func() tea.Msg { return PlanApprovalMsg{Approved: true} })
-		case "esc", "n":
+		case kb.Cancel, "n":
 			return append(cmds, func() tea.Msg { return PlanApprovalMsg{Approved: false} })
 		case "up":
 			m.planScrollOffset--
@@ -92,22 +94,22 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 				}
 			}
 			return cmds
-		case "4", m.config.Keybindings.ApproveDiff:
+		case "4", kb.ApproveDiff:
 			if resp, ok := m.approvalApproveCurrent(api.ApprovalDiff); ok {
 				cmds = append(cmds, func() tea.Msg { return resp })
 			}
 			return cmds
-		case m.config.Keybindings.ApproveYes:
+		case kb.ApproveYes:
 			if resp, ok := m.approvalApproveCurrent(api.ApprovalYes); ok {
 				cmds = append(cmds, func() tea.Msg { return resp })
 			}
 			return cmds
-		case m.config.Keybindings.ApproveNo:
+		case kb.ApproveNo:
 			if resp, ok := m.approvalApproveCurrent(api.ApprovalNo); ok {
 				cmds = append(cmds, func() tea.Msg { return resp })
 			}
 			return cmds
-		case m.config.Keybindings.ApproveAlways:
+		case kb.ApproveAlways:
 			if allowAlways {
 				if resp, ok := m.approvalApproveCurrent(api.ApprovalAlways); ok {
 					cmds = append(cmds, func() tea.Msg { return resp })
@@ -137,9 +139,9 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	}
 
 	switch msg.String() {
-	case m.config.Keybindings.Quit:
+	case kb.Quit:
 		cmds = append(cmds, tea.Quit)
-	case m.config.Keybindings.Cancel:
+	case kb.Cancel:
 		// If the user has typed a draft, clear it first instead of cancelling
 		// the active stream. A second Cancel then stops the stream.
 		if m.input.Value() != "" {
@@ -161,15 +163,15 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 			m.mu.Unlock()
 			m.setState(api.TurnIdle)
 		}
-	case m.config.Keybindings.FocusNext:
+	case kb.FocusNext:
 		if cmd := m.cycleFocus(1); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-	case m.config.Keybindings.FocusPrev:
+	case kb.FocusPrev:
 		if cmd := m.cycleFocus(-1); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-	case m.config.Keybindings.Yolo:
+	case kb.Yolo:
 		if m.approvalModeSetter != nil {
 			m.mu.Lock()
 			if m.approvalMode == approvalModeAuto {
@@ -189,7 +191,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 		}
 	}
 
-	if steerKey(msg, m.config.Keybindings.Steer) {
+	if steerKey(msg, kb.Steer) {
 		if m.state == api.TurnStreaming || m.state == api.TurnThinking {
 			m.steerOpen = true
 			m.steerInput = ""
@@ -200,24 +202,20 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
 	return cmds
 }
 
-// steerKey reports whether msg is the configured steering key. An empty config
-// value defaults to ctrl+s for backward compatibility.
+// steerKey reports whether msg matches the configured steering key.
 func steerKey(msg tea.KeyPressMsg, configured string) bool {
-	key := configured
-	if key == "" {
-		key = "ctrl+s"
-	}
-	return msg.String() == key
+	return msg.String() == configured
 }
 
 func (m *Model) handleSteerKeyMsg(msg tea.KeyPressMsg) []tea.Cmd {
+	kb := m.effectiveKeybindings()
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.steerOpen = false
 		m.steerInput = ""
 		m.steerCursor = 0
 		return nil
-	case "enter":
+	case kb.Send:
 		content := strings.TrimSpace(m.steerInput)
 		if content == "" {
 			return nil

@@ -20,7 +20,7 @@ func TestHelpData_UsesConfiguredKeybindings(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Keybindings.Send = "ctrl+enter"
 	cfg.Keybindings.Newline = "enter"
-	cfg.Keybindings.Cancel = "ctrl+[" // missing config field? no, it's there
+	cfg.Keybindings.Cancel = "ctrl+["
 	cfg.Keybindings.Quit = "ctrl+q"
 	cfg.Keybindings.Yolo = "ctrl+o"
 	cfg.Keybindings.FocusNext = "ctrl+n"
@@ -219,6 +219,115 @@ func TestHelpKey_DoesNotToggleWhenInputNotEmpty(t *testing.T) {
 	}
 	if !strings.Contains(model.input.Value(), "?") {
 		t.Errorf("expected ? to be typed into input, got %q", model.input.Value())
+	}
+}
+
+func TestHelpKey_TogglesHelpOffWhenOpen(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+
+	updated, _ := m.Update(ShowHelpMsg{})
+	model := updated.(*Model)
+	if !model.showHelp {
+		t.Fatal("expected help overlay to be open")
+	}
+
+	updated, _ = model.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	model = updated.(*Model)
+	if model.showHelp {
+		t.Fatal("expected help overlay to close on ? when already open")
+	}
+}
+
+func TestPlanApproval_RespectsConfiguredSendCancel(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Keybindings.Send = "f5"
+	cfg.Keybindings.Cancel = "f6"
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+	m.planPending = true
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyF5, Text: "f5"})
+	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for configured Send key")
+	}
+	if msg, ok := cmd().(PlanApprovalMsg); !ok || !msg.Approved {
+		t.Fatalf("expected approved PlanApprovalMsg, got %T %v", cmd(), msg)
+	}
+
+	m = model
+	m.planPending = true
+	updated, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyF6, Text: "f6"})
+	model = updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for configured Cancel key")
+	}
+	if msg, ok := cmd().(PlanApprovalMsg); !ok || msg.Approved {
+		t.Fatalf("expected rejected PlanApprovalMsg, got %T %v", cmd(), msg)
+	}
+}
+
+func TestSteerSend_RespectsConfiguredSend(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Keybindings.Send = "f5"
+	session := &api.Session{ID: "test", Path: "/tmp"}
+	m, _ := New(cfg, session, context.Background(), "")
+	m.width = 80
+	m.height = 24
+	m.updateLayout()
+	m.setState(api.TurnStreaming)
+	m.steerOpen = true
+	m.steerInput = "keep it short"
+	m.steerCursor = len([]rune(m.steerInput))
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyF5, Text: "f5"})
+	model := updated.(*Model)
+	if cmd == nil {
+		t.Fatal("expected command for configured Send key")
+	}
+	msg := cmd()
+	if steer, ok := msg.(SteerMsg); !ok || steer.Content != "keep it short" {
+		t.Fatalf("expected SteerMsg, got %T %v", msg, msg)
+	}
+	if model.steerOpen {
+		t.Error("expected steer overlay to close after sending")
+	}
+
+	// With a custom Send binding, the default enter should be treated as text,
+	// not as the send action.
+	m2, _ := New(cfg, session, context.Background(), "")
+	m2.width = 80
+	m2.height = 24
+	m2.updateLayout()
+	m2.setState(api.TurnStreaming)
+	m2.steerOpen = true
+	m2.steerInput = "do not send"
+	m2.steerCursor = len([]rune(m2.steerInput))
+
+	updated, cmd = m2.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Text: "enter"})
+	model2 := updated.(*Model)
+	if cmd != nil {
+		t.Fatalf("expected no command for default enter with custom Send, got %T", cmd())
+	}
+	if !model2.steerOpen {
+		t.Error("expected steer overlay to stay open")
+	}
+	if !strings.Contains(model2.steerInput, "enter") {
+		t.Errorf("expected enter to be appended as text, got %q", model2.steerInput)
 	}
 }
 

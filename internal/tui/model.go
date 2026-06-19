@@ -349,55 +349,79 @@ func defaultIfEmpty(s, fallback string) string {
 	return s
 }
 
-func (m *Model) helpData() help.Data {
-	kb := m.config.Keybindings
+// effectiveKeybindings returns the configured keybindings with empty values
+// replaced by their defaults so handlers and help stay consistent.
+type effectiveKeybindings struct {
+	Send           string
+	Newline        string
+	Cancel         string
+	Quit           string
+	Yolo           string
+	FocusNext      string
+	FocusPrev      string
+	ApproveYes     string
+	ApproveNo      string
+	ApproveAlways  string
+	ApproveDiff    string
+	ExternalEditor string
+	Steer          string
+	Paste          string
+}
 
-	send := defaultIfEmpty(kb.Send, "enter")
-	newline := defaultIfEmpty(kb.Newline, "alt+enter")
-	cancel := defaultIfEmpty(kb.Cancel, "esc")
-	quit := defaultIfEmpty(kb.Quit, "ctrl+c")
-	yolo := defaultIfEmpty(kb.Yolo, "ctrl+y")
-	focusNext := defaultIfEmpty(kb.FocusNext, "tab")
-	focusPrev := defaultIfEmpty(kb.FocusPrev, "shift+tab")
-	approveYes := defaultIfEmpty(kb.ApproveYes, "y")
-	approveNo := defaultIfEmpty(kb.ApproveNo, "n")
-	approveAlways := defaultIfEmpty(kb.ApproveAlways, "a")
-	approveDiff := defaultIfEmpty(kb.ApproveDiff, "d")
-	externalEditor := defaultIfEmpty(kb.ExternalEditor, "ctrl+g")
-	steer := defaultIfEmpty(kb.Steer, "ctrl+s")
-	paste := defaultIfEmpty(kb.Paste, "ctrl+v")
+func (m *Model) effectiveKeybindings() effectiveKeybindings {
+	kb := m.config.Keybindings
+	return effectiveKeybindings{
+		Send:           defaultIfEmpty(kb.Send, "enter"),
+		Newline:        defaultIfEmpty(kb.Newline, "alt+enter"),
+		Cancel:         defaultIfEmpty(kb.Cancel, "esc"),
+		Quit:           defaultIfEmpty(kb.Quit, "ctrl+c"),
+		Yolo:           defaultIfEmpty(kb.Yolo, "ctrl+y"),
+		FocusNext:      defaultIfEmpty(kb.FocusNext, "tab"),
+		FocusPrev:      defaultIfEmpty(kb.FocusPrev, "shift+tab"),
+		ApproveYes:     defaultIfEmpty(kb.ApproveYes, "y"),
+		ApproveNo:      defaultIfEmpty(kb.ApproveNo, "n"),
+		ApproveAlways:  defaultIfEmpty(kb.ApproveAlways, "a"),
+		ApproveDiff:    defaultIfEmpty(kb.ApproveDiff, "d"),
+		ExternalEditor: defaultIfEmpty(kb.ExternalEditor, "ctrl+g"),
+		Steer:          defaultIfEmpty(kb.Steer, "ctrl+s"),
+		Paste:          defaultIfEmpty(kb.Paste, "ctrl+v"),
+	}
+}
+
+func (m *Model) helpData() help.Data {
+	kb := m.effectiveKeybindings()
 
 	shortcuts := []help.Shortcut{
-		{Keys: send + " (input)", Description: "Send message"},
-		{Keys: newline, Description: "Insert newline"},
-		{Keys: focusNext, Description: "Switch focus"},
-		{Keys: focusPrev, Description: "Toggle plan mode"},
-		{Keys: externalEditor, Description: "External editor"},
-		{Keys: yolo, Description: "Toggle yolo mode"},
-		{Keys: steer, Description: "Steer response while streaming"},
-		{Keys: paste, Description: "Paste image or file"},
+		{Keys: kb.Send + " (input)", Description: "Send message"},
+		{Keys: kb.Newline, Description: "Insert newline"},
+		{Keys: kb.FocusNext, Description: "Switch focus"},
+		{Keys: kb.FocusPrev, Description: "Toggle plan mode"},
+		{Keys: kb.ExternalEditor, Description: "External editor"},
+		{Keys: kb.Yolo, Description: "Toggle yolo mode"},
+		{Keys: kb.Steer, Description: "Steer response while streaming"},
+		{Keys: kb.Paste, Description: "Paste image or file"},
 		{Keys: "r", Description: "Toggle raw markdown (viewport focus)"},
-		{Keys: send + " (viewport, tool call)", Description: "Expand/collapse tool call"},
-		{Keys: cancel, Description: "Cancel / clear draft"},
-		{Keys: quit, Description: "Quit"},
+		{Keys: kb.Send + " (viewport, tool call)", Description: "Expand/collapse tool call"},
+		{Keys: kb.Cancel, Description: "Cancel / clear draft"},
+		{Keys: kb.Quit, Description: "Quit"},
 		{Keys: "?", Description: "Toggle this help"},
 	}
 
 	if m.state == api.TurnWaitingApproval {
 		shortcuts = append(shortcuts, help.Shortcut{
-			Keys:        approveYes + "/" + approveNo + "/" + approveAlways + "/" + approveDiff,
+			Keys:        kb.ApproveYes + "/" + kb.ApproveNo + "/" + kb.ApproveAlways + "/" + kb.ApproveDiff,
 			Description: "Approve yes/no/always/diff",
 		})
 	}
 	if m.planPending {
 		shortcuts = append(shortcuts,
-			help.Shortcut{Keys: send + "/y", Description: "Approve plan"},
-			help.Shortcut{Keys: cancel + "/n", Description: "Reject plan"},
+			help.Shortcut{Keys: kb.Send + "/y", Description: "Approve plan"},
+			help.Shortcut{Keys: kb.Cancel + "/n", Description: "Reject plan"},
 		)
 	}
 	if m.steerOpen {
 		shortcuts = append(shortcuts, help.Shortcut{
-			Keys:        send,
+			Keys:        kb.Send,
 			Description: "Send steering instruction",
 		})
 	}
